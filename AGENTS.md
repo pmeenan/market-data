@@ -1,7 +1,8 @@
 # market-data — a local market-data warehouse and strategy-testing toolkit
 
 A personal research tool: it builds a local dataset of US stock/ETF bars from
-Tiingo (EOD daily plus hourly intraday), keeps it current, and supports testing
+Tiingo (EOD daily plus hourly and 5-minute intraday), keeps it current, and
+supports testing
 trading hypotheses against it — starting with a morning gap-down
 over-reaction/recovery study. It runs on the owner's Linux server. Almost all
 code is written by AI agents working from the project documentation, directed
@@ -23,9 +24,11 @@ affected docs. Until then, these govern.
   realtime tool — the Parquet archive stays canonical. (D-003)
 - **Tiingo is the sole market-data source.** The API token lives in `.env`
   (gitignored) and must never be committed or logged. (D-002)
-- **Universes are point-in-time.** Ticker membership is stored per year, ranked
-  by dollar volume; backtests must use the membership for the year being
-  simulated, never the latest list (survivorship bias). (D-004)
+- **Universes seed the dataset; strategies select from the data.** Per-year
+  dollar-volume universes choose what gets ingested (and remain stored as the
+  historical record), but backtests select tickers from stored price/volume
+  directly — survivorship-bias protection comes from backfilling all tickers
+  including delisted ones, not from membership joins. (D-004, D-010, D-011)
 - **Research only; US stocks + ETFs only.** No order execution or broker
   connectivity, ever; no options/futures/crypto. (D-007, D-008)
 - **Ingestion is idempotent, resumable, and vintage-consistent.** Coverage is
@@ -95,7 +98,9 @@ build → commit loop, on-demand reviews, and the human commit gate.
 
 Milestone **M0 (plan the plan)** — the data-warehouse substrate (ingestion,
 storage, CLI) was scaffolded before this workflow was adopted and works, with
-tests. The feature matrix, architecture, and milestone ladder are being settled
-through planning conversations; the backtest layer does not exist yet. See
-[docs/plan.md](docs/plan.md). Keep this paragraph short and current when
-plan.md milestone status changes (rule 4).
+tests. Feature triage is done (2026-08-26): scope, backfill phasing (D-011),
+and the universe reframing (D-010) are settled; the intraday, engine, and
+instrument-identity (OQ-8 — gates all historical backfills) spikes,
+architecture draft, and real milestone ladder remain. The backtest layer
+does not exist yet. See [docs/plan.md](docs/plan.md). Keep this
+paragraph short and current when plan.md milestone status changes (rule 4).

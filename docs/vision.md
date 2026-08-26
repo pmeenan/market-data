@@ -25,8 +25,9 @@ properly.
 ## Success criteria
 
 - The morning gap-recovery hypothesis can be tested end-to-end — data → signal
-  → summary statistics — from a single reproducible script, using point-in-time
-  universe membership for each simulated year.
+  → summary statistics — from a single reproducible script, selecting tickers
+  from the stored data itself, with survivorship bias avoided by the dataset
+  including delisted tickers (D-010, D-011).
 - For any seeded year, the universe and its full EOD history can be queried in
   interactive time (seconds, not minutes) on the Linux server.
 - A nightly cron `market-data update` keeps EOD data current to the most recent

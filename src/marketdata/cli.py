@@ -275,10 +275,9 @@ def update(config, tickers, tickers_file, universe_year, all_universes, summary_
     adjustments; a newly observed split/dividend triggers a full-history
     refresh for that ticker. With no ticker options, updates the MAX(year)
     universe (delisted historical members don't burn requests nightly);
-    pass --all-universes for every ticker ever in any universe. NOTE: the
-    MAX(year) default is provisional until universe effective dates are
-    settled (OQ-5, D-009) — for cron, passing --universe YEAR explicitly is
-    the unambiguous choice.
+    pass --all-universes for every ticker ever in any universe. The
+    MAX(year) default is a pragmatic ingestion scope (D-010) until ongoing
+    all-ticker collection (D-011) supersedes universe-scoped updates.
     """
     client = _client(config)
     config.ensure_dirs()

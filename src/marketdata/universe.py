@@ -7,8 +7,9 @@ The intended workflow, per year:
   3. Rank candidates by average daily dollar volume computed from the
      stored bars, and keep the top N as that year's universe.
 
-Because each year's universe is stored separately, backtests can use the
-universe as it stood at the time, avoiding survivorship bias.
+Each year's universe is stored separately as the record of how the dataset
+was seeded. Universes scope ingestion, not backtests — research code selects
+tickers from the stored bars directly (D-010).
 """
 
 from __future__ import annotations

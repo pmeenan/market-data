@@ -26,8 +26,11 @@
 - **Source (D-002):** Tiingo only. EOD comes from the daily endpoint (with
   split/dividend-adjusted columns); intraday from the IEX endpoint
   (unadjusted, bounded history). Token in `.env`.
-- **Universes (D-004):** per-year membership ranked by dollar volume; the
-  research layer must consume membership point-in-time.
+- **Universes (D-004, D-010):** per-year membership ranked by dollar volume,
+  kept as the record of how the dataset was seeded and as an ingestion
+  scope. The research layer selects tickers from the stored data directly —
+  survivorship-bias protection comes from backfilling all tickers including
+  delisted ones (D-011), not from membership joins.
 - **Interface (D-005):** `market-data` CLI for operations; `marketdata` Python
   library for research. Any web UI or realtime layer sits on top of the same
   library and archive.
@@ -38,8 +41,9 @@ Where a bullet below leans on a `proposed` features.md row, it is a design
 assumption to confirm during feature triage, not settled scope.
 
 - A **research layer** (engine per OQ-1) that loads bars through `query.py`,
-  applies point-in-time universes, and produces per-run artifacts — likely a
-  `backtest/` module with strategies as small Python classes/functions.
+  selects tickers and screens from the stored data (D-010), and produces
+  per-run artifacts — likely a `backtest/` module with strategies as small
+  Python classes/functions.
 - **Results persistence** (OQ-6): probably run manifests + metric tables under
   `data/results/`, queryable through the same DuckDB surface.
 - **Hourly bars** land in the existing intraday store as `freq="1hour"`
@@ -53,6 +57,8 @@ assumption to confirm during feature triage, not settled scope.
 
 ## Open architecture questions
 
-The numbered open questions live in [features.md](features.md) (OQ-1..OQ-7).
-The architecture-blocking ones are OQ-1 (engine), OQ-2/OQ-3 (intraday depth
-and semantics), OQ-5 (universe timing), and OQ-6 (results storage).
+The numbered open questions live in [features.md](features.md) (OQ-1..OQ-8).
+The architecture-blocking ones still open are OQ-1 (engine), OQ-2/OQ-3
+(intraday depth and semantics), and OQ-8 (instrument identity for reused
+ticker symbols — gates all D-011 historical backfill phases). OQ-5 was dissolved and OQ-6 answered
+at the 2026-08-26 triage (results: SQLite metadata + Parquet outputs).

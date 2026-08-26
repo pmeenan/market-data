@@ -25,7 +25,102 @@ Decision / Context / Consequences / Reopen if
 
 ---
 
-## D-009: EOD coverage and refresh policy  (2026-08-26, status: accepted)
+## D-011: Backfill scope, priority, and API budget  (2026-08-26, status: accepted)
+
+**Decision:** The dataset is built in phases, bounded by the owner's Tiingo
+Power-tier budget:
+
+1. **Phase 1 — seed tickers, EOD + 1-hour** (the 5,403 distinct tickers in
+   the 2011–2026 seed CSV): EOD daily back 20 years, plus 1-hour intraday
+   back up to 10 years (the IEX feed likely caps out around 9; the OQ-2
+   spike measures the real depth). Cheap: a few GB total.
+2. **Phase 2 — all tickers, EOD:** EOD daily back 20 years for *all*
+   Tiingo-supported US stocks/ETFs, including delisted ones.
+3. **Phase 3 — seed tickers, 5-minute:** intraday back up to 10 years.
+   5-minute is confirmed intraday scope alongside hourly, but its history
+   backfill runs **last** — EOD and 1-hour backfills complete before any
+   5-minute history is fetched, to keep the heavy transfer (the bulk of the
+   bandwidth budget) from crowding out everything else (owner's call,
+   2026-08-26).
+4. **Ongoing:** once the backfill is past, nightly collection extends to
+   5-minute (and hourly/EOD) data for all tickers, not just the seed list.
+   All-ticker 5-minute coverage is forward-only — no all-ticker 5-minute
+   *history* backfill is planned.
+
+**Every historical backfill phase (1–3) is gated on OQ-8 (instrument
+identity).** The warehouse keys everything by bare ticker, but symbols get
+reused across distinct securities (review, 2026-08-26: ~1,000 duplicated
+symbols in the filtered supported-tickers list, **282 of them in the seed
+CSV** covering 577 Tiingo records — e.g. ACOM, seeded for 2011 as the
+2009–2013 NASDAQ stock, is also a 2026 NYSE Arca ETF). A bare-ticker fetch
+could pull the wrong security or silently merge two, so the identity
+decision (features.md OQ-8) must land before *any* historical backfill
+starts — seed phases included. The OQ-8 spike may narrow this gate if
+endpoint measurements prove a specific dataset or frequency safe.
+
+Power-tier limits as published 2026-08-26 (tiingo.com/about/pricing): 10,000
+requests/hour, 100,000/day, **40 GB bandwidth/month**, ~110k unique
+symbols/month. Bandwidth is the binding constraint, so **bulk fetches use
+`format=csv`, not JSON** — CSV responses carry no repeated field names and
+run roughly half to a third the bytes per bar (owner's call, 2026-08-26; the
+client currently requests JSON and switches in M1). With CSV, 5-minute
+history for the seed list is estimated at ~40–75 GB of transfer, i.e.
+**1–2 months of budget**, and all-ticker EOD well under a month. Backfill
+runs through a budget-aware scheduler (confirmed feature, features.md):
+track requests and bytes against the hourly/daily/monthly caps, stop when a
+window is spent, resume in the next — never let a backfill run blow the
+month's bandwidth. Ongoing all-ticker nightly collection is comfortably
+inside the caps (~1–2 GB/month with CSV).
+
+**Context:** Backfill scope and priority stated by the owner at the M0 triage
+(2026-08-26); tier limits checked against Tiingo's current pricing page the
+same day. Resolves OQ-7.
+
+**Consequences:** Phase ordering is owner intent — don't reorder it to
+"optimize". The backfill completing is measured in months, not hours; M1
+planning must treat it as a long-running metered process with resumable
+state (which D-009's coverage intervals already provide). The Tiingo client
+must move from `format=json` to CSV parsing for bulk endpoints (M1, with
+tests updated to CSV fixtures). Bandwidth estimates are back-of-envelope;
+the OQ-2 spike and the scheduler measure actual bytes/ticker (CSV) early
+and re-project.
+
+**Reopen if:** Tiingo changes tier limits, the measured bytes/ticker differs
+wildly from the estimate, or the owner's study needs reprioritize which data
+arrives first.
+
+## D-010: Universes are dataset seed filters, not backtest membership  (2026-08-26, status: accepted, amends D-004)
+
+**Decision:** The per-year dollar-volume universes exist to choose which
+tickers the dataset ingests (preferring large, stable names for the initial
+backfill) — they are **not** a point-in-time membership constraint on
+backtests. Research code selects tickers from the stored price/volume data
+directly; if a strategy needs a liquidity screen, it computes one from the
+dataset, not from the universe table. Survivorship-bias protection comes
+from the data itself — phase 2 of D-011 backfills *all* tickers including
+delisted ones — rather than from membership joins. Per-year storage remains
+as the historical record of how the dataset was seeded.
+
+**Context:** Owner's clarification at the M0 triage (2026-08-26): "the
+dollar volume was only used for filtering an initial list of tickers to seed
+the dataset with… it isn't being used in the actual strategy itself."
+
+**Consequences:** OQ-5 (which year's membership governs which trading days)
+is dissolved — there is no membership semantics to settle. Universe
+provenance metadata (proposed in features.md) loses its purpose and is
+rejected. D-009's `update --universe` default stays a pragmatic ingestion
+scoping knob (its "provisional pending OQ-5" caveat is lifted) and becomes
+moot once ongoing all-ticker collection (D-011) lands. New universe years
+stop being needed once collection covers everything (resolves OQ-4). The
+survivorship-bias guarantee additionally depends on resolving reused ticker
+symbols (OQ-8) — distinct securities sharing a symbol must not merge; see
+D-011's backfill gate.
+
+**Reopen if:** A study reintroduces universe-membership-based selection —
+that would resurrect point-in-time semantics and the lookahead question,
+and needs its own decision.
+
+## D-009: EOD coverage and refresh policy  (2026-08-26, status: accepted, provisional-default caveat lifted by D-010)
 
 **Decision:** Ingestion state is a per-(ticker, dataset) coverage *interval*
 [first_date, last_date], not a single high watermark; backfills fill missing
@@ -48,12 +143,11 @@ written but stays refreshable until the day completes. `reconcile` rebuilds
 the coverage table by full atomic replacement, so entries for vanished files
 don't survive. Partial ingestion failures exit nonzero so cron notices.
 Nightly `update` defaults to the MAX(year) universe with `--all-universes`
-as the opt-out — but that default is **provisional**: if OQ-5 resolves to
-"year-Y rankings are effective in Y+1", then during year Y the MAX(year)
-universe is *future-effective*, and the default must become "latest
-*effective* universe" (or cron should pass `--universe YEAR` explicitly)
-once effective-date metadata exists. Do not treat the current default as
-settled.
+as the opt-out. *(2026-08-26 annotation: this default was originally marked
+provisional pending OQ-5. D-010 dissolved OQ-5 — universes are ingestion
+seed filters with no backtest-effective dates — so the MAX(year) default is
+settled as a pragmatic ingestion scope, and becomes moot when D-011's
+ongoing all-ticker collection supersedes universe-scoped updates.)*
 
 **Context:** Adopted from an external substrate review the owner forwarded
 (2026-08-26), which demonstrated that the original single-watermark model
@@ -135,21 +229,23 @@ need must be reachable through the library, keeping a later UI thin.
 **Reopen if:** Coverage browsing or results review becomes painful enough at
 the terminal that the proposed web UI gets promoted (features.md).
 
-## D-004: Annual point-in-time universes ranked by dollar volume  (2026-08-26, status: accepted)
+## D-004: Annual point-in-time universes ranked by dollar volume  (2026-08-26, status: accepted, backtest-membership role removed by D-010)
 
 **Decision:** The ticker universe is stored per year, ranked by a
 dollar-volume metric, seeded from the owner's CSV
 (`Year,Ticker,MedianDollarVolume`) and extendable via the built-in
 Tiingo-candidates + ranking flow. Backtests use the membership for the year
-being simulated.
+being simulated. *(2026-08-26: this last sentence is superseded by D-010 —
+universes seed ingestion; backtests select from stored data.)*
 
 **Context:** The owner's stated plan: seed the ticker list annually by dollar
 volume to strategically pick which stocks are in the dataset. Per-year storage
 was chosen so historical membership is preserved (survivorship-bias-aware).
 
-**Consequences:** The `universe` table is keyed (year, ticker); research code
-must join against it point-in-time rather than using the latest list. Which
-year's list governs which trading days is still open (OQ-5).
+**Consequences:** The `universe` table is keyed (year, ticker). *(2026-08-26:
+the original requirements here — research code joins membership
+point-in-time, and the open OQ-5 timing question — are superseded/dissolved
+by D-010; the table remains as the seeding record and an ingestion scope.)*
 
 **Reopen if:** Studies need finer-grained (e.g. quarterly) membership or a
 different selection metric.

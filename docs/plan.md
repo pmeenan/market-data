@@ -46,19 +46,34 @@ of it.
       backfill segment frames remain staged until any required full-refresh
       validation succeeds, so failed refreshes leave Parquet untouched
       (36 tests).
-- [ ] Feature triage: walk features.md with the owner; promote or reject every
-      `proposed` row; answer the open questions; record significant calls in
+- [x] Feature triage (2026-08-26): every `proposed` row resolved — promoted
+      data-quality checks, exchange calendar, corp-action awareness
+      (implementation deferred), budget-aware backfill scheduling, result
+      persistence, benchmark series, notebooks; rejected universe provenance
+      (D-010); web UI and realtime deliberately stay `proposed` until after
+      M2 (owner's call). OQ-4/5/6/7 answered (see features.md); OQ-1/2/3
+      remain for the spikes. Backfill scope/priority and the 5-minute
+      intraday addition recorded as D-011; universe reframing as D-010.
+- [ ] Spike — intraday depth & semantics (OQ-2, OQ-3): fetch 1-hour and
+      5-minute bars for a handful of representative tickers (large-cap,
+      mid-cap, ETF), measure how far back coverage goes at each frequency,
+      check bar alignment to the 9:30 open and IEX-volume caveats, and record
+      measured bytes/ticker with `format=csv` to calibrate D-011's bandwidth
+      projections.
+      Output: a short findings note + rough-edges entries for surprises.
+- [ ] Spike — instrument identity (OQ-8): confirm the reused-symbol counts in
+      Tiingo's supported-tickers list, check what identity Tiingo exposes for
+      them (permaTicker, listing date ranges), and decide the warehouse's
+      identity model (stable instrument id vs date-ranged symbol records).
+      Blocks every D-011 historical backfill phase — 282 seed symbols are
+      themselves reused — though the spike may narrow the gate if
+      measurements prove a dataset/frequency safe. Record the outcome in
       decisions.md.
-- [ ] Spike — intraday depth & semantics (OQ-2, OQ-3): fetch hourly bars for a
-      handful of representative tickers (large-cap, mid-cap, ETF), measure how
-      far back coverage goes, check bar alignment to the 9:30 open and
-      IEX-volume caveats. Output: a short findings note + rough-edges entries
-      for surprises.
 - [ ] Spike — backtest engine (OQ-1): prototype the gap-recovery study once
       with a hand-rolled polars/DuckDB loop and once with an existing library;
       compare effort and fit. Output: recommendation recorded in decisions.md.
-- [ ] Settle universe-membership semantics for backtests (OQ-5) and record the
-      decision.
+- [x] Settle universe-membership semantics for backtests (OQ-5): dissolved by
+      D-010 — universes are dataset seed filters, not backtest membership.
 - [ ] First full draft of architecture.md (research layer + results storage,
       OQ-6).
 - [ ] Toolchain hardening decisions: lint/format (e.g. ruff), CI or a local
@@ -72,7 +87,8 @@ of it.
 
 **Exit criteria:** the owner has walked features.md and says the plan is good
 enough to build from; the architecture-blocking open questions (OQ-1, OQ-2,
-OQ-5) are answered; toolchain decided; M1+ milestones have scopes. M0 is a
+OQ-8 — OQ-5 was dissolved at the triage) are answered; toolchain decided;
+M1+ milestones have scopes. M0 is a
 conversation, not a phase — it exits on the owner's call, not on a checklist
 reaching zero.
 
@@ -83,13 +99,16 @@ research path before breadth. Sketch only — do not start work from these
 entries, and note that they freely reference `proposed` features.md rows;
 nothing here pre-empts the M0 triage.
 
-- **M1 — Data substrate hardening.** Hourly intraday ingestion verified
-  end-to-end against real Tiingo data; seed CSV imported and full EOD backfill
-  run for the universes; nightly cron in place with visible failures; ruff +
-  license audit wired in.
+- **M1 — Data substrate hardening.** Intraday ingestion (1-hour + 5-minute)
+  verified end-to-end against real Tiingo data; Tiingo client switched to
+  `format=csv` for bulk fetches (D-011); budget-aware backfill
+  scheduler built and D-011's phases underway in order (seed EOD + 1-hour,
+  then all-ticker EOD, then seed 5-minute — a metered, months-long process
+  that continues in the background across later milestones); nightly cron in
+  place with visible failures; ruff + license audit wired in.
 - **M2 — First study end-to-end.** The gap-recovery study runs from stored
-  data to summary statistics with the chosen engine, using point-in-time
-  universes; results persisted (per OQ-6).
+  data to summary statistics with the chosen engine, selecting tickers from
+  the stored data itself (D-010); results persisted (per OQ-6).
 - **M3 — Research breadth.** Data-quality checks, coverage reports,
   benchmark-relative metrics, a second strategy to prove the engine
   generalizes.

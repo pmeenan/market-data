@@ -22,11 +22,13 @@ cp .env.example .env   # then add your TIINGO_API_TOKEN
 ## Workflow
 
 The universe is rebuilt annually, ranked by dollar volume, and stored
-per-year so backtests can use point-in-time membership (avoiding
-survivorship bias).
+per-year as the record of how the dataset was seeded. It scopes ingestion,
+not backtests: studies select tickers from the stored data directly, and
+survivorship-bias protection comes from backfilling all tickers including
+delisted ones (D-010, D-011).
 
 If you already have per-year ticker lists, drop them in `seeds/`
-(committed to git — they define the dataset) and import directly. A
+(committed to git — they seed the initial dataset) and import directly. A
 `Year` column imports every year in one pass, and ranks are derived from
 the dollar-volume column:
 
@@ -38,8 +40,8 @@ market-data universe import seeds/universe_by_dollar_volume.csv
 market-data universe list --year 2011
 
 # Then backfill: with no ticker options this covers every ticker that
-# appears in any year's universe
-market-data backfill eod --start 1995-01-01
+# appears in any year's universe (20-year scope per D-011)
+market-data backfill eod --start 2006-01-01
 ```
 
 Or bootstrap universes from scratch via Tiingo:
@@ -58,16 +60,15 @@ market-data backfill eod --tickers-file candidates.txt --start 2025-01-01 --end 
 market-data universe rank --year 2025 --top 1000
 market-data universe list
 
-# 5. Backfill full history for the universe
-market-data backfill eod --universe 2025 --start 1995-01-01
+# 5. Backfill history for the universe (20-year scope per D-011)
+market-data backfill eod --universe 2025 --start 2006-01-01
 
 # Optional: intraday bars (Tiingo IEX — recent years only, unadjusted)
 market-data backfill intraday --universe 2025 --start 2024-01-01
 
 # Keep current (cron this nightly after market close). Defaults to the
-# MAX(year) universe (provisional until OQ-5 settles effective dates — for
-# cron, --universe YEAR is unambiguous); --all-universes updates every
-# historical member too.
+# MAX(year) universe as a pragmatic ingestion scope (D-010);
+# --all-universes updates every historical member too.
 market-data update
 
 # Inspect

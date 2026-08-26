@@ -30,8 +30,8 @@ CREATE TABLE IF NOT EXISTS tickers (
 );
 
 -- One row per (year, ticker): the annually rebuilt universe, ranked by
--- a dollar-volume metric so lookback membership is point-in-time and
--- survivorship-bias-aware.
+-- a dollar-volume metric. Records how the dataset was seeded and scopes
+-- ingestion; backtests select from stored bars directly (D-010).
 CREATE TABLE IF NOT EXISTS universe (
     year               INTEGER NOT NULL,
     ticker             TEXT    NOT NULL,
