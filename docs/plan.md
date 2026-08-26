@@ -86,8 +86,13 @@ of it.
       [backtest-engine-spike.md](backtest-engine-spike.md).
 - [x] Settle universe-membership semantics for backtests (OQ-5): dissolved by
       D-010 — universes are dataset seed filters, not backtest membership.
-- [ ] First full draft of architecture.md (research layer + results storage,
-      OQ-6).
+- [x] First full draft of architecture.md (2026-08-26): component boundaries,
+      D-014 target storage/identity model, ingestion and query flows,
+      calendar/quality contracts, D-015 event-study execution, and D-016
+      atomic SQLite-catalog + Parquet-observation result persistence settle
+      OQ-6, including its honest non-versioned-input limitation. Review
+      hardening in D-017 isolates the v1/v2 storage namespaces, unifies exact
+      dataset keys, and prevents multi-file crash holes from becoming covered.
 - [ ] Toolchain hardening decisions: lint/format (e.g. ruff), CI or a local
       pre-commit check, dependency locking, license audit. Record in
       decisions.md.

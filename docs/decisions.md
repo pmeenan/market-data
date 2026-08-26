@@ -25,6 +25,108 @@ Decision / Context / Consequences / Reopen if
 
 ---
 
+## D-017: Identity migration isolates storage generations and preserves contiguous coverage  (2026-08-26, status: accepted, amends D-003, D-009, and D-014)
+
+**Decision:** Instrument-keyed canonical bars live under a new active
+`data/bars/` root, preserving the current per-instrument EOD and
+per-instrument-year intraday granularity unless the M0 layout benchmark
+supports changing it. Before the first instrument-keyed file is published,
+the migration moves the complete v1 `data/eod/` and `data/intraday/` roots to
+`data/quarantine/v1-ticker-bars/`. Active query globs read only `data/bars/`;
+files copy out of quarantine only after their complete ranges resolve to one
+instrument.
+
+The shared identity/coverage `dataset_key` vocabulary is exactly `eod`,
+`intraday_1hour`, and `intraday_5min`. Tiingo endpoint family (`eod` or `iex`)
+is transport metadata, not an authorization key. Vendor-identifier evidence
+is keyed by the exact dataset key, so validating one IEX frequency does not
+authorize another; every response is still envelope-validated before writing.
+
+Because D-009 coverage remains one closed interval, each ingestion publication
+unit may affect at most one canonical Parquet file. Intraday responses crossing
+a year boundary are split and published one file at a time, ordered inward
+from a coverage edge, with coverage advanced after each unit. Reconciliation
+never takes a blind minimum/maximum across disconnected year partitions: it
+reports the gap and omits that coverage entry. Rebuilding from Parquet may
+forget verified-empty edges and refetch them, but it must never bridge a
+missing partition.
+
+**Context:** Review of the M0 architecture draft found three ways its earlier
+wording could violate the settled fail-closed model. Reusing `data/eod/` and
+`data/intraday/` for both generations could mix ticker- and instrument-keyed
+schemas or overwrite a colliding filename. Calling both endpoint families and
+stored frequencies "dataset" could apply validation evidence at the wrong
+scope. Finally, atomically renaming individual files does not make a multi-year
+publish atomic; a crash plus min/max reconciliation could turn missing middle
+years into falsely covered history.
+
+**Consequences:** The migration has a generation boundary that is visible on
+disk and cheap to roll back before production resumes. Identity lookups and
+coverage use one unambiguous key. Intraday planning must split at year
+boundaries and cannot publish a non-adjacent partition. `reconcile` becomes
+conservative and reports disconnected partitions instead of manufacturing a
+single interval. The M0 layout benchmark still decides granularity; this
+decision only isolates the namespaces safely.
+
+**Reopen if:** The layout benchmark adopts a different versioned root or an
+atomic manifest/pointer scheme replaces file-at-a-time publication and the
+single-interval coverage model.
+
+## D-016: Research runs publish cataloged immutable artifacts  (2026-08-26, status: accepted)
+
+**Decision:** Persist each research execution under a new opaque `run_id`.
+Small run metadata, canonical-JSON parameters, and tidy numeric metrics live
+in versioned SQLite tables. Potentially large event/observation rows live in
+`data/results/{study_name}/{run_id}/observations.parquet`, keyed by `run_id`
+and `instrument_id`; an input-file manifest is stored beside them and its
+aggregate fingerprint is cataloged with the run. Paths in SQLite are relative
+to the relocatable data root.
+
+The library-level study runner holds the data-directory process lock from
+input selection through result publication. It expands input globs once and
+passes that explicit file list to both DuckDB and the manifest builder. The
+aggregate fingerprint hashes canonical (relative path, content digest) pairs,
+not filesystem mtimes, so a byte-identical restore preserves the fingerprint.
+
+Result publication is append-only and failure-safe. Parquet artifacts are
+written and validated under temporary names, renamed into place, then the
+metrics and `succeeded` state are committed together in SQLite. Failed or
+interrupted runs are never selected by successful catalog-based result
+loading. A retry creates a new run rather than mutating a completed one.
+DuckDB loads observations through the same query surface as bars, using
+explicit compatible artifact paths read from successful SQLite catalog rows
+rather than a results-directory glob.
+
+The manifest identifies the input vintage but does not turn the
+correction-aware bar archive into versioned storage. Persisted observations
+remain auditable after Tiingo restates bars; exact re-execution against an old
+vintage is promised only while its recorded input fingerprint still matches.
+
+**Context:** Feature triage answered OQ-6 with SQLite for
+metadata/parameters/metrics and Parquet for large outputs, but left the
+publication and reproducibility contract for the M0 architecture draft.
+SQLite is appropriate for filtering and comparing small run records; tidy
+Parquet preserves the long-form, `instrument_id`-keyed shape chosen by D-015
+without bloating `meta.db`. Atomic publication matters because a notebook or
+later UI must not mistake a half-written output for a completed study.
+
+Retaining complete historical bar snapshots for every run would multiply the
+warehouse and conflict with its current rolling-correction model. The input
+manifest plus immutable derived observations provides honest auditability
+without claiming a versioned data lake.
+
+**Consequences:** The first persisted-study work adds a versioned result
+catalog, study schema versions, input fingerprints, atomic artifact
+publication, catalog-filtered DuckDB loading, and stale-running/orphan
+reporting. Every result observation uses stable instrument identity.
+Parameters must not contain secrets. Removing old runs requires an explicit
+maintenance operation; automatic overwrite or reuse of a successful `run_id`
+is forbidden.
+
+**Reopen if:** A study must be exactly rerunnable after source corrections, in
+which case immutable input snapshots or dataset versioning are required; or
+result volume/query patterns make the per-run layout materially inefficient.
+
 ## D-015: Research uses a project-native DuckDB/polars event engine  (2026-08-26, status: accepted)
 
 **Decision:** The research layer starts as a small, project-native vectorized
@@ -72,7 +174,7 @@ the long-form columnar path fails representative full-scale benchmarks, or a
 permissively licensed library demonstrably removes more project complexity
 than it adds for a concrete study.
 
-## D-014: Stable instruments own bars; symbols are date-ranged aliases  (2026-08-26, status: accepted, amends D-003, D-004, D-009, and D-011)
+## D-014: Stable instruments own bars; symbols are date-ranged aliases  (2026-08-26, status: accepted, amended by D-017; amends D-003, D-004, D-009, and D-011)
 
 **Decision:** The warehouse's durable identity is an opaque internal
 `instrument_id`, not a ticker string and not a vendor identifier. SQLite will
@@ -343,7 +445,7 @@ per-segment fail-closed validation, and makes research joins instrument-keyed.)*
 that would resurrect point-in-time semantics and the lookahead question,
 and needs its own decision.
 
-## D-009: EOD coverage and refresh policy  (2026-08-26, status: accepted, identity key amended by D-014; provisional-default caveat lifted by D-010)
+## D-009: EOD coverage and refresh policy  (2026-08-26, status: accepted, amended by D-017; identity key amended by D-014; provisional-default caveat lifted by D-010)
 
 **Decision:** Ingestion state is a per-(ticker, dataset) coverage *interval*
 [first_date, last_date], not a single high watermark; backfills fill missing
@@ -482,7 +584,7 @@ zero or multiple matches fail closed.)*
 **Reopen if:** Studies need finer-grained (e.g. quarterly) membership or a
 different selection metric.
 
-## D-003: Storage is Parquet + DuckDB with SQLite metadata  (2026-08-26, status: accepted, amended by D-009 and D-014)
+## D-003: Storage is Parquet + DuckDB with SQLite metadata  (2026-08-26, status: accepted, amended by D-009, D-014, and D-017)
 
 **Decision:** Bars are stored as zstd Parquet files (per-ticker EOD,
 per-ticker-year intraday), queried via DuckDB; small relational state

@@ -34,7 +34,7 @@ Status legend: `confirmed` · `proposed` · `rejected (D-NNN)`
 | Strategy testing against the local dataset | confirmed | D-015: project-native vectorized event engine over DuckDB/polars; add stateful portfolio simulation only when a confirmed study needs it |
 | Morning gap-down over-reaction/recovery study | confirmed | The first strategy; uses EOD open plus direct hourly checkpoints for a coarse pass, and 5-minute bars for the complete opening-window study (D-012) |
 | DuckDB SQL + polars query surface | confirmed | Built (`query.py`, `market-data sql`) |
-| Backtest result persistence (runs, parameters, metrics) | confirmed | Promoted at triage 2026-08-26; shape per OQ-6 answer — run metadata/params/metrics in SQLite, large per-trade outputs as Parquet under `data/`, queryable via the same DuckDB surface |
+| Backtest result persistence (runs, parameters, metrics) | confirmed | Promoted at triage 2026-08-26; D-016 stores run metadata/params/metrics in SQLite and large observation outputs as Parquet under `data/`, queryable via the same DuckDB surface |
 | Benchmark/risk-free comparison series in evaluation | confirmed | Promoted at triage 2026-08-26; SPY is already in the seed data |
 | Example notebooks for study workflows | confirmed | Promoted at triage 2026-08-26; lands with the M2 first-study implementation now that D-015 has settled the engine |
 
@@ -100,9 +100,9 @@ Answered at the 2026-08-26 triage:
    universe is a dataset seed filter, not backtest membership; strategies
    select on stored price/volume directly.
 - **OQ-6 — Results storage:** *answered.* Run metadata/parameters/metrics in
-   SQLite; large per-trade outputs as Parquet under `data/`; both queryable
-   through the existing DuckDB surface. Detailed schema lands with the M0
-   architecture draft.
+   SQLite; large observation outputs as Parquet under `data/`; both queryable
+   through the existing DuckDB surface. The publication, catalog, and input-
+   fingerprint contract is specified in the architecture draft and D-016.
 - **OQ-7 — Tiingo plan tier:** *answered.* Power tier ($30/mo). Published
    limits as of 2026-08-26: 10k requests/hour, 100k/day, 40 GB
    bandwidth/month, ~110k unique symbols/month. Bandwidth is the binding
