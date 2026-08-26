@@ -48,7 +48,7 @@ affected docs. Until then, these govern.
 | `tests/` | pytest suite (offline; Tiingo is mocked) |
 | `seeds/` | Committed universe seed CSVs (Year,Ticker,dollar-volume) |
 | `data/` | The warehouse (gitignored; relocatable via `MARKET_DATA_DIR`) |
-| `docs/` | Vision, plan, architecture, decisions, features, rough edges, workflow |
+| `docs/` | Vision, plan, architecture, decisions, features, spike findings, rough edges, workflow |
 
 ## Doc map — pull what the task needs, not everything
 
@@ -62,6 +62,7 @@ build → commit loop, on-demand reviews, and the human commit gate.
 | [docs/features.md](docs/features.md) | The feature matrix: confirmed scope, proposed additions, open questions |
 | [docs/architecture.md](docs/architecture.md) | System structure and technical constraints |
 | [docs/decisions.md](docs/decisions.md) | Settled choices (D-NNN). Scan headings; read only the entries your task touches |
+| [docs/intraday-spike.md](docs/intraday-spike.md) | Measured IEX depth, payload sizes, bar semantics, and bandwidth projections |
 | [docs/rough-edges.md](docs/rough-edges.md) | Findings log (RE-NNN). Grep before adding a finding or debugging weirdness |
 
 ## Rules for all agents
@@ -98,9 +99,10 @@ build → commit loop, on-demand reviews, and the human commit gate.
 
 Milestone **M0 (plan the plan)** — the data-warehouse substrate (ingestion,
 storage, CLI) was scaffolded before this workflow was adopted and works, with
-tests. Feature triage is done (2026-08-26): scope, backfill phasing (D-011),
-and the universe reframing (D-010) are settled; the intraday, engine, and
-instrument-identity (OQ-8 — gates all historical backfills) spikes,
-architecture draft, and real milestone ladder remain. The backtest layer
-does not exist yet. See [docs/plan.md](docs/plan.md). Keep this
+tests. Feature triage and the intraday depth/semantics spike are done
+(2026-08-26): scope, backfill phasing/budget priority (D-011, D-013), universe
+reframing (D-010), and intraday semantics (D-012) are settled; the engine and instrument-identity
+(OQ-8 — gates all historical backfills) spikes, architecture draft, and real
+milestone ladder remain. The backtest layer does not exist yet. See
+[docs/plan.md](docs/plan.md). Keep this
 paragraph short and current when plan.md milestone status changes (rule 4).

@@ -46,11 +46,16 @@ assumption to confirm during feature triage, not settled scope.
   Python classes/functions.
 - **Results persistence** (OQ-6): probably run manifests + metric tables under
   `data/results/`, queryable through the same DuckDB surface.
-- **Hourly bars** land in the existing intraday store as `freq="1hour"`
-  (semantics pending OQ-3) rather than a new storage scheme.
+- **Hourly bars** land in the existing intraday store as `freq="1hour"` and
+  retain Tiingo's fixed clock-hour semantics (10:00–15:00; the opening half
+  hour is absent). Opening-window or session-relative bars are derived from
+  `freq="5min"` after exchange-calendar filtering (D-012).
 - **Operations**: a nightly cron running `market-data update`; failure
   visibility mechanism TBD (exit codes + mail, or a status file the owner
-  checks).
+  checks). The budget scheduler prioritizes current collection, hard-caps
+  historical 5-minute transfer at 30 GB per billing month, reserves the other
+  10 GB for current/ongoing work, and fills global date bands from newest to
+  oldest (D-013).
 - A future **web UI** (proposed) would be a thin read-only FastAPI app over
   the library; a future **realtime layer** (proposed) would add a hot store
   while the Parquet archive stays canonical (D-003).
@@ -58,7 +63,8 @@ assumption to confirm during feature triage, not settled scope.
 ## Open architecture questions
 
 The numbered open questions live in [features.md](features.md) (OQ-1..OQ-8).
-The architecture-blocking ones still open are OQ-1 (engine), OQ-2/OQ-3
-(intraday depth and semantics), and OQ-8 (instrument identity for reused
-ticker symbols — gates all D-011 historical backfill phases). OQ-5 was dissolved and OQ-6 answered
-at the 2026-08-26 triage (results: SQLite metadata + Parquet outputs).
+The architecture-blocking ones still open are OQ-1 (engine) and OQ-8
+(instrument identity for reused ticker symbols — gates all D-011 historical
+backfill phases). OQ-2/OQ-3 were answered by the intraday spike and D-012;
+OQ-5 was dissolved and OQ-6 answered at the 2026-08-26 triage (results: SQLite
+metadata + Parquet outputs).

@@ -22,6 +22,80 @@ Newest first. RE-numbers are never reused.
 
 ---
 
+## RE-004: IEX resampling depends on request range  (2026-08-26, status: open)
+
+**Environment:** Tiingo historical IEX REST endpoint, CSV, Power tier,
+measured 2026-08-26.
+
+**Repro/measurement:** A 120-day AAPL 5-minute request spanning 2025-09-01,
+2025-11-27, 2025-11-28, and 2025-12-25 returned a complete 78-row weekday
+grid for every date, including zero-volume holiday rows and rows after the
+scheduled 13:00 early close; `forceFill=false` and `forceFill=true` produced
+the same result. Single-day holiday requests returned no rows, and a
+single-day 2025-11-28 request with `forceFill=false` returned 54 rows through
+13:55 — twelve bars past the scheduled 13:00 close, so it was not a clean
+session series either. Separately, an AAPL request ending 2017-04-10 returned
+only five hourly rows through 14:00 / 65 five-minute rows through 14:50;
+extending `endDate` to 2017-04-11 returned the missing 15:00 hour / remaining
+13 five-minute rows. A Friday 2017-04-07 probe remained truncated when
+`endDate` was Saturday or Sunday and became complete only when `endDate`
+reached Monday 2017-04-10.
+
+**Observed:** The same date's result changes with the surrounding request
+range, and explicit `forceFill=false` does not prevent long-range synthetic
+rows.
+
+**Expected:** A date range only partitions a stable underlying series, and
+`forceFill=false` excludes synthetic non-trading intervals.
+
+**Impact:** Never infer sessions from row presence or zero volume. Filter with
+the exchange calendar, fetch each chunk through at least the next trading day,
+discard lookahead rows, and merge-upsert/deduplicate. The current ingestion
+client does not yet implement the lookahead; fix before historical intraday
+backfill. [NYSE calendar](https://www.nyse.com/markets/hours-calendars),
+[Tiingo IEX docs](https://www.tiingo.com/documentation/iex).
+
+## RE-003: Direct IEX hourly bars omit the opening half-hour  (2026-08-26, status: wontfix)
+
+**Environment:** Tiingo historical IEX REST endpoint, AAPL/CROX/SPY,
+`resampleFreq=1hour` and `5min`, measured 2026-08-26.
+
+**Repro/measurement:** On a normal session, hourly timestamps were
+10:00–15:00 Eastern. Each hourly OHLCV row exactly matched the twelve
+five-minute rows in that wall-clock hour. The six 09:30–09:55 bars had no
+hourly counterpart.
+
+**Observed:** `1hour` means whole clock hours, not one-hour bins anchored at
+the 09:30 exchange open; the first half-hour is dropped.
+
+**Expected:** A naïve consumer could reasonably interpret “hourly bars” as
+covering the whole regular session from the open.
+
+**Impact:** Keep the vendor hourly dataset for 10:00-and-later checkpoints,
+but derive opening-window/session-relative bins from 5-minute data (D-012).
+
+## RE-002: Historical IEX responses silently cap at 10,000 rows  (2026-08-26, status: open)
+
+**Environment:** Tiingo historical IEX REST endpoint, CSV, Power tier,
+measured 2026-08-26.
+
+**Repro/measurement:** Requests for 2010-01-01 through 2026-08-25 returned
+exactly 10,000 rows with HTTP 200 and no truncation marker. For AAPL, hourly
+appeared to start 2020-04-06 while 5-minute appeared to start 2026-02-26.
+Bounded requests proved both actually begin 2016-12-12.
+
+**Observed:** The endpoint returns the newest 10,000 rows and silently drops
+the older prefix.
+
+**Expected:** Either the full requested range or an explicit pagination/error
+signal.
+
+**Impact:** Every historical IEX fetch must use bounded chunks and reject a
+response with 10,000 rows as potentially truncated. A range probe using one
+large request will report a false history depth. The current 30-day ingestion
+chunks stay below the cap for 5-minute regular-session data, but the invariant
+needs an explicit validation before chunk sizes change.
+
 ## RE-001: DuckDB→polars conversion requires pyarrow  (2026-08-26, status: worked-around)
 
 **Environment:** Python 3.12, duckdb 1.x, polars 1.x, Linux.

@@ -52,15 +52,18 @@ of it.
       persistence, benchmark series, notebooks; rejected universe provenance
       (D-010); web UI and realtime deliberately stay `proposed` until after
       M2 (owner's call). OQ-4/5/6/7 answered (see features.md); OQ-1/2/3
-      remain for the spikes. Backfill scope/priority and the 5-minute
+      remained for the spikes at triage. Backfill scope/priority and the 5-minute
       intraday addition recorded as D-011; universe reframing as D-010.
-- [ ] Spike — intraday depth & semantics (OQ-2, OQ-3): fetch 1-hour and
-      5-minute bars for a handful of representative tickers (large-cap,
-      mid-cap, ETF), measure how far back coverage goes at each frequency,
-      check bar alignment to the 9:30 open and IEX-volume caveats, and record
-      measured bytes/ticker with `format=csv` to calibrate D-011's bandwidth
+- [x] Spike — intraday depth & semantics (OQ-2, OQ-3; 2026-08-26): fetched
+      1-hour and 5-minute bars for a handful of representative tickers
+      (large-cap, mid-cap, ETF), measured coverage depth at each frequency,
+      checked bar alignment to the 9:30 open and IEX-volume caveats, and
+      recorded bytes/ticker with `format=csv` to calibrate D-011's bandwidth
       projections.
-      Output: a short findings note + rough-edges entries for surprises.
+      Both frequencies begin 2016-12-12. Direct hourly bars omit 09:30–09:59;
+      5-minute data is required for opening-window/session-relative bins.
+      Measured seed-list projections are 5.4 GB hourly and 68.5 GB 5-minute.
+      See [intraday-spike.md](intraday-spike.md), D-012, and RE-002..RE-004.
 - [ ] Spike — instrument identity (OQ-8): confirm the reused-symbol counts in
       Tiingo's supported-tickers list, check what identity Tiingo exposes for
       them (permaTicker, listing date ranges), and decide the warehouse's
@@ -86,9 +89,9 @@ of it.
       criteria.
 
 **Exit criteria:** the owner has walked features.md and says the plan is good
-enough to build from; the architecture-blocking open questions (OQ-1, OQ-2,
-OQ-8 — OQ-5 was dissolved at the triage) are answered; toolchain decided;
-M1+ milestones have scopes. M0 is a
+enough to build from; the architecture-blocking open questions (OQ-1 and
+OQ-8 — OQ-2/OQ-3 are answered and OQ-5 was dissolved) are answered;
+toolchain decided; M1+ milestones have scopes. M0 is a
 conversation, not a phase — it exits on the owner's call, not on a checklist
 reaching zero.
 
@@ -100,12 +103,17 @@ entries, and note that they freely reference `proposed` features.md rows;
 nothing here pre-empts the M0 triage.
 
 - **M1 — Data substrate hardening.** Intraday ingestion (1-hour + 5-minute)
-  verified end-to-end against real Tiingo data; Tiingo client switched to
-  `format=csv` for bulk fetches (D-011); budget-aware backfill
-  scheduler built and D-011's phases underway in order (seed EOD + 1-hour,
-  then all-ticker EOD, then seed 5-minute — a metered, months-long process
-  that continues in the background across later milestones); nightly cron in
-  place with visible failures; ruff + license audit wired in.
+  hardened against the 10,000-row cap and range-dependent chunk boundaries
+  (RE-002, RE-004), then verified end-to-end against real Tiingo data; Tiingo
+  client switched to `format=csv` for bulk fetches (D-011); exchange-calendar
+  filtering built before research; budget-aware backfill scheduler persists
+  global date-band progress, refreshes current data first, hard-caps historical
+  5-minute transfer at 30 GB per billing month, preserves the other 10 GB for
+  current/ongoing work, and fills history newest-to-oldest (D-013); D-011's
+  phases underway in order (seed EOD + 1-hour, then all-ticker EOD, then seed
+  5-minute — a metered, multi-month process that continues in the background
+  across later milestones); nightly cron in place with visible failures; ruff
+  + license audit wired in.
 - **M2 — First study end-to-end.** The gap-recovery study runs from stored
   data to summary statistics with the chosen engine, selecting tickers from
   the stored data itself (D-010); results persisted (per OQ-6).

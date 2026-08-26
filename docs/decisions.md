@@ -25,18 +25,96 @@ Decision / Context / Consequences / Reopen if
 
 ---
 
-## D-011: Backfill scope, priority, and API budget  (2026-08-26, status: accepted)
+## D-013: Five-minute history fills newest-first with a 30 GB monthly hard cap  (2026-08-26, status: accepted, amends D-011)
+
+**Decision:** The phase-3 seed-ticker 5-minute backfill proceeds in global
+date bands from the most recent completed session backward toward 2016-12-12.
+Within each band, cover the seed universe before advancing to an older band;
+do not complete one ticker's history while other seed tickers lack current
+coverage.
+
+Current 5-minute collection has priority over historical work. Each daily run
+refreshes the current all-ticker target from D-011 first. Historical 5-minute
+transfer has a hard ceiling of **30 GB in each vendor billing month**. The
+remaining 10 GB of the 40 GB plan allowance is unavailable to history and is
+reserved for daily refreshes and other ongoing work; unused reserve does not
+roll into the historical allowance near month end.
+
+The scheduler may stop history below 30 GB if actual use plus projected daily
+refreshes through the next bandwidth reset would otherwise threaten the
+overall 40 GB cap. When either limit is reached, history stops cleanly and
+resumes from its persisted oldest completed band after the vendor budget
+resets. Historical work never delays current collection or borrows from its
+10 GB reserve.
+
+**Context:** The owner wants useful recent 5-minute coverage first and wants
+the historical backfill capped at 30 GB/month, leaving 10 GB of headroom under
+the 40 GB monthly limit so current data can still be refreshed daily. A
+ticker-at-a-time traversal would leave an incomplete recent cross-section,
+while a history-first budget policy could make the freshest data stale near
+month end.
+
+**Consequences:** D-011's phase order is unchanged: seed 5-minute history
+still follows the EOD and hourly phases. D-011's ongoing all-ticker 5-minute
+collection now starts no later than phase 3 rather than waiting for every
+historical band to finish. The scheduler needs persisted band progress,
+separate current-versus-history byte accounting, the vendor bandwidth-reset
+boundary, a refresh-cost forecast, and hard stops at both 30 GB of historical
+transfer and 40 GB total. At the measured 68.5 GB seed-list projection, phase
+3 requires at least three billing windows. Recent cross-sectional history
+becomes usable incrementally while the backfill works toward 2016-12-12.
+
+**Reopen if:** The Tiingo cap/reset rules change, measured ongoing work cannot
+fit within the 10 GB reserve, or the owner changes the 30 GB ceiling, phase
+order, or preference for cross-sectional date coverage.
+
+## D-012: Preserve vendor hourly bars; derive opening windows from 5-minute data  (2026-08-26, status: accepted)
+
+**Decision:** Store Tiingo's direct `resampleFreq=1hour` output as the
+`intraday_1hour` vendor dataset, but use it only for clock-hour checkpoints
+from 10:00 onward. Any opening-window or session-relative hourly analysis is
+derived from stored 5-minute bars after filtering against the exchange
+calendar. Intraday IEX volume is not used for composite liquidity screens or
+absolute cross-sectional volume thresholds; EOD composite volume is the
+default liquidity input. A study may use IEX volume descriptively or as a
+within-instrument measure only after validating that narrower use.
+
+**Context:** The OQ-2/OQ-3 spike measured AAPL, CROX, and SPY through
+2026-08-25. Both frequencies begin 2016-12-12. On sampled normal sessions,
+direct hourly rows labelled 10:00–15:00 exactly matched the same-clock-hour
+groups of twelve 5-minute rows, while the six 09:30–09:55 rows had no hourly
+counterpart. Long-range endpoint responses also synthesized weekday grids on
+holidays and after early closes, independent of `forceFill`, so row presence
+cannot define a session. Tiingo documents historical IEX volume as trades on
+IEX only. Full measurements are in [intraday-spike.md](intraday-spike.md).
+
+**Consequences:** D-011's phase order stays intact: cheap direct hourly data
+can support a coarse first pass using EOD open plus 10:00-and-later recovery
+checkpoints, but the complete opening-window study waits for phase 3's
+5-minute history. The exchange-calendar feature is a correctness dependency,
+not optional polish. Research code must preserve frequency/semantics rather
+than presenting direct hourly data as a 09:30 session-aligned bar. The
+measured depth is adequate for the first study but does not cover the seed
+record's 2011–2016 years.
+
+**Reopen if:** Tiingo changes its direct resampling convention, the study is
+reframed to exclude the opening half-hour, or a validated consolidated Tiingo
+intraday feed replaces IEX for this dataset.
+
+## D-011: Backfill scope, priority, and API budget  (2026-08-26, status: accepted, amended by D-013)
 
 **Decision:** The dataset is built in phases, bounded by the owner's Tiingo
 Power-tier budget:
 
 1. **Phase 1 — seed tickers, EOD + 1-hour** (the 5,403 distinct tickers in
    the 2011–2026 seed CSV): EOD daily back 20 years, plus 1-hour intraday
-   back up to 10 years (the IEX feed likely caps out around 9; the OQ-2
-   spike measures the real depth). Cheap: a few GB total.
+   through the available history (measured from 2016-12-12 in the OQ-2
+   spike). The hourly component is about 5.4 GB for the seed list; the EOD
+   component is additional and must be included in scheduler accounting.
 2. **Phase 2 — all tickers, EOD:** EOD daily back 20 years for *all*
    Tiingo-supported US stocks/ETFs, including delisted ones.
-3. **Phase 3 — seed tickers, 5-minute:** intraday back up to 10 years.
+3. **Phase 3 — seed tickers, 5-minute:** intraday back through the available
+   history, measured from 2016-12-12.
    5-minute is confirmed intraday scope alongside hourly, but its history
    backfill runs **last** — EOD and 1-hour backfills complete before any
    5-minute history is fetched, to keep the heavy transfer (the bulk of the
@@ -63,10 +141,14 @@ requests/hour, 100,000/day, **40 GB bandwidth/month**, ~110k unique
 symbols/month. Bandwidth is the binding constraint, so **bulk fetches use
 `format=csv`, not JSON** — CSV responses carry no repeated field names and
 run roughly half to a third the bytes per bar (owner's call, 2026-08-26; the
-client currently requests JSON and switches in M1). With CSV, 5-minute
-history for the seed list is estimated at ~40–75 GB of transfer, i.e.
-**1–2 months of budget**, and all-ticker EOD well under a month. Backfill
-runs through a budget-aware scheduler (confirmed feature, features.md):
+client currently requests JSON and switches in M1). With CSV, the OQ-2 spike
+measured a 68.5 GB seed-list projection for 5-minute history, within the
+original ~40–75 GB estimate, i.e. **1–2 months only if phase 3 could use the
+full vendor cap**. D-013 instead hard-caps history at 30 GB/month, making the
+operational minimum three billing windows. The EOD phases and operational
+overhead are additional; all-ticker EOD is still projected at well under a
+month. Backfill runs through a budget-aware scheduler (confirmed feature,
+features.md):
 track requests and bytes against the hourly/daily/monthly caps, stop when a
 window is spent, resume in the next — never let a backfill run blow the
 month's bandwidth. Ongoing all-ticker nightly collection is comfortably
@@ -81,9 +163,9 @@ same day. Resolves OQ-7.
 planning must treat it as a long-running metered process with resumable
 state (which D-009's coverage intervals already provide). The Tiingo client
 must move from `format=json` to CSV parsing for bulk endpoints (M1, with
-tests updated to CSV fixtures). Bandwidth estimates are back-of-envelope;
-the OQ-2 spike and the scheduler measure actual bytes/ticker (CSV) early
-and re-project.
+tests updated to CSV fixtures). The OQ-2 measurement calibrates the initial
+projection; the scheduler must continue tracking actual bytes/ticker because
+listing lifetimes and payload sizes vary.
 
 **Reopen if:** Tiingo changes tier limits, the measured bytes/ticker differs
 wildly from the estimate, or the owner's study needs reprioritize which data
