@@ -26,13 +26,18 @@ affected docs. Until then, these govern.
   (gitignored) and must never be committed or logged. (D-002)
 - **Universes seed the dataset; strategies select from the data.** Per-year
   dollar-volume universes choose what gets ingested (and remain stored as the
-  historical record), but backtests select tickers from stored price/volume
-  directly — survivorship-bias protection comes from backfilling all tickers
+  historical record), but backtests select instruments from stored price/volume
+  directly — survivorship-bias protection comes from backfilling all instruments
   including delisted ones, not from membership joins. (D-004, D-010, D-011)
+- **Stable instruments own bars; symbols are aliases.** Coverage, Parquet,
+  ingestion, and research joins key on internal instrument ids with
+  date-ranged aliases. Vendor identifiers are validated per dataset; every
+  response is checked against its resolved identity envelope, and unresolved
+  segments fail closed. (D-014)
 - **Research only; US stocks + ETFs only.** No order execution or broker
   connectivity, ever; no options/futures/crypto. (D-007, D-008)
 - **Ingestion is idempotent, resumable, and vintage-consistent.** Coverage is
-  a per-(ticker, dataset) interval (leading gaps get fetched, not skipped);
+  a per-(instrument, dataset) interval (leading gaps get fetched, not skipped);
   Parquet writes are merge-upserts; updates refetch a rolling overlap and a
   new split/dividend triggers a full-history refresh. A rerun after an
   interruption must converge to the same dataset. (D-003, D-009)
@@ -63,6 +68,7 @@ build → commit loop, on-demand reviews, and the human commit gate.
 | [docs/architecture.md](docs/architecture.md) | System structure and technical constraints |
 | [docs/decisions.md](docs/decisions.md) | Settled choices (D-NNN). Scan headings; read only the entries your task touches |
 | [docs/intraday-spike.md](docs/intraday-spike.md) | Measured IEX depth, payload sizes, bar semantics, and bandwidth projections |
+| [docs/instrument-identity-spike.md](docs/instrument-identity-spike.md) | Reused-symbol measurements, Tiingo identity behavior, and the D-014 model |
 | [docs/rough-edges.md](docs/rough-edges.md) | Findings log (RE-NNN). Grep before adding a finding or debugging weirdness |
 
 ## Rules for all agents
@@ -101,8 +107,11 @@ Milestone **M0 (plan the plan)** — the data-warehouse substrate (ingestion,
 storage, CLI) was scaffolded before this workflow was adopted and works, with
 tests. Feature triage and the intraday depth/semantics spike are done
 (2026-08-26): scope, backfill phasing/budget priority (D-011, D-013), universe
-reframing (D-010), and intraday semantics (D-012) are settled; the engine and instrument-identity
-(OQ-8 — gates all historical backfills) spikes, architecture draft, and real
-milestone ladder remain. The backtest layer does not exist yet. See
+reframing (D-010), and intraday semantics (D-012) are settled; the instrument-
+identity spike is also done (D-014: stable instrument ids + date-ranged
+aliases; unresolved segments fail closed). The engine
+spike, architecture draft, and real milestone ladder remain. Production
+ingestion is paused until the M1 identity migration; the backtest layer does
+not exist yet. See
 [docs/plan.md](docs/plan.md). Keep this
 paragraph short and current when plan.md milestone status changes (rule 4).

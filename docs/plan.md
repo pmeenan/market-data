@@ -64,14 +64,17 @@ of it.
       5-minute data is required for opening-window/session-relative bins.
       Measured seed-list projections are 5.4 GB hourly and 68.5 GB 5-minute.
       See [intraday-spike.md](intraday-spike.md), D-012, and RE-002..RE-004.
-- [ ] Spike — instrument identity (OQ-8): confirm the reused-symbol counts in
-      Tiingo's supported-tickers list, check what identity Tiingo exposes for
-      them (permaTicker, listing date ranges), and decide the warehouse's
-      identity model (stable instrument id vs date-ranged symbol records).
-      Blocks every D-011 historical backfill phase — 282 seed symbols are
-      themselves reused — though the spike may narrow the gate if
-      measurements prove a dataset/frequency safe. Record the outcome in
-      decisions.md.
+- [x] Spike — instrument identity (OQ-8; 2026-08-26): confirmed 993 reused
+      US stock/ETF symbol strings (2,025 records) in Tiingo's current
+      supported-tickers list, including 282 seed symbols (577 records).
+      Tiingo permaTickers separate EOD histories when known, but the public
+      list exposes no stable id, discovery is incomplete, and an IEX probe
+      failed identity validation. D-014 therefore adopts internal stable
+      instrument ids with date-ranged symbol aliases and dataset-specific
+      vendor identifiers. Every production write is paused until the M1
+      migration; afterward every response is identity-envelope validated,
+      validated segments may proceed, and unresolved segments fail closed. See
+      [instrument-identity-spike.md](instrument-identity-spike.md).
 - [ ] Spike — backtest engine (OQ-1): prototype the gap-recovery study once
       with a hand-rolled polars/DuckDB loop and once with an existing library;
       compare effort and fit. Output: recommendation recorded in decisions.md.
@@ -89,8 +92,8 @@ of it.
       criteria.
 
 **Exit criteria:** the owner has walked features.md and says the plan is good
-enough to build from; the architecture-blocking open questions (OQ-1 and
-OQ-8 — OQ-2/OQ-3 are answered and OQ-5 was dissolved) are answered;
+enough to build from; the architecture-blocking open question OQ-1 is answered
+(OQ-8 is answered by D-014, OQ-2/OQ-3 by D-012, and OQ-5 was dissolved);
 toolchain decided; M1+ milestones have scopes. M0 is a
 conversation, not a phase — it exits on the owner's call, not on a checklist
 reaching zero.
@@ -102,7 +105,12 @@ research path before breadth. Sketch only — do not start work from these
 entries, and note that they freely reference `proposed` features.md rows;
 nothing here pre-empts the M0 triage.
 
-- **M1 — Data substrate hardening.** Intraday ingestion (1-hour + 5-minute)
+- **M1 — Data substrate hardening.** Migrate the registry, coverage, Parquet
+  paths/rows, and ingestion API from bare tickers to D-014 instrument ids +
+  date-ranged aliases; build the identity resolver/validation report and
+  enforce envelope checks on every response so unresolved segments fail
+  closed while validated work can proceed.
+  Intraday ingestion (1-hour + 5-minute)
   hardened against the 10,000-row cap and range-dependent chunk boundaries
   (RE-002, RE-004), then verified end-to-end against real Tiingo data; Tiingo
   client switched to `format=csv` for bulk fetches (D-011); exchange-calendar

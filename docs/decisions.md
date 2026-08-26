@@ -25,6 +25,93 @@ Decision / Context / Consequences / Reopen if
 
 ---
 
+## D-014: Stable instruments own bars; symbols are date-ranged aliases  (2026-08-26, status: accepted, amends D-003, D-004, D-009, and D-011)
+
+**Decision:** The warehouse's durable identity is an opaque internal
+`instrument_id`, not a ticker string and not a vendor identifier. SQLite will
+hold instruments and their date-ranged symbol aliases (ticker, exchange,
+asset type, start date, end date). Coverage, Parquet paths, and bar rows are
+keyed by `instrument_id`; ticker is resolved as-of the bar date for display
+and research. A Tiingo `permaTicker`, when available, is stored as an optional
+vendor identifier alongside the instrument rather than used as the primary
+key.
+
+Vendor request identifiers are validated separately for each dataset. A
+permaTicker that correctly resolves EOD is not assumed to resolve IEX. **Every
+response, including an apparently unambiguous bare-ticker response, is
+validated before any bar or coverage write:** the request segment must belong
+to exactly one resolved instrument; every returned row must fall inside both
+that segment and the instrument's validated alias envelope; and endpoint
+metadata, where available, must agree with the stored identity. Any violation
+rejects the complete response. An empty response can advance coverage only
+after the request identifier/segment passes identity validation and D-009's
+publication-lag rule.
+
+A bare ticker may identify one request segment only when the segment is wholly
+contained in one validated alias interval, no other known record for that
+ticker overlaps the segment, and bare-ticker metadata matches that alias. A
+nominal 20-year backfill is split and clamped to validated alias boundaries;
+it never extends before an alias start or after its end to fill the target.
+Missing, overlapping, or incomplete archive evidence makes the segment
+unresolved rather than relaxing the rule. History outside the known envelope
+requires a validated permaTicker or manual/vendor evidence attaching another
+alias to the same instrument. A full-history refresh likewise requires a
+dataset identifier validated for the instrument's complete stored envelope;
+a bare alias cannot replace a multi-alias instrument snapshot. Ingestion never
+selects the newest listing, merges histories, or guesses across an evidence
+gap.
+
+Universe rows retain the imported ticker string as historical source data but
+must resolve to an instrument through aliases overlapping that universe year.
+Zero or multiple matches are explicit resolution failures. No Tiingo-backed
+production ingestion—nightly update, historical backfill, or corporate-action
+refresh—may write the v1 ticker-keyed warehouse after this decision. After the
+M1 identity migration, validated request segments may ingest while each
+unresolved segment remains individually blocked. “All tickers” means all
+resolved listing instruments, not one row per distinct current symbol.
+
+**Context:** The OQ-8 spike measured Tiingo's 2026-08-26 public
+supported-tickers archive using the same US exchange/stock/ETF/USD filter as
+the application. Its 24,074 rows contain 23,042 distinct symbols: 993 symbols
+have multiple records (2,025 records). The seed CSV contains 5,403 distinct
+symbols; 282 are reused (577 records), and 229 of those have multiple records
+intersecting Tiingo's measured IEX history since 2016-12-12. The archive has
+date ranges but no permaTicker; 462 duplicated symbols have overlapping record
+ranges, so ranges alone are not a universally unique identity mapping.
+
+Authenticated probes showed that Tiingo does possess stable identifiers but
+does not expose a complete, uniformly safe resolver on this account. EOD
+queries by known permaTicker separated the old 2009–2013 ACOM/Ancestry history
+from the 2026 ACOM ETF, while bare `ACOM` returned only the ETF. Bare `ALTR`
+returned 2017–2025 Altair, not the older Altera listing. The search endpoint
+is documented as early beta and omitted exact identities in probes—including
+returning no exact ALTR result; fundamentals metadata is a smaller add-on
+universe rather than a complete price master. Most importantly, IEX queried
+with the old ACOM permaTicker returned 80 rows dated 2026-07-17 through
+2026-08-05, outside that instrument's 2013 end date, while the current ETF
+permaTicker returned none.
+Full measurements and source links are in
+[instrument-identity-spike.md](instrument-identity-spike.md).
+
+**Consequences:** M1 starts with a schema/data-path migration and an identity
+resolution report before any production ingestion resumes. Internal IDs must
+be persisted in both SQLite and canonical Parquet so `reconcile` does not
+depend on mutable symbol mappings. The resolver caches source evidence and
+validation state per dataset, rejects conflicting aliases, and leaves
+unresolved records visible
+for vendor support/manual mapping. Existing bare-ticker files are quarantined
+during migration until their complete date range resolves to exactly one
+instrument; a file crossing multiple identity envelopes or an evidence gap is
+reported, not auto-assigned or combined with new data. Query views may expose
+convenient ticker columns, but joins and result persistence use
+`instrument_id` to prevent cross-security merges.
+
+**Reopen if:** Tiingo publishes a complete security master with stable IDs and
+historical aliases for EOD and IEX, or measurements establish different
+identity semantics. Such a source can replace the resolver input, but does not
+remove the need for stable warehouse identity unless its IDs and guarantees
+are contractually durable.
+
 ## D-013: Five-minute history fills newest-first with a 30 GB monthly hard cap  (2026-08-26, status: accepted, amends D-011)
 
 **Decision:** The phase-3 seed-ticker 5-minute backfill proceeds in global
@@ -101,7 +188,7 @@ record's 2011–2016 years.
 reframed to exclude the opening half-hour, or a validated consolidated Tiingo
 intraday feed replaces IEX for this dataset.
 
-## D-011: Backfill scope, priority, and API budget  (2026-08-26, status: accepted, amended by D-013)
+## D-011: Backfill scope, priority, and API budget  (2026-08-26, status: accepted, amended by D-013 and D-014)
 
 **Decision:** The dataset is built in phases, bounded by the owner's Tiingo
 Power-tier budget:
@@ -135,6 +222,11 @@ could pull the wrong security or silently merge two, so the identity
 decision (features.md OQ-8) must land before *any* historical backfill
 starts — seed phases included. The OQ-8 spike may narrow this gate if
 endpoint measurements prove a specific dataset or frequency safe.
+
+*(2026-08-26 annotation: D-014 answers OQ-8. It temporarily gates every
+Tiingo-backed production write—including D-011 ongoing collection—until the
+M1 identity migration. After migration, the gate becomes per request segment:
+validated instruments may proceed and unresolved segments may not.)*
 
 Power-tier limits as published 2026-08-26 (tiingo.com/about/pricing): 10,000
 requests/hour, 100,000/day, **40 GB bandwidth/month**, ~110k unique
@@ -171,14 +263,15 @@ listing lifetimes and payload sizes vary.
 wildly from the estimate, or the owner's study needs reprioritize which data
 arrives first.
 
-## D-010: Universes are dataset seed filters, not backtest membership  (2026-08-26, status: accepted, amends D-004)
+## D-010: Universes are dataset seed filters, not backtest membership  (2026-08-26, status: accepted, amends D-004; identity consequences amended by D-014)
 
 **Decision:** The per-year dollar-volume universes exist to choose which
-tickers the dataset ingests (preferring large, stable names for the initial
+symbols seed dataset ingestion (preferring large, stable names for the initial
 backfill) — they are **not** a point-in-time membership constraint on
-backtests. Research code selects tickers from the stored price/volume data
-directly; if a strategy needs a liquidity screen, it computes one from the
-dataset, not from the universe table. Survivorship-bias protection comes
+backtests. Research code selects stored instruments by `instrument_id` from
+price/volume data (identity amended by D-014); if a strategy needs a liquidity
+screen, it computes one from the dataset, not from the universe table.
+Survivorship-bias protection comes
 from the data itself — phase 2 of D-011 backfills *all* tickers including
 delisted ones — rather than from membership joins. Per-year storage remains
 as the historical record of how the dataset was seeded.
@@ -194,15 +287,16 @@ rejected. D-009's `update --universe` default stays a pragmatic ingestion
 scoping knob (its "provisional pending OQ-5" caveat is lifted) and becomes
 moot once ongoing all-ticker collection (D-011) lands. New universe years
 stop being needed once collection covers everything (resolves OQ-4). The
-survivorship-bias guarantee additionally depends on resolving reused ticker
-symbols (OQ-8) — distinct securities sharing a symbol must not merge; see
-D-011's backfill gate.
+survivorship-bias guarantee additionally depends on distinct securities
+sharing a symbol never merging. *(2026-08-26 annotation: D-014 answers OQ-8,
+replaces D-011's broad historical gate with an M1 migration gate followed by
+per-segment fail-closed validation, and makes research joins instrument-keyed.)*
 
 **Reopen if:** A study reintroduces universe-membership-based selection —
 that would resurrect point-in-time semantics and the lookahead question,
 and needs its own decision.
 
-## D-009: EOD coverage and refresh policy  (2026-08-26, status: accepted, provisional-default caveat lifted by D-010)
+## D-009: EOD coverage and refresh policy  (2026-08-26, status: accepted, identity key amended by D-014; provisional-default caveat lifted by D-010)
 
 **Decision:** Ingestion state is a per-(ticker, dataset) coverage *interval*
 [first_date, last_date], not a single high watermark; backfills fill missing
@@ -230,6 +324,12 @@ provisional pending OQ-5. D-010 dissolved OQ-5 — universes are ingestion
 seed filters with no backtest-effective dates — so the MAX(year) default is
 settled as a pragmatic ingestion scope, and becomes moot when D-011's
 ongoing all-ticker collection supersedes universe-scoped updates.)*
+
+*(2026-08-26 identity annotation: D-014 replaces `ticker` with
+`instrument_id` as the coverage/file owner and requires identity-envelope
+validation before every bar or coverage write. A full refresh must cover the
+instrument's complete stored envelope; the interval, overlap, and vintage
+policies otherwise remain.)*
 
 **Context:** Adopted from an external substrate review the owner forwarded
 (2026-08-26), which demonstrated that the original single-watermark model
@@ -311,7 +411,7 @@ need must be reachable through the library, keeping a later UI thin.
 **Reopen if:** Coverage browsing or results review becomes painful enough at
 the terminal that the proposed web UI gets promoted (features.md).
 
-## D-004: Annual point-in-time universes ranked by dollar volume  (2026-08-26, status: accepted, backtest-membership role removed by D-010)
+## D-004: Annual point-in-time universes ranked by dollar volume  (2026-08-26, status: accepted, amended by D-010 and D-014)
 
 **Decision:** The ticker universe is stored per year, ranked by a
 dollar-volume metric, seeded from the owner's CSV
@@ -327,12 +427,15 @@ was chosen so historical membership is preserved (survivorship-bias-aware).
 **Consequences:** The `universe` table is keyed (year, ticker). *(2026-08-26:
 the original requirements here — research code joins membership
 point-in-time, and the open OQ-5 timing question — are superseded/dissolved
-by D-010; the table remains as the seeding record and an ingestion scope.)*
+by D-010; the table remains as the seeding record and an ingestion scope.
+D-014 further requires each source `(year, ticker)` row to resolve through
+date-ranged aliases to exactly one instrument before it can scope ingestion;
+zero or multiple matches fail closed.)*
 
 **Reopen if:** Studies need finer-grained (e.g. quarterly) membership or a
 different selection metric.
 
-## D-003: Storage is Parquet + DuckDB with SQLite metadata  (2026-08-26, status: accepted, ingestion-state model amended by D-009)
+## D-003: Storage is Parquet + DuckDB with SQLite metadata  (2026-08-26, status: accepted, amended by D-009 and D-014)
 
 **Decision:** Bars are stored as zstd Parquet files (per-ticker EOD,
 per-ticker-year intraday), queried via DuckDB; small relational state

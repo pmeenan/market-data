@@ -16,8 +16,8 @@ Status legend: `confirmed` · `proposed` · `rejected (D-NNN)`
 | --- | --- | --- |
 | Annual universes imported from owner's seed CSV (Year,Ticker,MedianDollarVolume) | confirmed | Built and tested |
 | Universe bootstrap from Tiingo supported-tickers + dollar-volume ranking | confirmed | Built; for years the seed CSV doesn't cover |
-| EOD daily backfill + nightly incremental update (resumable, idempotent) | confirmed | Built and tested |
-| Intraday ingestion: 1-hour **and 5-minute** bars | confirmed | Storage/query surface built; historical backfill remains blocked on OQ-8 plus M1 client hardening for RE-002/RE-004. Measured history begins 2016-12-12; direct hourly omits the opening half-hour (intraday-spike.md, D-012) |
+| EOD daily backfill + nightly incremental update (resumable, idempotent) | confirmed | v1 built and tested; production ingestion is paused until the D-014 M1 identity migration |
+| Intraday ingestion: 1-hour **and 5-minute** bars | confirmed | Storage/query surface built; all production ingestion awaits the D-014 M1 identity migration/resolution, and historical intraday also needs client hardening for RE-002/RE-004. Measured history begins 2016-12-12; direct hourly omits the opening half-hour (intraday-spike.md, D-012) |
 | Phased backfill: seed EOD 20y + 1-hour from 2016-12-12, then all-ticker EOD 20y, then seed 5-minute newest-to-oldest from current to 2016-12-12; current all-ticker collection continues daily | confirmed | Scope and phase priority in D-011; D-013 makes 5-minute history global-date-band-first, caps it at 30 GB/month, and reserves the remaining 10 GB for current/ongoing work |
 | Point-in-time universe storage (per-year membership) | confirmed | Built; reframed by D-010 — a dataset seed filter and historical record, not backtest membership |
 | Coverage-interval ingestion with correction/adjustment refresh | confirmed | Built per D-009 (leading backfills, rolling refresh, corp-action full refresh, `reconcile`) |
@@ -56,22 +56,6 @@ Still open:
 - **OQ-1 — Backtest engine:** custom vectorized loop over polars/DuckDB, or
    an existing library (e.g. vectorbt)? Answered by the M0 engine spike in
    [plan.md](plan.md); the gap study is the acceptance test.
-- **OQ-8 — Instrument identity for reused ticker symbols:** the warehouse
-   keys everything by bare ticker (`tickers` PK, coverage rows,
-   `{TICKER}.parquet` paths), but ticker symbols get reused across distinct
-   securities — a review (2026-08-26) counted ~1,000 duplicated symbols in
-   Tiingo's supported-tickers list after the US stock/ETF filter (e.g. ACOM:
-   2009–2013 NASDAQ stock, 2026 NYSE Arca ETF). Under the current model
-   these would overwrite or merge, undermining D-010's survivorship-bias
-   guarantee. Investigate what identity Tiingo exposes for reused symbols
-   (e.g. permaTicker, listing date ranges) and decide whether the warehouse
-   needs a stable instrument id or date-ranged symbol records. **Blocks
-   every D-011 historical backfill phase, including the seed-list ones:**
-   282 seed ticker strings match multiple supported-ticker records (577
-   records; review 2026-08-26) — ACOM itself is seeded for 2011 — so a
-   bare-ticker backfill could fetch the wrong security or merge two. The
-   spike may narrow the gate if endpoint measurements prove a specific
-   dataset or frequency safe.
 
 Answered by the 2026-08-26 intraday spike:
 
@@ -86,6 +70,19 @@ Answered by the 2026-08-26 intraday spike:
    for cheap later checkpoints; derive opening-window/session-relative bars
    from 5-minute data. IEX-only volume is not valid for composite liquidity or
    absolute cross-sectional thresholds.
+
+Answered by the 2026-08-26 instrument-identity spike:
+
+- **OQ-8 — Instrument identity for reused ticker symbols:** *answered by
+  D-014.* The current supported-tickers archive contains 993 duplicated US
+  stock/ETF symbols (2,025 records), including 282 seed symbols (577 records).
+  The warehouse will key bars and coverage by an internal stable instrument
+  id and keep ticker/exchange/date as aliases; a Tiingo permaTicker is an
+  optional, dataset-validated vendor identifier, not the warehouse key.
+  Every production write is paused until the M1 migration; afterward every
+  response is identity-envelope validated and unresolved request segments fail
+  closed while validated segments may ingest. See
+  [instrument-identity-spike.md](instrument-identity-spike.md).
 
 Answered at the 2026-08-26 triage:
 

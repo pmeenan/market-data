@@ -22,6 +22,37 @@ Newest first. RE-numbers are never reused.
 
 ---
 
+## RE-005: Tiingo identity surfaces are incomplete and dataset-dependent  (2026-08-26, status: open)
+
+**Environment:** Tiingo public supported-tickers archive plus authenticated
+EOD, IEX, utilities/search, and fundamentals metadata endpoints; Power tier;
+measured 2026-08-26.
+
+**Repro/measurement:** The public archive has date-ranged duplicate symbol
+records but no permaTicker. Bare `ACOM` EOD returned only the 2026 ETF, while
+EOD requests using two permanent IDs correctly returned the 2009–2013
+Ancestry.com history and the ETF history separately. Search returned both ACOM
+IDs but missed historical US ADPT and returned no exact ALTR identity at all;
+fundamentals metadata covered some recycled stocks but is not the complete
+stock/ETF price master. An IEX request using Ancestry.com's old ACOM
+permaTicker unexpectedly returned 80 rows dated in 2026, all after that
+security's 2013 end date; the current ETF permaTicker returned no IEX rows.
+
+**Observed:** A bare ticker selects one of several securities, stable-ID
+discovery is incomplete, and a permaTicker validated for EOD can resolve
+differently on IEX.
+
+**Expected:** One complete vendor security master and one stable identifier
+with consistent semantics across price datasets.
+
+**Impact:** Follow D-014: use an internal instrument id and validate every
+response against its dataset, request segment, and expected identity envelope;
+fail closed on any unresolved segment, even if its ticker appears unique.
+Never infer IEX identity safety from a successful EOD probe.
+See [instrument-identity-spike.md](instrument-identity-spike.md) and Tiingo's
+[search documentation](https://www.tiingo.com/documentation/utilities/search)
+and [changelog](https://www.tiingo.com/documentation/general/changelog).
+
 ## RE-004: IEX resampling depends on request range  (2026-08-26, status: open)
 
 **Environment:** Tiingo historical IEX REST endpoint, CSV, Power tier,
