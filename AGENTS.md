@@ -69,6 +69,7 @@ build → commit loop, on-demand reviews, and the human commit gate.
 | [docs/decisions.md](docs/decisions.md) | Settled choices (D-NNN). Scan headings; read only the entries your task touches |
 | [docs/intraday-spike.md](docs/intraday-spike.md) | Measured IEX depth, payload sizes, bar semantics, and bandwidth projections |
 | [docs/instrument-identity-spike.md](docs/instrument-identity-spike.md) | Reused-symbol measurements, Tiingo identity behavior, and the D-014 model |
+| [docs/backtest-engine-spike.md](docs/backtest-engine-spike.md) | OQ-1 prototype comparison, benchmark, library-fit findings, and D-015 recommendation |
 | [docs/rough-edges.md](docs/rough-edges.md) | Findings log (RE-NNN). Grep before adding a finding or debugging weirdness |
 
 ## Rules for all agents
@@ -110,7 +111,9 @@ tests. Feature triage and the intraday depth/semantics spike are done
 reframing (D-010), and intraday semantics (D-012) are settled; the instrument-
 identity spike is also done (D-014: stable instrument ids + date-ranged
 aliases; unresolved segments fail closed). The engine
-spike, architecture draft, and real milestone ladder remain. Production
+spike is done (D-015: a project-native DuckDB/polars vectorized event engine;
+stateful portfolio simulation is deferred), while the architecture draft and
+real milestone ladder remain. Production
 ingestion is paused until the M1 identity migration; the backtest layer does
 not exist yet. See
 [docs/plan.md](docs/plan.md). Keep this

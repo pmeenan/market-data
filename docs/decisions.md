@@ -25,6 +25,53 @@ Decision / Context / Consequences / Reopen if
 
 ---
 
+## D-015: Research uses a project-native DuckDB/polars event engine  (2026-08-26, status: accepted)
+
+**Decision:** The research layer starts as a small, project-native vectorized
+engine over the existing DuckDB/polars query stack. Strategies select events
+and produce tidy, `instrument_id`-keyed observation frames; shared research
+code owns reusable evaluation, parameter/run recording, and result
+persistence. The default path is columnar SQL/dataframe work, not a Python
+row-by-row simulation loop.
+
+Do not add a general portfolio/order simulator until a confirmed study needs
+stateful capital allocation, overlapping-position constraints, fill
+semantics, or another execution behavior that an event frame cannot express.
+At that point, implement the smallest required simulator or repeat the
+library comparison against that concrete acceptance case.
+
+**Context:** The OQ-1 spike implemented the gap-recovery acceptance case both
+ways on deterministic representative data: 300 instruments, 1,000 sessions,
+300,000 EOD rows, 900,000 intraday checkpoint rows, and 40,686 qualifying gap
+events. Both prototypes produced the same 122,058 observations and identical
+checkpoint summaries. The DuckDB/polars implementation kept the warehouse's
+long-form shape and completed in 0.220 seconds (0.216 warm), versus 6.970
+seconds (2.843 warm) for vectorbt 1.1.0; first-run peak RSS was 361 MiB versus
+710 MiB. The vectorbt prototype was also longer (71 versus 51 lines) because
+it had to pivot dense matrices, simulate a separate portfolio for each exit
+horizon, and still calculate event-specific metrics outside the library.
+
+vectorbt's portfolio accounting is useful but premature for the first study,
+whose output is a conditional return distribution rather than an executable
+portfolio. Adoption is independently blocked by D-001: vectorbt 1.1.0's own
+license is Apache 2.0 with Commons Clause, not a permissive
+Apache-2.0-compatible license. The full method, results, limitations, and
+current-source links are in
+[backtest-engine-spike.md](backtest-engine-spike.md).
+
+**Consequences:** M2 builds focused research primitives and the gap study,
+not a framework-shaped abstraction layer. DuckDB performs Parquet scans,
+windowing, and large filters; polars handles strategy transformations and
+tidy outputs. Results remain compatible with OQ-6's settled SQLite-metadata +
+Parquet-observations shape. Existing dependencies suffice. Portfolio metrics
+must not be presented as strategy evidence until portfolio/execution
+semantics are explicitly defined.
+
+**Reopen if:** A confirmed strategy requires stateful execution semantics,
+the long-form columnar path fails representative full-scale benchmarks, or a
+permissively licensed library demonstrably removes more project complexity
+than it adds for a concrete study.
+
 ## D-014: Stable instruments own bars; symbols are date-ranged aliases  (2026-08-26, status: accepted, amends D-003, D-004, D-009, and D-011)
 
 **Decision:** The warehouse's durable identity is an opaque internal

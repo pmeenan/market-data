@@ -48,11 +48,12 @@
 Where a bullet below leans on a `proposed` features.md row, it is a design
 assumption to confirm during feature triage, not settled scope.
 
-- A **research layer** (engine per OQ-1) that loads bars through `query.py`,
-  selects instruments and screens from the stored data (D-010, D-014), joins
-  and persists results by `instrument_id`, and produces
-  per-run artifacts — likely a `backtest/` module with strategies as small
-  Python classes/functions.
+- A **research layer** using D-015's project-native vectorized event engine:
+  DuckDB scans/windowing over Parquet, polars strategy transformations, and
+  tidy `instrument_id`-keyed observation frames. It loads bars through
+  `query.py`, selects instruments and screens from stored data (D-010,
+  D-014), and produces per-run artifacts. A portfolio/order simulator is
+  deferred until a confirmed study requires stateful execution semantics.
 - **Results persistence** (OQ-6): probably run manifests + metric tables under
   `data/results/`, queryable through the same DuckDB surface.
 - **Hourly bars** land in the existing intraday store as `freq="1hour"` and
@@ -73,7 +74,8 @@ assumption to confirm during feature triage, not settled scope.
 ## Open architecture questions
 
 The numbered open questions live in [features.md](features.md) (OQ-1..OQ-8).
-The only architecture-blocking one still open is OQ-1 (engine). OQ-8 was
-answered by the instrument-identity spike and D-014; OQ-2/OQ-3 by the
-intraday spike and D-012; OQ-5 was dissolved and OQ-6 answered at the
-2026-08-26 triage (results: SQLite metadata + Parquet outputs).
+No architecture-blocking numbered question remains: OQ-1 was answered by the
+backtest-engine spike and D-015; OQ-8 by the instrument-identity spike and
+D-014; OQ-2/OQ-3 by the intraday spike and D-012; OQ-5 was dissolved and
+OQ-6 answered at the 2026-08-26 triage (results: SQLite metadata + Parquet
+outputs).

@@ -31,12 +31,12 @@ Status legend: `confirmed` · `proposed` · `rejected (D-NNN)`
 
 | Feature | Status | Notes |
 | --- | --- | --- |
-| Strategy testing against the local dataset | confirmed | Engine choice is OQ-1 |
+| Strategy testing against the local dataset | confirmed | D-015: project-native vectorized event engine over DuckDB/polars; add stateful portfolio simulation only when a confirmed study needs it |
 | Morning gap-down over-reaction/recovery study | confirmed | The first strategy; uses EOD open plus direct hourly checkpoints for a coarse pass, and 5-minute bars for the complete opening-window study (D-012) |
 | DuckDB SQL + polars query surface | confirmed | Built (`query.py`, `market-data sql`) |
 | Backtest result persistence (runs, parameters, metrics) | confirmed | Promoted at triage 2026-08-26; shape per OQ-6 answer — run metadata/params/metrics in SQLite, large per-trade outputs as Parquet under `data/`, queryable via the same DuckDB surface |
 | Benchmark/risk-free comparison series in evaluation | confirmed | Promoted at triage 2026-08-26; SPY is already in the seed data |
-| Example notebooks for study workflows | confirmed | Promoted at triage 2026-08-26; lands once the engine (OQ-1) is chosen |
+| Example notebooks for study workflows | confirmed | Promoted at triage 2026-08-26; lands with the M2 first-study implementation now that D-015 has settled the engine |
 
 ## Interface & operations
 
@@ -51,11 +51,17 @@ Status legend: `confirmed` · `proposed` · `rejected (D-NNN)`
 
 ## Open questions (answer during M0)
 
-Still open:
+Answered by the 2026-08-26 backtest-engine spike:
 
-- **OQ-1 — Backtest engine:** custom vectorized loop over polars/DuckDB, or
-   an existing library (e.g. vectorbt)? Answered by the M0 engine spike in
-   [plan.md](plan.md); the gap study is the acceptance test.
+- **OQ-1 — Backtest engine:** *answered by D-015.* Use a project-native,
+  vectorized event-study engine over DuckDB/polars. On a representative
+  synthetic 1.2-million-row gap-recovery prototype it was shorter, materially
+  faster, and used about half the memory of vectorbt 1.1.0 while producing
+  identical results. It also preserves the warehouse's long-form shape;
+  vectorbt required dense pivots and is inadmissible under D-001's license
+  policy. Defer a portfolio/order simulator until a confirmed study requires
+  stateful execution. See
+  [backtest-engine-spike.md](backtest-engine-spike.md).
 
 Answered by the 2026-08-26 intraday spike:
 

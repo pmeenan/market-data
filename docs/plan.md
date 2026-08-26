@@ -75,9 +75,15 @@ of it.
       migration; afterward every response is identity-envelope validated,
       validated segments may proceed, and unresolved segments fail closed. See
       [instrument-identity-spike.md](instrument-identity-spike.md).
-- [ ] Spike — backtest engine (OQ-1): prototype the gap-recovery study once
-      with a hand-rolled polars/DuckDB loop and once with an existing library;
-      compare effort and fit. Output: recommendation recorded in decisions.md.
+- [x] Spike — backtest engine (OQ-1; 2026-08-26): prototyped the
+      gap-recovery event study with DuckDB/polars and vectorbt 1.1.0 on the
+      same representative synthetic 1.2-million-row dataset. Both produced
+      identical results; the native path was shorter, materially faster, used
+      about half the memory, and kept the warehouse's long-form shape.
+      vectorbt is also inadmissible under D-001's dependency policy (Commons
+      Clause). D-015 chooses a project-native vectorized event engine and
+      defers a portfolio/order simulator until a study needs one. See
+      [backtest-engine-spike.md](backtest-engine-spike.md).
 - [x] Settle universe-membership semantics for backtests (OQ-5): dissolved by
       D-010 — universes are dataset seed filters, not backtest membership.
 - [ ] First full draft of architecture.md (research layer + results storage,
@@ -92,9 +98,9 @@ of it.
       criteria.
 
 **Exit criteria:** the owner has walked features.md and says the plan is good
-enough to build from; the architecture-blocking open question OQ-1 is answered
-(OQ-8 is answered by D-014, OQ-2/OQ-3 by D-012, and OQ-5 was dissolved);
-toolchain decided; M1+ milestones have scopes. M0 is a
+enough to build from; the former architecture-blocking question OQ-1 is
+answered by D-015 (OQ-8 by D-014, OQ-2/OQ-3 by D-012, and OQ-5 was
+dissolved); toolchain decided; M1+ milestones have scopes. M0 is a
 conversation, not a phase — it exits on the owner's call, not on a checklist
 reaching zero.
 
