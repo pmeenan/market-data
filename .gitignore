@@ -1,0 +1,19 @@
+# Local data warehouse (Parquet bars, SQLite metadata) - never commit
+data/
+
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+
+# Notebooks
+.ipynb_checkpoints/
