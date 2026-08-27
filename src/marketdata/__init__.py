@@ -10,7 +10,7 @@ Storage layout (under the configured data directory):
 
 Active bars are keyed by opaque ``instrument_id`` values. Production
 ingestion paths fetch only request segments authorized by exact-dataset
-identity evidence; operational use awaits M1's controlled Tiingo canary.
+identity evidence; unresolved segments remain fail-closed and visible.
 """
 
 from marketdata.config import Config, load_config

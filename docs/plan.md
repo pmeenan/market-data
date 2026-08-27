@@ -126,7 +126,7 @@ reaching zero.
 **Implementation gate:** satisfied 2026-08-27 when the owner approved the
 ladder and explicitly closed M0.
 
-## M1 — Identity-safe canonical warehouse  `in progress`
+## M1 — Identity-safe canonical warehouse  `done`
 
 Goal: replace the ticker-keyed v1 substrate with the D-014/D-017/D-019 model
 and reopen production ingestion only for request segments whose identity can
@@ -181,20 +181,26 @@ Scope:
 
 Exit criteria:
 
-- [ ] A fixture containing a rename, a reused symbol, an evidence gap, and an
+- [x] A fixture containing a rename, a reused symbol, an evidence gap, and an
   overlapping alias migrates deterministically: resolvable bars appear once
   under the correct stable ids and every unsafe source remains quarantined and
   reported.
-- [ ] No active bar row, path, coverage key, or durable research-facing join is
+- [x] No active bar row, path, coverage key, or durable research-facing join is
   owned by a ticker string; all three dataset keys require independent
   identity evidence, with tests proving cross-frequency evidence is rejected.
-- [ ] Crash-boundary and rerun tests prove unique keys, no falsely bridged
+- [x] Crash-boundary and rerun tests prove unique keys, no falsely bridged
   coverage, atomic per-bucket publication, and convergence after interruption.
-- [ ] A controlled real-Tiingo canary validates at least one resolved EOD and
+- [x] A controlled real-Tiingo canary validates at least one resolved EOD and
       one resolved IEX request without writing any unresolved segment.
       Production ingestion is then permitted for validated segments;
       unresolved work remains fail-closed and visible.
-- [ ] `make check` passes and the migration/operator report documents what
+      Completed 2026-08-27: an isolated AAPL canary over 2025-08-25..26 used
+      independently recorded EOD and `intraday_1hour` evidence, made exactly
+      one validated request to each endpoint, published 2 EOD and 12 IEX rows,
+      and blocked an unresolved peer in both datasets without creating an
+      instrument, coverage, or bars for it. Reconciliation reported no issues;
+      a rerun made no HTTP requests and left the canonical files unchanged.
+- [x] `make check` passes and the migration/operator report documents what
       moved, what remains quarantined, and how to retry safely.
 
 ## M2 — Trustworthy scheduled ingestion  `pending`

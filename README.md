@@ -56,8 +56,9 @@ a coverage interval (so backfills fill missing leading history too), Parquet
 writes are merge-upserts keyed on date/timestamp, nightly updates refetch a
 rolling overlap to pick up corrections and restated adjustments, and a newly
 observed split/dividend triggers a full-history refresh for that instrument.
-Operational production use remains paused until M1's controlled real-Tiingo
-canary. If coverage rows are lost or in doubt,
+Operational ingestion is permitted only for request segments with independently
+validated exact-dataset identity evidence; unresolved work remains fail-closed
+and visible. If coverage rows are lost or in doubt,
 `market-data reconcile` rebuilds them from active v2 files or an unmigrated v1
 warehouse. This does not recreate a lost `meta.db`: identity evidence cannot be
 reconstructed from bar files, so restore the metadata database from backup
@@ -65,8 +66,8 @@ first.
 
 ### M1 bar migration
 
-Production use remains paused pending the controlled Tiingo canary. The storage
-migration can be exercised with:
+M1's controlled EOD/IEX canary passed on 2026-08-27. The storage migration can
+be exercised with:
 
 ```bash
 market-data migrate-v2-bars
@@ -145,16 +146,14 @@ src/marketdata/
 
 ## Status
 
-Milestone **M1 (identity-safe canonical warehouse)** is in progress after the
-owner approved and closed M0 on 2026-08-27. The identity registry and explicit
-resolution reports plus the v2 hash-bucket storage migration, atomic bar
-publication, conservative reconciliation, and operator report are implemented.
-Instrument-owned ingestion primitives, canonical query APIs, and validated
-per-segment orchestration plus CSV transport and in-memory request/wire-byte
-metering are also implemented. Production use remains paused pending M1's
-controlled canary. The first
-planned study asks whether stocks that open significantly down tend to recover
-over the next few hours; the research/backtesting layer begins in M3.
+Milestone **M1 (identity-safe canonical warehouse)** closed on 2026-08-27 after
+its controlled EOD/IEX canary passed. The identity registry, v2 hash-bucket
+storage migration, atomic publication, conservative reconciliation, operator
+reports, instrument-owned ingestion/query APIs, validated per-segment
+orchestration, CSV transport, and in-memory request/wire-byte metering are
+implemented. Production ingestion is permitted only for validated segments;
+unresolved work remains fail-closed and visible. M2 (trustworthy scheduled
+ingestion) is pending. The research/backtesting layer begins in M3.
 
 ## Start here
 

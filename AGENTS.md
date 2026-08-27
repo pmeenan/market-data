@@ -110,14 +110,12 @@ build → commit loop, on-demand reviews, and the human commit gate.
 
 ## Current status
 
-Milestone **M1 (identity-safe canonical warehouse)** is in progress after the
-owner approved the plan and closed M0 on 2026-08-27. The schema-v2 identity
-registry and explicit alias/vendor/universe resolution reports are implemented;
-the v2 hash-bucket bar migration, atomic publication, reconciliation, and
-operator report plus instrument-keyed ingestion/query APIs are implemented;
-validated per-segment ingestion orchestration is implemented and CSV transport
-with in-memory request/wire-byte metering is implemented. Production use
-stays paused pending M1's controlled Tiingo canary; the
-backtest layer does not exist yet. See
+Milestone **M1 (identity-safe canonical warehouse)** closed on 2026-08-27 after
+its controlled EOD/IEX canary passed. Canonical bars, coverage, ingestion, and
+research-facing joins are instrument-keyed; exact-dataset identity validation,
+v2 migration/reconciliation, operator reporting, CSV transport, and in-memory
+request/wire-byte metering are implemented. Production ingestion is permitted
+only for validated request segments; unresolved work remains fail-closed and
+visible. M2 is pending, and the backtest layer does not exist yet. See
 [docs/plan.md](docs/plan.md). Keep this paragraph short and current when plan.md
 milestone status changes (rule 4).

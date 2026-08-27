@@ -391,7 +391,8 @@ Implementations and tests preserve these properties:
 This document does not assign milestone scope. [plan.md](plan.md) is the sole
 source for milestone names, status, and exit criteria. Its M1–M4 ladder is the
 approved implementation sequence; the owner reviewed the ladder, closed M0,
-and opened M1 on 2026-08-27.
+and closed M1 after its controlled canary passed on 2026-08-27. M2 remains
+pending.
 
 The architecture imposes only these ordering constraints on that planning:
 
