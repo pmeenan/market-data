@@ -10,6 +10,7 @@ from marketdata.query import (
     load_eod_by_ticker,
     load_intraday,
     load_intraday_by_ticker,
+    load_intraday_sessions,
 )
 from marketdata.store import MetaStore
 from marketdata.store.bars import EOD_SCHEMA, INTRADAY_SCHEMA, BarStore
@@ -105,6 +106,41 @@ def test_hourly_view_and_loader(tmp_path):
     assert df.height == 6
     assert df["instrument_id"].unique().to_list() == ["apple-id"]
     assert "ticker" not in df.columns
+
+
+def test_session_loader_filters_and_labels_without_changing_raw_view(tmp_path):
+    config = _config(tmp_path)
+    bars = BarStore(tmp_path)
+    _canonical(
+        tmp_path,
+        [("apple-id", "AAPL", date(1980, 1, 1), date(9999, 12, 31))],
+    )
+    frame = (
+        _hourly("AAPL")
+        .head(3)
+        .with_columns(
+            ts=pl.Series(
+                "ts",
+                [
+                    datetime(2024, 6, 3, 14, 0, tzinfo=UTC),
+                    datetime(2024, 6, 3, 19, 0, tzinfo=UTC),
+                    datetime(2024, 7, 4, 14, 0, tzinfo=UTC),
+                ],
+                dtype=pl.Datetime("us", "UTC"),
+            )
+        )
+    )
+    bars.publish_intraday({"apple-id": frame}, freq="1hour")
+
+    raw = load_intraday(config, instrument_ids=["apple-id"], freq="1hour")
+    labelled = load_intraday_sessions(config, instrument_ids=["apple-id"], freq="1hour")
+
+    assert raw.height == 3
+    assert labelled["ts"].to_list() == [
+        datetime(2024, 6, 3, 14, 0, tzinfo=UTC),
+        datetime(2024, 6, 3, 19, 0, tzinfo=UTC),
+    ]
+    assert labelled["minutes_from_open"].to_list() == [30, 330]
 
 
 def test_load_eod_filters(tmp_path):

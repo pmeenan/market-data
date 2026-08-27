@@ -58,7 +58,10 @@ rolling overlap to pick up corrections and restated adjustments, and a newly
 observed split/dividend triggers a full-history refresh for that instrument.
 Operational ingestion is permitted only for request segments with independently
 validated exact-dataset identity evidence; unresolved work remains fail-closed
-and visible. If coverage rows are lost or in doubt,
+and visible. Intraday history uses frequency-specific, sub-10,000-row request
+units through the next XNYS session; lookahead rows are validated and discarded,
+while only rows inside the target's identity envelope can be normalized or
+published (D-021). If coverage rows are lost or in doubt,
 `market-data reconcile` rebuilds them from active v2 files or an unmigrated v1
 warehouse. This does not recreate a lost `meta.db`: identity evidence cannot be
 reconstructed from bar files, so restore the metadata database from backup
@@ -92,7 +95,7 @@ shape explicitly as `meta.ticker_coverage_v1` during the transition.
 
 ```python
 from marketdata import load_config
-from marketdata.query import connect, load_eod
+from marketdata.query import connect, load_eod, load_intraday_sessions
 
 config = load_config()
 
@@ -102,6 +105,16 @@ df = load_eod(
     config,
     instrument_ids=["apple-id", "microsoft-id"],
     start="2020-01-01",
+)
+
+# Calendar-filtered intraday bars. Canonical timestamps remain unchanged;
+# the projection adds UTC session bounds, minutes from open, early-close state,
+# and the frequency's explicit bar-label semantics.
+intraday = load_intraday_sessions(
+    config,
+    instrument_ids=["apple-id"],
+    start="2024-01-01",
+    freq="5min",
 )
 
 # Or raw DuckDB for arbitrary SQL (views: eod, intraday_<freq> per frequency
@@ -133,6 +146,7 @@ data/                       (gitignored; set MARKET_DATA_DIR to relocate)
     migration-report.json  durable per-source migration outcome
 src/marketdata/
   bar_fields.py              shared Tiingo bar-field contract
+  calendar.py                XNYS sessions, IEX request bounds, bar labels
   identity.py               fail-closed identity resolution result contracts
   tiingo.py                 Tiingo REST client (CSV bars, retries, metering)
   store/bars.py             Parquet bar storage (merge-upsert writes)
@@ -146,14 +160,13 @@ src/marketdata/
 
 ## Status
 
-Milestone **M1 (identity-safe canonical warehouse)** closed on 2026-08-27 after
-its controlled EOD/IEX canary passed. The identity registry, v2 hash-bucket
-storage migration, atomic publication, conservative reconciliation, operator
-reports, instrument-owned ingestion/query APIs, validated per-segment
-orchestration, CSV transport, and in-memory request/wire-byte metering are
-implemented. Production ingestion is permitted only for validated segments;
-unresolved work remains fail-closed and visible. M2 (trustworthy scheduled
-ingestion) is pending. The research/backtesting layer begins in M3.
+Milestone **M2 (trustworthy scheduled ingestion)** is in progress. Its
+cap-safe intraday request planner and XNYS calendar/session-label surface are
+implemented; quality findings, durable scheduler/budget state, shared process
+locking, and scheduled operations remain. M1 closed on 2026-08-27 after its
+controlled EOD/IEX canary passed. Production ingestion is permitted only for
+validated segments; unresolved work remains fail-closed and visible. The
+research/backtesting layer begins in M3.
 
 ## Start here
 

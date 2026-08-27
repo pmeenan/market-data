@@ -83,7 +83,7 @@ See [instrument-identity-spike.md](instrument-identity-spike.md) and Tiingo's
 [search documentation](https://www.tiingo.com/documentation/utilities/search)
 and [changelog](https://www.tiingo.com/documentation/general/changelog).
 
-## RE-004: IEX resampling depends on request range  (2026-08-26, status: open)
+## RE-004: IEX resampling depends on request range  (2026-08-26, status: worked-around)
 
 **Environment:** Tiingo historical IEX REST endpoint, CSV, Power tier,
 measured 2026-08-26.
@@ -109,11 +109,11 @@ rows.
 **Expected:** A date range only partitions a stable underlying series, and
 `forceFill=false` excludes synthetic non-trading intervals.
 
-**Impact:** Never infer sessions from row presence or zero volume. Filter with
-the exchange calendar, fetch each chunk through at least the next trading day,
-discard lookahead rows, and merge-upsert/deduplicate. The current ingestion
-client does not yet implement the lookahead; fix before historical intraday
-backfill. [NYSE calendar](https://www.nyse.com/markets/hours-calendars),
+**Impact:** Never infer sessions from row presence or zero volume. The M2
+planner now fetches every bounded chunk through the next XNYS session,
+request-validates and discards D-021's context rows, and
+merge-upserts/deduplicates only target-envelope rows; session-labelled loaders
+separately filter raw bars through the same calendar. [NYSE calendar](https://www.nyse.com/markets/hours-calendars),
 [Tiingo IEX docs](https://www.tiingo.com/documentation/iex).
 
 ## RE-003: Direct IEX hourly bars omit the opening half-hour  (2026-08-26, status: wontfix)
@@ -135,7 +135,7 @@ covering the whole regular session from the open.
 **Impact:** Keep the vendor hourly dataset for 10:00-and-later checkpoints,
 but derive opening-window/session-relative bins from 5-minute data (D-012).
 
-## RE-002: Historical IEX responses silently cap at 10,000 rows  (2026-08-26, status: open)
+## RE-002: Historical IEX responses silently cap at 10,000 rows  (2026-08-26, status: worked-around)
 
 **Environment:** Tiingo historical IEX REST endpoint, CSV, Power tier,
 measured 2026-08-26.
@@ -153,9 +153,10 @@ signal.
 
 **Impact:** Every historical IEX fetch must use bounded chunks and reject a
 response with 10,000 rows as potentially truncated. A range probe using one
-large request will report a false history depth. The current 30-day ingestion
-chunks stay below the cap for 5-minute regular-session data, but the invariant
-needs an explicit validation before chunk sizes change.
+large request will report a false history depth. The M2 planner now derives
+frequency-specific weekday-grid bounds below 10,000 (including its
+next-session lookahead), records the bound on each request unit, and rejects
+both cap-sized responses and responses that exceed the planned envelope.
 
 ## RE-001: DuckDB→polars conversion requires pyarrow  (2026-08-26, status: worked-around)
 

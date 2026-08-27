@@ -72,8 +72,9 @@ of it.
       failed identity validation. D-014 therefore adopts internal stable
       instrument ids with date-ranged symbol aliases and dataset-specific
       vendor identifiers. Every production write is paused until the M1
-      migration; afterward every response is identity-envelope validated,
-      validated segments may proceed, and unresolved segments fail closed. See
+      migration; afterward every publishable response row is identity-envelope
+      validated, validated segments may proceed, and unresolved segments fail
+      closed. See
       [instrument-identity-spike.md](instrument-identity-spike.md).
 - [x] Spike — backtest engine (OQ-1; 2026-08-26): prototyped the
       gap-recovery event study with DuckDB/polars and vectorbt 1.1.0 on the
@@ -203,7 +204,7 @@ Exit criteria:
 - [x] `make check` passes and the migration/operator report documents what
       moved, what remains quarantined, and how to retry safely.
 
-## M2 — Trustworthy scheduled ingestion  `pending`
+## M2 — Trustworthy scheduled ingestion  `in progress`
 
 Goal: make current collection and the long-running historical program safe to
 operate unattended within Tiingo's limits, and make data fitness visible before
@@ -211,10 +212,18 @@ research consumes it.
 
 Scope:
 
-- [ ] Harden hourly and five-minute planning against the 10,000-row cap and
+- [x] Harden hourly and five-minute planning against the 10,000-row cap and
   range-dependent IEX chunk boundaries (RE-002, RE-004). Filter and label
   sessions through a US exchange calendar with explicit UTC, DST, half-day,
   and vendor bar-label semantics; raw vendor timestamps remain unchanged.
+  Completed 2026-08-27: frequency-specific weekday-grid bounds keep every
+  request below the silent cap, each chunk fetches through the next XNYS
+  session and discards the validated lookahead, cap-sized responses fail
+  closed, and session-labelled loaders expose UTC opens/closes, DST,
+  half-days, minutes from open, and distinct direct-hourly/five-minute label
+  semantics without altering canonical bars. D-021 makes the one-session
+  request extension discard-only context so delisted target envelopes remain
+  exact rather than being falsely extended.
 - [ ] Implement the calendar and quality contracts in architecture.md, including
   every minimum check listed there. Checks emit structured findings and never
   silently repair vendor bars; each study remains responsible for declaring

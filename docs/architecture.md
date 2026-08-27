@@ -239,10 +239,14 @@ Identity validation precedes every production write:
    validated alias evidence.
 2. Choose an identifier validated for that exact `dataset_key` and segment.
    Split or clamp a request at alias boundaries; never extend a bare ticker
-   through an evidence gap or reuse another frequency's validation.
+   through an evidence gap or reuse another frequency's validation. D-021's
+   IEX next-session `endDate` is discard-only transport context, not an
+   extension of the ingestible segment.
 3. Fetch into memory/staging and validate every returned timestamp against
-   both the request segment and the instrument envelope. Check endpoint
-   metadata where it exists. Reject the entire response on conflict.
+   the HTTP request and endpoint metadata where it exists. Reject the entire
+   response on conflict. Discard D-021 context rows, then validate every
+   retained timestamp against both the request segment and instrument
+   envelope before normalization.
 4. Normalize to the canonical schema. If a new EOD corporate action requires
    a full refresh, validate that complete snapshot before publishing any frame
    from the triggering operation.
@@ -391,8 +395,8 @@ Implementations and tests preserve these properties:
 This document does not assign milestone scope. [plan.md](plan.md) is the sole
 source for milestone names, status, and exit criteria. Its M1–M4 ladder is the
 approved implementation sequence; the owner reviewed the ladder, closed M0,
-and closed M1 after its controlled canary passed on 2026-08-27. M2 remains
-pending.
+and closed M1 after its controlled canary passed on 2026-08-27. M2 is in
+progress.
 
 The architecture imposes only these ordering constraints on that planning:
 

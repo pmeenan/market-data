@@ -25,6 +25,46 @@ Decision / Context / Consequences / Reopen if
 
 ---
 
+## D-021: IEX finalization lookahead is discard-only transport context  (2026-08-27, status: accepted, amends D-014 and D-020)
+
+**Decision:** An identity-validated historical IEX target unit may extend its
+HTTP `endDate` only through the first XNYS session strictly after the target
+end. That extension is transport context required to make Tiingo return the
+target's final bars; it is not part of the ingestible identity segment. Every
+returned row must remain inside the HTTP request and agree with identifier
+metadata where present. The full response is charged and checked against the
+planner envelope and 10,000-row cap before discard. Rows after the target end
+are then discarded before normalization, publication, or coverage accounting;
+every retained row must still fall inside D-014's resolved alias and
+exact-dataset identity envelope. No other request-bound expansion is allowed.
+
+**Context:** RE-004 established that Tiingo can omit a session's final hourly
+or five-minute bars unless `endDate` reaches the next exchange session.
+Requiring the resolved alias and vendor-identifier interval itself to cover
+that later session makes the final historical unit impossible for every
+delisted instrument, because its evidence correctly ends on its last listing
+day. It also turns a response-shaping workaround into false evidence that the
+instrument existed later. Treating lookahead rows as ingestible would violate
+D-014; treating the narrowly bounded request extension as context preserves
+the identity boundary and the survivorship-safe delisted backfill goal.
+
+**Consequences:** D-014's requirement that every publishable row be inside the
+instrument envelope remains unchanged, but its former wording that every
+returned row be inside the ingestible segment is narrowed for this one
+discard-only IEX context. A bare ticker may be used only when the target range
+itself resolves uniquely; any context row is structurally/metadata validated
+and discarded even if a later alias exists. Tests cover a delisted final unit,
+lookahead discard, metadata conflict, request-cap accounting, and refusal to
+extend beyond one next session. D-020's safe request envelope includes this
+context in its row bound without advancing the instrument frontier through it.
+
+**Reopen if:** Tiingo makes range results stable without lookahead, supplies
+complete pagination/finalization semantics, or measurement shows that a later
+`endDate` can change the identity of rows dated inside an otherwise validated
+target segment.
+
+---
+
 ## D-020: Historical backfills advance breadth-first by request depth  (2026-08-27, status: accepted, amends D-011 and D-013)
 
 **Decision:** Every historical backfill in phases 1–3, whether started
@@ -338,7 +378,7 @@ the long-form columnar path fails representative full-scale benchmarks, or a
 permissively licensed library demonstrably removes more project complexity
 than it adds for a concrete study.
 
-## D-014: Stable instruments own bars; symbols are date-ranged aliases  (2026-08-26, status: accepted, amended by D-017; amends D-003, D-004, D-009, and D-011)
+## D-014: Stable instruments own bars; symbols are date-ranged aliases  (2026-08-26, status: accepted, amended by D-017 and D-021; amends D-003, D-004, D-009, and D-011)
 
 **Decision:** The warehouse's durable identity is an opaque internal
 `instrument_id`, not a ticker string and not a vendor identifier. SQLite will
@@ -358,7 +398,10 @@ that segment and the instrument's validated alias envelope; and endpoint
 metadata, where available, must agree with the stored identity. Any violation
 rejects the complete response. An empty response can advance coverage only
 after the request identifier/segment passes identity validation and D-009's
-publication-lag rule.
+publication-lag rule. D-021 defines the sole exception to the returned-row
+boundary: IEX may request through the next session as discard-only transport
+context, but no row outside the validated target envelope can be normalized,
+written, or used for coverage.
 
 A bare ticker may identify one request segment only when the segment is wholly
 contained in one validated alias interval, no other known record for that

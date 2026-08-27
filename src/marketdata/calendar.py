@@ -1,0 +1,229 @@
+"""US exchange-session semantics for IEX planning and research.
+
+Canonical intraday bars retain Tiingo's timestamps exactly as received.  This
+module supplies the separate XNYS calendar projection used to bound requests
+and to select/label regular-session bars for research.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
+from functools import lru_cache
+
+import exchange_calendars as xcals
+import polars as pl
+
+from marketdata.store.bars import require_intraday_freq
+
+IEX_ROW_CAP = 10_000
+_ROWS_PER_WEEKDAY = {"1hour": 6, "5min": 78}
+_BAR_MINUTES = {"1hour": 60, "5min": 5}
+_BAR_LABEL_SEMANTICS = {
+    "1hour": "clock_hour_start",
+    "5min": "session_5min_start",
+}
+_NORMAL_SESSION_MINUTES = 390
+
+
+@dataclass(frozen=True)
+class IntradayRequestChunk:
+    """One target range plus the next-session request lookahead.
+
+    ``start`` and ``end`` partition the caller's requested dates.  ``fetch_end``
+    reaches the first exchange session after ``end`` so Tiingo finalizes the
+    last target session; rows after ``end`` are validation-only lookahead and
+    must be discarded.  ``max_response_rows`` is a weekday-grid upper bound
+    below Tiingo's silent cap.
+    """
+
+    start: date
+    end: date
+    fetch_end: date
+    max_response_rows: int
+
+
+@lru_cache(maxsize=16)
+def _xnys_calendar(start_year: int, end_year: int):
+    return xcals.get_calendar(
+        "XNYS",
+        start=f"{start_year}-01-01",
+        end=f"{end_year}-12-31",
+    )
+
+
+def _calendar_for(start: date, end: date):
+    # Include adjacent years so pre-first-session January dates and Dec. 31
+    # lookaheads both lie within the instantiated calendar bounds.
+    start_year = start.year - 1 if start.year > 1 else start.year
+    end_year = end.year + 1 if end.year < 9999 else end.year
+    return _xnys_calendar(start_year, end_year)
+
+
+@lru_cache(maxsize=4096)
+def next_session_after(day: date) -> date:
+    """Return the first XNYS session strictly after ``day``."""
+    calendar = _calendar_for(day, day)
+    session = calendar.date_to_session(day.isoformat(), direction="next")
+    if session.date() <= day:
+        session = calendar.next_session(session)
+    return session.date()
+
+
+def session_schedule(start: date, end: date) -> pl.DataFrame:
+    """Return XNYS session dates and regular open/close timestamps in UTC."""
+    if start > end:
+        raise ValueError("calendar start must not be after end")
+    schedule = _calendar_for(start, end).schedule.loc[
+        start.isoformat() : end.isoformat(), ["open", "close"]
+    ]
+    schema = {
+        "session_date": pl.Date,
+        "session_open": pl.Datetime("us", "UTC"),
+        "session_close": pl.Datetime("us", "UTC"),
+        "is_early_close": pl.Boolean,
+    }
+    if schedule.empty:
+        return pl.DataFrame(schema=schema)
+    opens = [value.to_pydatetime() for value in schedule["open"]]
+    closes = [value.to_pydatetime() for value in schedule["close"]]
+    return pl.DataFrame(
+        {
+            "session_date": [value.date() for value in schedule.index],
+            "session_open": opens,
+            "session_close": closes,
+            "is_early_close": [
+                int((close - open_).total_seconds() // 60) < _NORMAL_SESSION_MINUTES
+                for open_, close in zip(opens, closes, strict=True)
+            ],
+        },
+        schema=schema,
+    )
+
+
+def label_intraday_sessions(frame: pl.DataFrame, *, freq: str) -> pl.DataFrame:
+    """Filter to valid XNYS regular-session labels and add calendar fields.
+
+    Five-minute rows are start-labelled relative to the 09:30 session open.
+    Tiingo's direct hourly rows are fixed clock-hour bins and therefore begin
+    at 10:00 rather than at the open.  A full bin must end no later than the
+    scheduled close, including on half-days.
+    """
+    require_intraday_freq(freq)
+    if "ts" not in frame.columns:
+        raise ValueError("intraday frame must contain ts")
+    additions = {
+        "session_date": pl.Date,
+        "session_open": pl.Datetime("us", "UTC"),
+        "session_close": pl.Datetime("us", "UTC"),
+        "is_early_close": pl.Boolean,
+        "minutes_from_open": pl.Int32,
+        "bar_label_semantics": pl.Utf8,
+    }
+    conflicts = set(additions) & set(frame.columns)
+    if conflicts:
+        raise ValueError(
+            f"intraday frame already contains calendar fields: {sorted(conflicts)}"
+        )
+    if frame.is_empty():
+        return pl.DataFrame(schema=frame.schema | additions)
+
+    ts_dtype = frame.schema["ts"]
+    if not isinstance(ts_dtype, pl.Datetime) or ts_dtype.time_zone != "UTC":
+        raise ValueError("intraday ts must be a UTC datetime")
+    first = frame["ts"].min()
+    last = frame["ts"].max()
+    assert isinstance(first, datetime) and isinstance(last, datetime)
+    schedule = session_schedule(first.date(), last.date())
+    bar_minutes = _BAR_MINUTES[freq]
+    labelled = (
+        frame.with_columns(pl.col("ts").dt.date().alias("session_date"))
+        .join(
+            schedule,
+            on="session_date",
+            how="inner",
+            maintain_order="left",
+        )
+        .with_columns(
+            (
+                (pl.col("ts") - pl.col("session_open"))
+                .dt.total_minutes()
+                .cast(pl.Int32)
+            ).alias("minutes_from_open")
+        )
+    )
+    valid = (pl.col("minutes_from_open") >= 0) & (
+        pl.col("ts") + pl.duration(minutes=bar_minutes) <= pl.col("session_close")
+    )
+    if freq == "1hour":
+        # Direct hourly labels are whole Eastern clock hours (10:00, 11:00,
+        # ...), not 60-minute offsets from the 09:30 open.
+        valid &= pl.col("ts").dt.convert_time_zone("America/New_York").dt.minute() == 0
+    else:
+        valid &= pl.col("minutes_from_open") % bar_minutes == 0
+    return labelled.filter(valid).with_columns(
+        pl.lit(_BAR_LABEL_SEMANTICS[freq]).alias("bar_label_semantics")
+    )
+
+
+def plan_intraday_requests(
+    start: date,
+    end: date,
+    *,
+    freq: str,
+    reverse: bool = False,
+) -> list[IntradayRequestChunk]:
+    """Partition a target range into lookahead-safe sub-10,000-row requests."""
+    require_intraday_freq(freq)
+    if start > end:
+        raise ValueError("intraday plan start must not be after end")
+    chunks = _plan_intraday_requests(start, end, freq)
+    return list(reversed(chunks)) if reverse else list(chunks)
+
+
+@lru_cache(maxsize=1024)
+def _plan_intraday_requests(
+    start: date, end: date, freq: str
+) -> tuple[IntradayRequestChunk, ...]:
+    max_weekdays = (IEX_ROW_CAP - 1) // _ROWS_PER_WEEKDAY[freq]
+    chunks: list[IntradayRequestChunk] = []
+    cursor = start
+    while cursor <= end:
+        low = cursor
+        high = end
+        chosen_end: date | None = None
+        chosen_fetch_end: date | None = None
+        chosen_weekdays = 0
+        while low <= high:
+            candidate = low + (high - low) // 2
+            fetch_end = next_session_after(candidate)
+            weekdays = _weekday_count(cursor, fetch_end)
+            if weekdays <= max_weekdays:
+                chosen_end = candidate
+                chosen_fetch_end = fetch_end
+                chosen_weekdays = weekdays
+                low = candidate + timedelta(days=1)
+            else:
+                high = candidate - timedelta(days=1)
+        if chosen_end is None or chosen_fetch_end is None:
+            raise ValueError(
+                "one intraday request day cannot fit below Tiingo's row cap"
+            )
+        chunks.append(
+            IntradayRequestChunk(
+                start=cursor,
+                end=chosen_end,
+                fetch_end=chosen_fetch_end,
+                max_response_rows=chosen_weekdays * _ROWS_PER_WEEKDAY[freq],
+            )
+        )
+        cursor = chosen_end + timedelta(days=1)
+    return tuple(chunks)
+
+
+def _weekday_count(start: date, end: date) -> int:
+    days = (end - start).days + 1
+    weeks, remainder = divmod(days, 7)
+    return weeks * 5 + sum(
+        (start.weekday() + offset) % 7 < 5 for offset in range(remainder)
+    )

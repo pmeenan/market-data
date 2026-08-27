@@ -32,8 +32,10 @@ affected docs. Until then, these govern.
 - **Stable instruments own bars; symbols are aliases.** Coverage, Parquet,
   ingestion, and research joins key on internal instrument ids with
   date-ranged aliases. Vendor identifiers are validated per dataset; every
-  response is checked against its resolved identity envelope, and unresolved
-  segments fail closed. (D-014)
+  publishable response row is checked against its resolved identity envelope,
+  and unresolved segments fail closed. The sole transport exception is D-021's
+  next-session IEX context, whose out-of-segment rows are request-validated and
+  discarded before normalization. (D-014, D-021)
 - **Research only; US stocks + ETFs only.** No order execution or broker
   connectivity, ever; no options/futures/crypto. (D-007, D-008)
 - **Ingestion is idempotent, resumable, and vintage-consistent.** Coverage is
@@ -110,12 +112,10 @@ build → commit loop, on-demand reviews, and the human commit gate.
 
 ## Current status
 
-Milestone **M1 (identity-safe canonical warehouse)** closed on 2026-08-27 after
-its controlled EOD/IEX canary passed. Canonical bars, coverage, ingestion, and
-research-facing joins are instrument-keyed; exact-dataset identity validation,
-v2 migration/reconciliation, operator reporting, CSV transport, and in-memory
-request/wire-byte metering are implemented. Production ingestion is permitted
-only for validated request segments; unresolved work remains fail-closed and
-visible. M2 is pending, and the backtest layer does not exist yet. See
-[docs/plan.md](docs/plan.md). Keep this paragraph short and current when plan.md
-milestone status changes (rule 4).
+Milestone **M2 (trustworthy scheduled ingestion)** is in progress. Cap-safe
+next-session IEX planning and the XNYS session-label surface are implemented;
+quality findings, durable scheduling/budgets, shared locking, and scheduled
+operations remain. M1 closed on 2026-08-27. Production ingestion is permitted
+only for validated request segments; unresolved work remains fail-closed. The
+backtest layer does not exist yet. See [docs/plan.md](docs/plan.md). Keep this
+paragraph short and current when plan.md milestone status changes (rule 4).

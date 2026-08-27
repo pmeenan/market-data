@@ -15,9 +15,11 @@ PERMISSIVE_SPDX_IDS = frozenset(
         "Apache-2.0",
         "BSD-2-Clause",
         "BSD-3-Clause",
+        "CC0-1.0",
         "ISC",
         "MIT",
         "PSF-2.0",
+        "Zlib",
     }
 )
 REQUIRED_EXCEPTIONS = {("certifi", "MPL-2.0"): "D-018"}

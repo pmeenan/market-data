@@ -4,6 +4,7 @@ from datetime import date, timedelta
 
 import responses
 
+from marketdata.calendar import IntradayRequestChunk
 from marketdata.ingest import (
     REFRESH_WINDOW_DAYS,
     IngestTarget,
@@ -369,7 +370,14 @@ def test_each_intraday_frequency_ingests_with_its_own_evidence(tmp_path):
         root = tmp_path / freq
         bars, meta = stores(root)
         start, end = date(2024, 1, 1), date(2024, 1, 5)
-        _identity_target(meta, "stable-id", "SAFE", f"intraday_{freq}", start, end)
+        _identity_target(
+            meta,
+            "stable-id",
+            "SAFE",
+            f"intraday_{freq}",
+            start,
+            end,
+        )
         client = FakeTiingo({})
 
         result = backfill_intraday_validated(
@@ -377,9 +385,91 @@ def test_each_intraday_frequency_ingests_with_its_own_evidence(tmp_path):
         )
 
         assert result.fetched == ["stable-id"]
-        assert client.intraday_calls == [("SAFE", start, end, freq)]
+        assert client.intraday_calls == [("SAFE", start, date(2024, 1, 8), freq)]
         assert meta.get_coverage("stable-id", f"intraday_{freq}") == (start, end)
-        assert bars.read_canonical_intraday("stable-id", freq=freq) is not None
+        stored = bars.read_canonical_intraday("stable-id", freq=freq)
+        assert stored is not None
+        assert stored["ts"].dt.date().max() == end
+
+
+def test_intraday_context_lookahead_does_not_require_post_delisting_evidence(tmp_path):
+    bars, meta = stores(tmp_path)
+    start, end = date(2024, 1, 1), date(2024, 1, 5)
+    _identity_target(meta, "stable-id", "SAFE", "intraday_1hour", start, end)
+    client = FakeTiingo({})
+
+    result = backfill_intraday_validated(
+        client, bars, meta, ["SAFE"], start, end, freq="1hour"
+    )
+
+    assert result.fetched == ["stable-id"]
+    assert client.intraday_calls == [("SAFE", start, date(2024, 1, 8), "1hour")]
+    stored = bars.read_canonical_intraday("stable-id", freq="1hour")
+    assert stored is not None
+    assert stored["ts"].dt.date().max() == end
+    assert meta.get_coverage("stable-id", "intraday_1hour") == (start, end)
+
+
+def test_intraday_context_metadata_conflict_rejects_entire_response(tmp_path):
+    class ConflictingContextTiingo(FakeTiingo):
+        def intraday(self, ticker, start, end=None, freq="1hour"):
+            rows = super().intraday(ticker, start, end, freq)
+            return [
+                {
+                    **row,
+                    "ticker": (
+                        "SAFE"
+                        if date.fromisoformat(row["date"][:10]) <= target_end
+                        else "OTHER"
+                    ),
+                }
+                for row in rows
+            ]
+
+    bars, meta = stores(tmp_path)
+    start, target_end = date(2024, 1, 1), date(2024, 1, 5)
+    _identity_target(meta, "stable-id", "SAFE", "intraday_1hour", start, target_end)
+
+    result = backfill_intraday_validated(
+        ConflictingContextTiingo({}),
+        bars,
+        meta,
+        ["SAFE"],
+        start,
+        target_end,
+        freq="1hour",
+    )
+
+    assert "conflicts with validated identity" in next(iter(result.failed.values()))
+    assert bars.read_canonical_intraday("stable-id", freq="1hour") is None
+    assert meta.get_coverage("stable-id", "intraday_1hour") is None
+
+
+def test_intraday_context_cannot_extend_past_the_next_session(tmp_path, monkeypatch):
+    bars, meta = stores(tmp_path)
+    start, end = date(2024, 1, 1), date(2024, 1, 5)
+    _identity_target(meta, "stable-id", "SAFE", "intraday_1hour", start, end)
+    client = FakeTiingo({})
+
+    monkeypatch.setattr(
+        "marketdata.ingest.plan_intraday_requests",
+        lambda *args, **kwargs: [
+            IntradayRequestChunk(
+                start=start,
+                end=end,
+                fetch_end=date(2024, 1, 9),
+                max_response_rows=42,
+            )
+        ],
+    )
+
+    result = backfill_intraday_validated(
+        client, bars, meta, ["SAFE"], start, end, freq="1hour"
+    )
+
+    assert "extends beyond the one-session" in next(iter(result.failed.values()))
+    assert client.intraday_calls == []
+    assert bars.read_canonical_intraday("stable-id", freq="1hour") is None
 
 
 def test_identity_gap_never_becomes_bridged_coverage(tmp_path):
@@ -779,7 +869,7 @@ def test_publication_batches_instruments_that_share_a_bucket(tmp_path, monkeypat
     assert calls == [{first, peer}]
 
 
-def test_intraday_publication_batches_each_chunk_round(tmp_path, monkeypatch):
+def test_intraday_publication_batches_largest_safe_request_round(tmp_path, monkeypatch):
     bars, meta = stores(tmp_path)
     first = "stable-id"
     peer = next(
@@ -808,7 +898,68 @@ def test_intraday_publication_batches_each_chunk_round(tmp_path, monkeypatch):
     )
 
     assert result.ok
-    assert calls == [{first, peer}, {first, peer}]
+    assert calls == [{first, peer}]
+
+
+def test_intraday_multichunk_lookahead_neither_loses_nor_duplicates_target_rows(
+    tmp_path,
+):
+    bars, meta = stores(tmp_path)
+    meta.upsert_instrument("stable-id")
+    start, end = date(2024, 1, 1), date(2024, 12, 31)
+    client = FakeTiingo({})
+
+    result = _backfill_intraday(
+        client,
+        bars,
+        meta,
+        [IngestTarget("stable-id", "SAFE")],
+        start,
+        end,
+        freq="5min",
+    )
+
+    stored = bars.read_canonical_intraday("stable-id", freq="5min")
+    assert result.ok
+    assert len(client.intraday_calls) > 1
+    assert stored is not None
+    assert stored.height == len(weekdays(start, end))
+    assert stored["ts"].n_unique() == stored.height
+    assert stored["ts"].dt.date().min() == start
+    assert stored["ts"].dt.date().max() == end
+
+
+def test_intraday_rejects_a_silent_cap_response_before_publication(tmp_path):
+    class CappedTiingo(FakeTiingo):
+        def intraday(self, ticker, start, end=None, freq="1hour"):
+            super().intraday(ticker, start, end, freq)
+            return [
+                {
+                    "date": "2024-01-02T15:00:00.000Z",
+                    "open": 10.0,
+                    "high": 10.5,
+                    "low": 9.5,
+                    "close": 10.2,
+                    "volume": 100,
+                }
+                for _ in range(10_000)
+            ]
+
+    bars, meta = stores(tmp_path)
+    meta.upsert_instrument("stable-id")
+
+    result = _backfill_intraday(
+        CappedTiingo({}),
+        bars,
+        meta,
+        [IngestTarget("stable-id", "SAFE")],
+        date(2024, 1, 1),
+        date(2024, 1, 5),
+    )
+
+    assert "may be silently truncated" in result.failed["stable-id"]
+    assert bars.read_canonical_intraday("stable-id") is None
+    assert meta.get_coverage("stable-id", "intraday_1hour") is None
 
 
 def test_backfill_fetches_missing_leading_history(tmp_path):

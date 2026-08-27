@@ -31,6 +31,12 @@ license = "MIT"
 source = "License classifier"
 
 [[package]]
+name = "exchange-calendars"
+version = "4.13.2"
+license = "Apache-2.0"
+source = "License-Expression metadata"
+
+[[package]]
 name = "idna"
 version = "3.19"
 license = "BSD-3-Clause"
@@ -43,10 +49,34 @@ license = "MIT"
 source = "License-Expression metadata"
 
 [[package]]
+name = "korean-lunar-calendar"
+version = "0.4.0"
+license = "MIT"
+source = "License-Expression metadata"
+
+[[package]]
+name = "numpy"
+version = "2.4.6"
+license = "BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0"
+source = "License-Expression metadata"
+
+[[package]]
+name = "numpy"
+version = "2.5.2"
+license = "BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0"
+source = "License-Expression metadata"
+
+[[package]]
 name = "packaging"
 version = "26.3"
 license = "Apache-2.0 OR BSD-2-Clause"
 source = "License-Expression metadata"
+
+[[package]]
+name = "pandas"
+version = "3.0.5"
+license = "BSD-3-Clause"
+source = "License metadata and classifier"
 
 [[package]]
 name = "pluggy"
@@ -85,6 +115,18 @@ license = "MIT"
 source = "License-Expression metadata"
 
 [[package]]
+name = "pyluach"
+version = "2.3.0"
+license = "MIT"
+source = "License classifier"
+
+[[package]]
+name = "python-dateutil"
+version = "2.9.0.post0"
+license = "Apache-2.0 OR BSD-3-Clause"
+source = "License metadata and classifiers"
+
+[[package]]
 name = "python-dotenv"
 version = "1.2.3"
 license = "BSD-3-Clause"
@@ -119,6 +161,24 @@ name = "setuptools"
 version = "84.0.0"
 license = "MIT"
 source = "License-Expression metadata"
+
+[[package]]
+name = "six"
+version = "1.17.0"
+license = "MIT"
+source = "License metadata"
+
+[[package]]
+name = "toolz"
+version = "1.1.0"
+license = "BSD-3-Clause"
+source = "License-Expression metadata"
+
+[[package]]
+name = "tzdata"
+version = "2026.3"
+license = "Apache-2.0"
+source = "License metadata"
 
 [[package]]
 name = "urllib3"

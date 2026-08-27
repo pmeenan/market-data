@@ -9,6 +9,7 @@ from pathlib import Path
 import duckdb
 import polars as pl
 
+from marketdata.calendar import label_intraday_sessions
 from marketdata.config import Config
 from marketdata.store.bars import (
     CANONICAL_EOD_SCHEMA,
@@ -97,6 +98,25 @@ def load_intraday(
     return _load(config, f"intraday_{freq}", instrument_ids, start, end)
 
 
+def load_intraday_sessions(
+    config: Config,
+    *,
+    instrument_ids: Sequence[str] | None = None,
+    start: date | str | None = None,
+    end: date | str | None = None,
+    freq: str = "1hour",
+) -> pl.DataFrame:
+    """Load intraday bars filtered and labelled by XNYS session semantics."""
+    raw = load_intraday(
+        config,
+        instrument_ids=instrument_ids,
+        start=start,
+        end=end,
+        freq=freq,
+    )
+    return label_intraday_sessions(raw, freq=freq)
+
+
 def load_eod_by_ticker(
     config: Config,
     tickers: Sequence[str],
@@ -119,6 +139,25 @@ def load_intraday_by_ticker(
     """Resolve ticker aliases over an explicit range, then load intraday bars."""
     require_intraday_freq(freq)
     return _load_by_ticker(config, f"intraday_{freq}", tickers, start, end)
+
+
+def load_intraday_sessions_by_ticker(
+    config: Config,
+    tickers: Sequence[str],
+    *,
+    start: date | str,
+    end: date | str,
+    freq: str = "1hour",
+) -> pl.DataFrame:
+    """Resolve tickers, then filter and label bars by XNYS sessions."""
+    raw = load_intraday_by_ticker(
+        config,
+        tickers,
+        start=start,
+        end=end,
+        freq=freq,
+    )
+    return label_intraday_sessions(raw, freq=freq)
 
 
 def _load(

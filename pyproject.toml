@@ -10,6 +10,7 @@ authors = [{ name = "Patrick Meenan", email = "patmeenan@gmail.com" }]
 dependencies = [
     "click>=8.1",
     "duckdb>=1.0",
+    "exchange-calendars>=4.13,<5",
     "polars>=1.0",
     "pyarrow>=15.0",
     "python-dotenv>=1.0",

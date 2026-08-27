@@ -31,6 +31,12 @@ from typing import Any
 
 import polars as pl
 
+from marketdata.calendar import (
+    IEX_ROW_CAP,
+    IntradayRequestChunk,
+    next_session_after,
+    plan_intraday_requests,
+)
 from marketdata.store import BarStore, MetaStore
 from marketdata.store.bars import (
     eod_frame,
@@ -42,10 +48,6 @@ from marketdata.store.bars import (
 from marketdata.tiingo import TiingoClient, TiingoError
 
 log = logging.getLogger(__name__)
-
-# Tiingo's IEX endpoint limits how much intraday history one request may
-# span; fetch in conservative chunks.
-INTRADAY_CHUNK_DAYS = 30
 
 # Nightly updates refetch this many days before the coverage edge to pick up
 # corrections and restated adjustments.
@@ -330,6 +332,8 @@ class _ValidatedSegmentsClient:
         rows: list[dict[str, Any]],
         request_start: date,
         request_end: date,
+        *,
+        context_end: date | None = None,
     ) -> list[dict[str, Any]]:
         for index, row in enumerate(rows):
             raw_timestamp = row.get("date")
@@ -344,7 +348,11 @@ class _ValidatedSegmentsClient:
                     f"response row {index} timestamp {row_date} falls outside "
                     f"request {request_start}..{request_end}"
                 )
-            if not segment.start <= row_date <= segment.end:
+            in_identity_envelope = segment.start <= row_date <= segment.end
+            in_context_lookahead = (
+                context_end is not None and segment.end < row_date <= context_end
+            )
+            if not in_identity_envelope and not in_context_lookahead:
                 raise TiingoError(
                     f"response row {index} timestamp {row_date} falls outside "
                     "the validated instrument envelope"
@@ -436,15 +444,38 @@ class _ValidatedSegmentsClient:
             raise TiingoError(
                 "intraday request does not match the validated exact dataset key"
             )
-        segment, request_start, request_end = self._validate_request(
-            identifier, start, end
-        )
+        request_start = date.fromisoformat(str(start))
+        request_end = date.fromisoformat(str(end))
+        segment = self._segments.get(identifier)
+        if (
+            segment is None
+            or request_start < segment.start
+            or request_start > request_end
+        ):
+            raise TiingoError(
+                "intraday request falls outside validated identity evidence"
+            )
         if segment.dataset_key != f"intraday_{freq}":
             raise TiingoError(
                 "intraday request does not match the validated exact dataset key"
             )
+        context_end = None
+        if request_end > segment.end:
+            allowed_context_end = next_session_after(segment.end)
+            if request_end > allowed_context_end:
+                raise TiingoError(
+                    "intraday request extends beyond the one-session "
+                    f"context lookahead ending {allowed_context_end}"
+                )
+            context_end = request_end
         rows = self._client.intraday(identifier, request_start, request_end, freq=freq)
-        return self._validate_rows(segment, rows, request_start, request_end)
+        return self._validate_rows(
+            segment,
+            rows,
+            request_start,
+            request_end,
+            context_end=context_end,
+        )
 
 
 def _require_registered_targets(meta: MetaStore, targets: list[IngestTarget]) -> None:
@@ -854,7 +885,7 @@ def backfill_intraday(
     result = IngestResult()
     processed = 0
     for group in _bucket_groups(targets):
-        plans: dict[str, list[tuple[date, date]]] = {}
+        plans: dict[str, list[IntradayRequestChunk]] = {}
         targets_by_id = {target.instrument_id: target for target in group}
         wrote_any = dict.fromkeys(targets_by_id, False)
         failed: set[str] = set()
@@ -863,10 +894,14 @@ def backfill_intraday(
             target_start, target_end = requested_ranges[target.instrument_id]
             covered = meta.get_coverage(target.instrument_id, dataset)
             segments = _missing_segments((target_start, target_end), covered)
-            plan: list[tuple[date, date]] = []
+            plan: list[IntradayRequestChunk] = []
             for seg_start, seg_end in segments:
                 leading = covered is not None and seg_end < covered[0]
-                plan.extend(_chunks(seg_start, seg_end, reverse=leading))
+                plan.extend(
+                    plan_intraday_requests(
+                        seg_start, seg_end, freq=freq, reverse=leading
+                    )
+                )
             plans[target.instrument_id] = plan
             if plan:
                 planned.add(target.instrument_id)
@@ -879,12 +914,13 @@ def backfill_intraday(
             for instrument_id, plan in plans.items():
                 if not plan or instrument_id in failed:
                     continue
-                chunk_start, chunk_end = plan.pop(0)
+                chunk = plan.pop(0)
                 target = targets_by_id[instrument_id]
                 try:
                     rows = client.intraday(
-                        target.identifier, chunk_start, chunk_end, freq=freq
+                        target.identifier, chunk.start, chunk.fetch_end, freq=freq
                     )
+                    rows = _intraday_target_rows(rows, chunk)
                     max_received = None
                     if rows:
                         frame = intraday_frame(target.identifier, rows)
@@ -894,14 +930,14 @@ def backfill_intraday(
                         max_received = frame["ts"].dt.date().max()
                     covered_to = _covered_through(
                         max_received,
-                        chunk_end,
+                        chunk.end,
                         today,
                         INTRADAY_PUBLICATION_LAG_DAYS,
                     )
                     if covered_to is not None:
                         covered_to = min(covered_to, today - timedelta(days=1))
-                    if covered_to is not None and covered_to >= chunk_start:
-                        coverage_ready[instrument_id] = (chunk_start, covered_to)
+                    if covered_to is not None and covered_to >= chunk.start:
+                        coverage_ready[instrument_id] = (chunk.start, covered_to)
                 except (TiingoError, ValueError, pl.exceptions.PolarsError) as exc:
                     log.warning(
                         "%s backfill failed for %s: %s", dataset, instrument_id, exc
@@ -940,16 +976,34 @@ def backfill_intraday(
     return result
 
 
-def _chunks(
-    start: date, end: date, *, reverse: bool = False
-) -> list[tuple[date, date]]:
-    out = []
-    cursor = start
-    while cursor <= end:
-        chunk_end = min(cursor + timedelta(days=INTRADAY_CHUNK_DAYS - 1), end)
-        out.append((cursor, chunk_end))
-        cursor = chunk_end + timedelta(days=1)
-    return list(reversed(out)) if reverse else out
+def _intraday_target_rows(
+    rows: list[dict[str, Any]], chunk: IntradayRequestChunk
+) -> list[dict[str, Any]]:
+    if len(rows) >= IEX_ROW_CAP:
+        raise ValueError(
+            f"IEX response has {len(rows):,} rows and may be silently truncated"
+        )
+    if len(rows) > chunk.max_response_rows:
+        raise ValueError(
+            f"IEX response has {len(rows):,} rows, exceeding the planner envelope "
+            f"of {chunk.max_response_rows:,}"
+        )
+    target: list[dict[str, Any]] = []
+    for index, row in enumerate(rows):
+        try:
+            row_date = date.fromisoformat(str(row.get("date"))[:10])
+        except ValueError as exc:
+            raise ValueError(
+                f"IEX response row {index} has an invalid timestamp"
+            ) from exc
+        if not chunk.start <= row_date <= chunk.fetch_end:
+            raise ValueError(
+                f"IEX response row {index} timestamp {row_date} falls outside "
+                f"request {chunk.start}..{chunk.fetch_end}"
+            )
+        if row_date <= chunk.end:
+            target.append(row)
+    return target
 
 
 def _record_segment_result(
