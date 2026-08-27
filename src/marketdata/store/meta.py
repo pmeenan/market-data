@@ -474,6 +474,21 @@ class MetaStore:
             segments=tuple(segments),
         )
 
+    def instrument_aliases_cover_range(
+        self, instrument_id: str, start: date, end: date
+    ) -> bool:
+        """Whether this instrument's alias evidence covers a span without gaps."""
+        if start > end:
+            raise ValueError("resolution start must not be after end")
+        rows = self._con.execute(
+            """SELECT start_date AS valid_from, end_date AS valid_to
+               FROM instrument_aliases
+               WHERE instrument_id = ? AND start_date <= ? AND end_date >= ?
+               ORDER BY start_date, end_date""",
+            (instrument_id, end.isoformat(), start.isoformat()),
+        ).fetchall()
+        return _rows_cover(rows, start, end)
+
     def resolve_vendor_identifier(
         self, instrument_id: str, dataset_key: str, start: date, end: date
     ) -> IdentifierResolution:
@@ -560,6 +575,71 @@ class MetaStore:
             identifier_type=reported_key[0] if reported_key else None,
             identifier_value=reported_key[1] if reported_key else None,
             conflicting_instrument_ids=tuple(sorted(conflicting_instrument_ids)),
+        )
+
+    def resolve_vendor_identifier_range(
+        self, instrument_id: str, dataset_key: str, start: date, end: date
+    ) -> tuple[IdentifierResolution, ...]:
+        """Partition a span wherever exact-dataset identifier evidence changes.
+
+        ``resolve_vendor_identifier`` deliberately answers one whole-span
+        question.  Ingestion needs the finer-grained form so validated portions
+        on either side of missing or conflicting evidence remain visible rather
+        than collapsing the entire request into one failure.
+        """
+        dataset_key = require_dataset_key(dataset_key)
+        if start > end:
+            raise ValueError("resolution start must not be after end")
+
+        own_rows = self._con.execute(
+            """SELECT identifier_type, identifier_value, valid_from, valid_to
+               FROM vendor_identifiers
+               WHERE instrument_id = ? AND dataset_key = ?
+                 AND validation_state = 'validated'
+                 AND valid_from <= ? AND valid_to >= ?""",
+            (instrument_id, dataset_key, end.isoformat(), start.isoformat()),
+        ).fetchall()
+        keys = {
+            (str(row["identifier_type"]), str(row["identifier_value"]))
+            for row in own_rows
+        }
+        relevant_rows = list(own_rows)
+        for identifier_type, identifier_value in sorted(keys):
+            relevant_rows.extend(
+                self._con.execute(
+                    """SELECT identifier_type, identifier_value, valid_from, valid_to
+                       FROM vendor_identifiers
+                       WHERE instrument_id != ? AND dataset_key = ?
+                         AND identifier_type = ? AND identifier_value = ?
+                         AND validation_state = 'validated'
+                         AND valid_from <= ? AND valid_to >= ?""",
+                    (
+                        instrument_id,
+                        dataset_key,
+                        identifier_type,
+                        identifier_value,
+                        end.isoformat(),
+                        start.isoformat(),
+                    ),
+                ).fetchall()
+            )
+
+        boundaries = {start.toordinal(), end.toordinal() + 1}
+        for row in relevant_rows:
+            row_start = max(start, date.fromisoformat(row["valid_from"]))
+            row_end = min(end, date.fromisoformat(row["valid_to"]))
+            boundaries.add(row_start.toordinal())
+            boundaries.add(row_end.toordinal() + 1)
+
+        ordered = sorted(boundaries)
+        return tuple(
+            self.resolve_vendor_identifier(
+                instrument_id,
+                dataset_key,
+                date.fromordinal(segment_start),
+                date.fromordinal(next_start - 1),
+            )
+            for segment_start, next_start in zip(ordered, ordered[1:], strict=False)
         )
 
     def resolve_universe(self, year: int) -> list[UniverseResolution]:
@@ -881,7 +961,7 @@ def _evidence_json(evidence: Mapping[str, Any] | str | None) -> str:
 
 
 def _rows_cover(rows: list[sqlite3.Row], start: date, end: date) -> bool:
-    """Whether closed evidence envelopes cover a range without a date gap."""
+    """Whether evidence covers a range, allowing only weekend non-sessions."""
     cursor = start.toordinal()
     target_end = end.toordinal()
     intervals = sorted(
@@ -892,10 +972,20 @@ def _rows_cover(rows: list[sqlite3.Row], start: date, end: date) -> bool:
         for row in rows
     )
     for interval_start, interval_end in intervals:
-        if interval_start > cursor:
+        if interval_start > cursor and not _ordinals_are_weekend(
+            cursor, interval_start - 1
+        ):
             return False
         if interval_end >= cursor:
             cursor = interval_end + 1
         if cursor > target_end:
             return True
     return False
+
+
+def _ordinals_are_weekend(start: int, end: int) -> bool:
+    if end - start >= 2:
+        return False
+    return all(
+        date.fromordinal(value).weekday() >= 5 for value in range(start, end + 1)
+    )

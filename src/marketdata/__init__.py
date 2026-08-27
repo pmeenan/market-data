@@ -9,8 +9,8 @@ Storage layout (under the configured data directory):
       quarantine/v1-ticker-bars/       retained migration sources
 
 Active bars are keyed by opaque ``instrument_id`` values. Production
-ingestion remains paused until M1 completes identity-validated request
-orchestration.
+ingestion paths fetch only request segments authorized by exact-dataset
+identity evidence; operational use awaits M1's controlled Tiingo canary.
 """
 
 from marketdata.config import Config, load_config

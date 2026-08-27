@@ -154,11 +154,21 @@ Scope:
       never union quarantined v1 files. Completed 2026-08-27: canonical-only
       ingestion primitives and coverage, v2-only DuckDB views/loaders,
       unambiguous alias display views, and explicit-range ticker loaders that
-      fail on evidence gaps/conflicts. Operator ingestion stays paused until
-      the next item supplies validated request segments.
-- [ ] Implement the architecture's identity/ingestion flow for all three exact
-  dataset keys. Each independently validated segment may make progress while
-  an unresolved or conflicting segment remains fail-closed and reported.
+      fail on evidence gaps/conflicts. Operator ingestion is supplied by the
+      following completed item.
+- [x] Implement the architecture's identity/ingestion flow for all three exact
+      dataset keys. Each independently validated segment may make progress while
+      an unresolved or conflicting segment remains fail-closed and reported.
+      Completed 2026-08-27: alias and exact-dataset identifier evidence is
+      partitioned into explicit request segments; timestamp/metadata conflicts
+      reject a response before normalization; safe peers retain bucket batching;
+      disconnected units cannot bridge coverage; guarded permanent identifiers
+      can authorize rename-spanning EOD refreshes; and CLI/JSON reports expose
+      every blocked or failed segment. Review hardening also permits a bare
+      ticker to refresh a provably single-alias history, treats inactive aliases
+      as routine update skips, preserves the newest-first anchor after failures,
+      accepts weekend-only evidence boundaries, batches heterogeneous request
+      ranges per bucket, and publishes summaries atomically.
 - [ ] Switch bulk Tiingo bar fetches and fixtures to CSV while preserving
       retries, normalization, response validation, and byte measurement.
 

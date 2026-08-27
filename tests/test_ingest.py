@@ -5,7 +5,11 @@ from datetime import date, timedelta
 from marketdata.ingest import (
     REFRESH_WINDOW_DAYS,
     IngestTarget,
+    backfill_eod_validated,
+    backfill_intraday_validated,
+    plan_validated_segments,
     reconcile,
+    update_eod_validated,
 )
 from marketdata.ingest import (
     backfill_eod as _backfill_eod,
@@ -17,7 +21,7 @@ from marketdata.ingest import (
     update_eod as _update_eod,
 )
 from marketdata.store import BarStore, MetaStore
-from marketdata.store.bars import instrument_bucket
+from marketdata.store.bars import eod_frame, instrument_bucket
 from marketdata.tiingo import TiingoError
 
 
@@ -140,6 +144,514 @@ def test_ingestion_owns_bars_and_coverage_by_instrument_id(tmp_path):
     stored = bars.read_canonical_eod("stable-id")
     assert stored["instrument_id"].unique().to_list() == ["stable-id"]
     assert "ticker" not in stored.columns
+
+
+def _identity_target(
+    meta,
+    instrument_id,
+    ticker,
+    dataset_key,
+    start,
+    end,
+    *,
+    identifier=None,
+):
+    meta.upsert_instrument(instrument_id)
+    meta.add_instrument_alias(instrument_id, ticker, start, end)
+    meta.add_vendor_identifier(
+        instrument_id,
+        dataset_key,
+        "ticker",
+        identifier or ticker,
+        start,
+        end,
+        validation_state="validated",
+    )
+
+
+def test_validated_ingestion_allows_safe_peer_and_reports_blocked_segment(tmp_path):
+    bars, meta = stores(tmp_path)
+    start, end = date(2024, 1, 1), date(2024, 1, 5)
+    _identity_target(meta, "good-id", "GOOD", "eod", start, end)
+    meta.upsert_instrument("blocked-id")
+    meta.add_instrument_alias("blocked-id", "BLOCKED", start, end)
+    client = FakeTiingo({"GOOD": [eod_row(date(2024, 1, 2))]})
+
+    result = backfill_eod_validated(client, bars, meta, ["GOOD", "BLOCKED"], start, end)
+
+    assert result.fetched == ["good-id"]
+    assert len(result.blocked) == 1
+    assert "no unique validated identifier" in next(iter(result.blocked.values()))
+    assert client.eod_calls == [("GOOD", start, end)]
+    assert bars.read_canonical_eod("good-id") is not None
+    assert bars.read_canonical_eod("blocked-id") is None
+
+
+def test_validated_ingestion_preserves_bucket_batching(tmp_path, monkeypatch):
+    bars, meta = stores(tmp_path)
+    first = "stable-id"
+    peer = next(
+        f"peer-{number}"
+        for number in range(10_000)
+        if instrument_bucket(f"peer-{number}") == instrument_bucket(first)
+    )
+    start, end = date(2024, 1, 1), date(2024, 1, 5)
+    _identity_target(meta, first, "ONE", "eod", start, end)
+    _identity_target(meta, peer, "TWO", "eod", start, end)
+    client = FakeTiingo(
+        {"ONE": [eod_row(date(2024, 1, 2))], "TWO": [eod_row(date(2024, 1, 2))]}
+    )
+    calls: list[set[str]] = []
+    publish = bars.publish_eod
+
+    def recording_publish(frames, **kwargs):
+        calls.append(set(frames))
+        return publish(frames, **kwargs)
+
+    monkeypatch.setattr(bars, "publish_eod", recording_publish)
+
+    result = backfill_eod_validated(client, bars, meta, ["ONE", "TWO"], start, end)
+
+    assert result.ok
+    assert calls == [{first, peer}]
+
+
+def test_validated_ingestion_batches_heterogeneous_ranges(tmp_path, monkeypatch):
+    bars, meta = stores(tmp_path)
+    first = "stable-id"
+    peer = next(
+        f"peer-{number}"
+        for number in range(10_000)
+        if instrument_bucket(f"peer-{number}") == instrument_bucket(first)
+    )
+    today = date.today()
+    alias_start = date(2024, 1, 1)
+    _identity_target(meta, first, "ONE", "eod", alias_start, date.max)
+    _identity_target(meta, peer, "TWO", "eod", alias_start, date.max)
+    client = FakeTiingo(
+        {
+            "ONE": [eod_row(today - timedelta(days=2))],
+            "TWO": [eod_row(today - timedelta(days=2))],
+        }
+    )
+    bars.publish_eod(
+        {
+            first: bars.canonicalize_eod(
+                first, eod_frame("ONE", [eod_row(alias_start)])
+            ),
+            peer: bars.canonicalize_eod(peer, eod_frame("TWO", [eod_row(alias_start)])),
+        }
+    )
+    meta.set_coverage(first, "eod", alias_start, today - timedelta(days=10))
+    meta.set_coverage(peer, "eod", alias_start, today - timedelta(days=5))
+    calls: list[set[str]] = []
+    publish = bars.publish_eod
+
+    def recording_publish(frames, **kwargs):
+        calls.append(set(frames))
+        return publish(frames, **kwargs)
+
+    monkeypatch.setattr(bars, "publish_eod", recording_publish)
+
+    result = update_eod_validated(client, bars, meta, ["ONE", "TWO"])
+
+    assert result.ok
+    assert calls == [{first, peer}]
+
+
+def test_response_outside_validated_segment_is_rejected_before_write(tmp_path):
+    class OutOfEnvelopeTiingo(FakeTiingo):
+        def eod(self, ticker, start=None, end=None):
+            super().eod(ticker, start, end)
+            return [eod_row(date(2023, 12, 29))]
+
+    bars, meta = stores(tmp_path)
+    start, end = date(2024, 1, 1), date(2024, 1, 5)
+    _identity_target(meta, "stable-id", "SAFE", "eod", start, end)
+
+    result = backfill_eod_validated(
+        OutOfEnvelopeTiingo({"SAFE": []}), bars, meta, ["SAFE"], start, end
+    )
+
+    assert len(result.failed) == 1
+    assert "falls outside request" in next(iter(result.failed.values()))
+    assert bars.read_canonical_eod("stable-id") is None
+    assert meta.get_coverage("stable-id", "eod") is None
+
+
+def test_response_identity_metadata_conflict_rejects_entire_response(tmp_path):
+    class ConflictingMetadataTiingo(FakeTiingo):
+        def eod(self, ticker, start=None, end=None):
+            rows = super().eod(ticker, start, end)
+            return [{**row, "ticker": "OTHER"} for row in rows]
+
+    bars, meta = stores(tmp_path)
+    start, end = date(2024, 1, 1), date(2024, 1, 5)
+    _identity_target(meta, "stable-id", "SAFE", "eod", start, end)
+    client = ConflictingMetadataTiingo(
+        {"SAFE": [eod_row(date(2024, 1, 2)), eod_row(date(2024, 1, 3))]}
+    )
+
+    result = backfill_eod_validated(client, bars, meta, ["SAFE"], start, end)
+
+    assert len(result.failed) == 1
+    assert "conflicts with validated identity" in next(iter(result.failed.values()))
+    assert bars.read_canonical_eod("stable-id") is None
+    assert meta.get_coverage("stable-id", "eod") is None
+
+
+def test_intraday_identity_evidence_is_exact_frequency(tmp_path):
+    bars, meta = stores(tmp_path)
+    start, end = date(2024, 1, 1), date(2024, 1, 5)
+    _identity_target(meta, "stable-id", "SAFE", "intraday_1hour", start, end)
+    client = FakeTiingo({})
+
+    hourly = plan_validated_segments(meta, ["SAFE"], "intraday_1hour", start, end)
+    five_minute = backfill_intraday_validated(
+        client, bars, meta, ["SAFE"], start, end, freq="5min"
+    )
+
+    assert [segment.status for segment in hourly] == ["ready"]
+    assert len(five_minute.blocked) == 1
+    assert client.intraday_calls == []
+    assert meta.get_coverage("stable-id", "intraday_5min") is None
+
+
+def test_each_intraday_frequency_ingests_with_its_own_evidence(tmp_path):
+    for freq in ("1hour", "5min"):
+        root = tmp_path / freq
+        bars, meta = stores(root)
+        start, end = date(2024, 1, 1), date(2024, 1, 5)
+        _identity_target(meta, "stable-id", "SAFE", f"intraday_{freq}", start, end)
+        client = FakeTiingo({})
+
+        result = backfill_intraday_validated(
+            client, bars, meta, ["SAFE"], start, end, freq=freq
+        )
+
+        assert result.fetched == ["stable-id"]
+        assert client.intraday_calls == [("SAFE", start, end, freq)]
+        assert meta.get_coverage("stable-id", f"intraday_{freq}") == (start, end)
+        assert bars.read_canonical_intraday("stable-id", freq=freq) is not None
+
+
+def test_identity_gap_never_becomes_bridged_coverage(tmp_path):
+    bars, meta = stores(tmp_path)
+    instrument_id = meta.upsert_instrument("stable-id")
+    meta.add_instrument_alias(
+        instrument_id, "SAFE", date(2024, 1, 1), date(2024, 3, 31)
+    )
+    for start, end in (
+        (date(2024, 1, 1), date(2024, 1, 31)),
+        (date(2024, 3, 1), date(2024, 3, 31)),
+    ):
+        meta.add_vendor_identifier(
+            instrument_id,
+            "eod",
+            "ticker",
+            "SAFE",
+            start,
+            end,
+            validation_state="validated",
+        )
+    client = FakeTiingo(
+        {
+            "SAFE": [
+                eod_row(date(2024, 1, 2)),
+                eod_row(date(2024, 3, 1)),
+            ]
+        }
+    )
+
+    result = backfill_eod_validated(
+        client,
+        bars,
+        meta,
+        ["SAFE"],
+        date(2024, 1, 1),
+        date(2024, 3, 31),
+    )
+
+    assert meta.get_coverage("stable-id", "eod") == (
+        date(2024, 3, 1),
+        date(2024, 3, 31),
+    )
+    assert client.eod_calls == [("SAFE", date(2024, 3, 1), date(2024, 3, 31))]
+    assert len(result.blocked) == 2
+    assert any("not adjacent" in reason for reason in result.blocked.values())
+
+
+def test_weekend_only_evidence_gap_does_not_block_coverage(tmp_path):
+    bars, meta = stores(tmp_path)
+    instrument_id = meta.upsert_instrument("stable-id")
+    meta.add_instrument_alias(instrument_id, "SAFE", date(2024, 3, 1), date(2024, 3, 4))
+    for start, end in (
+        (date(2024, 3, 1), date(2024, 3, 1)),  # Friday
+        (date(2024, 3, 4), date(2024, 3, 4)),  # Monday
+    ):
+        meta.add_vendor_identifier(
+            instrument_id,
+            "eod",
+            "ticker",
+            "SAFE",
+            start,
+            end,
+            validation_state="validated",
+        )
+    client = FakeTiingo(
+        {"SAFE": [eod_row(date(2024, 3, 1)), eod_row(date(2024, 3, 4))]}
+    )
+
+    result = backfill_eod_validated(
+        client, bars, meta, ["SAFE"], date(2024, 3, 1), date(2024, 3, 4)
+    )
+
+    assert result.ok
+    assert result.fetched == [instrument_id]
+    assert result.skipped == []
+    assert meta.get_coverage(instrument_id, "eod") == (
+        date(2024, 3, 1),
+        date(2024, 3, 4),
+    )
+
+
+def test_newest_segment_failure_does_not_anchor_older_coverage(tmp_path):
+    class FailFirstTiingo(FakeTiingo):
+        def __init__(self, history):
+            super().__init__(history)
+            self.calls = 0
+
+        def eod(self, ticker, start=None, end=None):
+            self.calls += 1
+            if self.calls == 1:
+                raise TiingoError("transient newest-segment failure")
+            return super().eod(ticker, start, end)
+
+    bars, meta = stores(tmp_path)
+    instrument_id = meta.upsert_instrument("stable-id")
+    meta.add_instrument_alias(
+        instrument_id, "SAFE", date(2024, 1, 1), date(2024, 3, 31)
+    )
+    for start, end in (
+        (date(2024, 1, 1), date(2024, 1, 31)),
+        (date(2024, 3, 1), date(2024, 3, 31)),
+    ):
+        meta.add_vendor_identifier(
+            instrument_id,
+            "eod",
+            "ticker",
+            "SAFE",
+            start,
+            end,
+            validation_state="validated",
+        )
+    client = FailFirstTiingo(
+        {"SAFE": [eod_row(date(2024, 1, 2)), eod_row(date(2024, 3, 1))]}
+    )
+
+    result = backfill_eod_validated(
+        client,
+        bars,
+        meta,
+        ["SAFE"],
+        date(2024, 1, 1),
+        date(2024, 3, 31),
+    )
+
+    assert client.calls == 1
+    assert meta.get_coverage(instrument_id, "eod") is None
+    assert len(result.failed) == 2
+    assert any("not attempted" in detail for detail in result.failed.values())
+
+
+def test_permanent_identifier_can_authorize_rename_spanning_full_refresh(tmp_path):
+    bars, meta = stores(tmp_path)
+    instrument_id = meta.upsert_instrument("stable-id")
+    meta.add_instrument_alias(instrument_id, "OLD", date(2024, 1, 1), date(2024, 6, 28))
+    meta.add_instrument_alias(
+        instrument_id, "NEW", date(2024, 7, 1), date(2024, 12, 31)
+    )
+    for valid_from, valid_to in (
+        (date(2024, 1, 1), date(2024, 6, 28)),
+        (date(2024, 7, 1), date(2024, 12, 31)),
+    ):
+        meta.add_vendor_identifier(
+            instrument_id,
+            "eod",
+            "permaTicker",
+            "PERMA",
+            valid_from,
+            valid_to,
+            validation_state="validated",
+        )
+    history = {
+        "PERMA": [eod_row(d) for d in weekdays(date(2024, 1, 1), date(2024, 8, 30))]
+    }
+    client = FakeTiingo(history)
+    _backfill_eod(
+        client,
+        bars,
+        meta,
+        [IngestTarget(instrument_id, "PERMA")],
+        date(2024, 1, 1),
+        date(2024, 8, 30),
+    )
+    history["PERMA"].extend(
+        [
+            eod_row(date(2024, 9, 3), div=0.25),
+            eod_row(date(2024, 10, 1)),
+        ]
+    )
+
+    result = backfill_eod_validated(
+        client,
+        bars,
+        meta,
+        ["NEW"],
+        date(2024, 7, 1),
+        date(2024, 10, 1),
+    )
+
+    assert result.refreshed == [instrument_id]
+    assert client.eod_calls[-1] == (
+        "PERMA",
+        date(2024, 1, 1),
+        date(2024, 10, 1),
+    )
+    assert bars.read_canonical_eod(instrument_id)["date"].min() == date(2024, 1, 1)
+
+
+def test_bare_ticker_can_authorize_single_alias_full_refresh(tmp_path):
+    bars, meta = stores(tmp_path)
+    start, old_end, new_end = (
+        date(2024, 1, 1),
+        date(2024, 6, 28),
+        date(2024, 7, 5),
+    )
+    _identity_target(meta, "stable-id", "SAFE", "eod", start, new_end)
+    history = {"SAFE": [eod_row(d) for d in weekdays(start, old_end)]}
+    client = FakeTiingo(history)
+    backfill_eod_validated(client, bars, meta, ["SAFE"], start, old_end)
+    history["SAFE"].append(eod_row(date(2024, 7, 1), div=0.25))
+
+    result = backfill_eod_validated(client, bars, meta, ["SAFE"], start, new_end)
+
+    assert result.refreshed == ["stable-id"]
+    assert result.failed == {}
+    assert client.eod_calls[-1] == ("SAFE", start, new_end)
+
+
+def test_same_value_cross_type_identifiers_do_not_abort_batch(tmp_path):
+    bars, meta = stores(tmp_path)
+    start, end = date(2024, 1, 1), date(2024, 1, 5)
+    _identity_target(meta, "ticker-id", "US123", "eod", start, end)
+    meta.upsert_instrument("perma-id")
+    meta.add_instrument_alias("perma-id", "OTHER", start, end)
+    meta.add_vendor_identifier(
+        "perma-id",
+        "eod",
+        "permaTicker",
+        "US123",
+        start,
+        end,
+        validation_state="validated",
+    )
+    client = FakeTiingo({"US123": [eod_row(date(2024, 1, 2))]})
+
+    result = backfill_eod_validated(client, bars, meta, ["US123", "OTHER"], start, end)
+
+    assert result.ok
+    assert sorted(result.fetched) == ["perma-id", "ticker-id"]
+    assert len(client.eod_calls) == 2
+
+
+def test_force_backfill_does_not_shrink_existing_coverage(tmp_path):
+    bars, meta = stores(tmp_path)
+    client = FakeTiingo(
+        {"SAFE": [eod_row(date(2024, 1, 2)), eod_row(date(2024, 2, 2))]}
+    )
+    backfill_eod(client, bars, meta, ["SAFE"], date(2024, 1, 1), date(2024, 2, 29))
+
+    backfill_eod(
+        client,
+        bars,
+        meta,
+        ["SAFE"],
+        date(2024, 2, 1),
+        date(2024, 2, 29),
+        force=True,
+    )
+
+    assert meta.get_coverage("SAFE", "eod") == (
+        date(2024, 1, 1),
+        date(2024, 2, 29),
+    )
+
+
+def test_validated_update_clamps_to_current_alias_and_refetches_overlap(tmp_path):
+    bars, meta = stores(tmp_path)
+    today = date.today()
+    alias_start = date(2024, 1, 1)
+    instrument_id = meta.upsert_instrument("stable-id")
+    meta.add_instrument_alias(instrument_id, "SAFE", alias_start)
+    meta.add_vendor_identifier(
+        instrument_id,
+        "eod",
+        "ticker",
+        "SAFE",
+        alias_start,
+        date.max,
+        validation_state="validated",
+    )
+    last = today - timedelta(days=2)
+    client = FakeTiingo(
+        {
+            "SAFE": [
+                eod_row(alias_start),
+                eod_row(today - timedelta(days=10)),
+                eod_row(last),
+            ]
+        }
+    )
+
+    first = update_eod_validated(client, bars, meta, ["SAFE"])
+    second = update_eod_validated(client, bars, meta, ["SAFE"])
+
+    assert first.fetched == [instrument_id]
+    assert second.fetched == [instrument_id]
+    assert client.eod_calls[0] == ("SAFE", alias_start, today)
+    assert client.eod_calls[1] == (
+        "SAFE",
+        last - timedelta(days=REFRESH_WINDOW_DAYS),
+        today,
+    )
+    assert meta.get_coverage(instrument_id, "eod") == (alias_start, last)
+
+
+def test_validated_update_treats_delisted_ticker_as_inactive(tmp_path):
+    bars, meta = stores(tmp_path)
+    instrument_id = meta.upsert_instrument("delisted-id")
+    meta.add_instrument_alias(
+        instrument_id, "GONE", date(2010, 1, 1), date(2020, 12, 31)
+    )
+    meta.add_vendor_identifier(
+        instrument_id,
+        "eod",
+        "ticker",
+        "GONE",
+        date(2010, 1, 1),
+        date(2020, 12, 31),
+        validation_state="validated",
+    )
+    client = FakeTiingo({})
+
+    result = update_eod_validated(client, bars, meta, ["GONE"])
+
+    assert result.ok
+    assert result.skipped == [instrument_id]
+    assert result.blocked == {}
+    assert client.eod_calls == []
+    assert result.segments[0]["detail"] == "ticker has no alias active today"
 
 
 def test_instrument_ingestion_rejects_v1_generation(tmp_path):

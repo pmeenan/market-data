@@ -24,9 +24,10 @@ and it converges to the same dataset.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterator
-from dataclasses import dataclass, field
+from collections.abc import Iterator, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from datetime import date, timedelta
+from typing import Any
 
 import polars as pl
 
@@ -64,8 +65,8 @@ class IngestTarget:
     """One stable bar owner plus the Tiingo identifier used for transport.
 
     The identifier is deliberately separate from ``instrument_id``.  Callers
-    must obtain it from exact-dataset identity evidence; the next M1 step owns
-    that request segmentation and response-validation orchestration.
+    must obtain it from exact-dataset identity evidence. Operator-facing paths
+    do so through the validated request-segment orchestration in this module.
     """
 
     instrument_id: str
@@ -84,16 +85,19 @@ class IngestResult:
     skipped: list[str] = field(default_factory=list)
     refreshed: list[str] = field(default_factory=list)  # full corp-action refreshes
     failed: dict[str, str] = field(default_factory=dict)
+    blocked: dict[str, str] = field(default_factory=dict)
+    segments: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
-        return not self.failed
+        return not self.failed and not self.blocked
 
     def summary(self) -> str:
         parts = [
             f"{len(self.fetched)} fetched",
             f"{len(self.skipped)} up-to-date",
             f"{len(self.failed)} failed",
+            f"{len(self.blocked)} identity-blocked",
         ]
         if self.refreshed:
             parts.insert(2, f"{len(self.refreshed)} fully refreshed (corp action)")
@@ -105,8 +109,342 @@ class IngestResult:
             "skipped": sorted(self.skipped),
             "refreshed": sorted(self.refreshed),
             "failed": dict(sorted(self.failed.items())),
+            "blocked": dict(sorted(self.blocked.items())),
+            "segments": self.segments,
             "ok": self.ok,
         }
+
+    def record_instrument_outcome(self, instrument_id: str, outcome: str) -> None:
+        """Record one best successful outcome per instrument.
+
+        Detailed per-segment outcomes remain in ``segments``.  The top-level
+        lists are instrument summaries with precedence refreshed > fetched >
+        skipped, so multi-evidence instruments are never double-counted.
+        """
+        ranks = {"skipped": 0, "fetched": 1, "refreshed": 2}
+        current = next(
+            (
+                name
+                for name in ("refreshed", "fetched", "skipped")
+                if instrument_id in getattr(self, name)
+            ),
+            None,
+        )
+        if current is not None and ranks[current] >= ranks[outcome]:
+            return
+        for name in ranks:
+            values = getattr(self, name)
+            while instrument_id in values:
+                values.remove(instrument_id)
+        getattr(self, outcome).append(instrument_id)
+
+
+@dataclass(frozen=True)
+class ValidatedRequestSegment:
+    """One request unit authorized by alias and exact-dataset evidence."""
+
+    ticker: str
+    dataset_key: str
+    start: date
+    end: date
+    status: str
+    instrument_ids: tuple[str, ...] = ()
+    alias_ids: tuple[int, ...] = ()
+    instrument_id: str | None = None
+    identifier_type: str | None = None
+    identifier_value: str | None = None
+    vendor_identifier_ids: tuple[int, ...] = ()
+    conflicting_instrument_ids: tuple[str, ...] = ()
+    detail: str = ""
+
+    @property
+    def key(self) -> str:
+        return f"{self.ticker}:{self.start.isoformat()}..{self.end.isoformat()}"
+
+    def to_dict(self, *, outcome: str | None = None) -> dict[str, Any]:
+        return {
+            "ticker": self.ticker,
+            "dataset_key": self.dataset_key,
+            "start": self.start.isoformat(),
+            "end": self.end.isoformat(),
+            "status": outcome or self.status,
+            "instrument_ids": list(self.instrument_ids),
+            "alias_ids": list(self.alias_ids),
+            "instrument_id": self.instrument_id,
+            "identifier_type": self.identifier_type,
+            "identifier_value": self.identifier_value,
+            "vendor_identifier_ids": list(self.vendor_identifier_ids),
+            "conflicting_instrument_ids": list(self.conflicting_instrument_ids),
+            "detail": self.detail,
+        }
+
+
+def _weekend_only(start: date, end: date) -> bool:
+    if start > end:
+        return True
+    cursor = start
+    while cursor <= end:
+        if cursor.weekday() < 5:
+            return False
+        cursor += timedelta(days=1)
+    return True
+
+
+def plan_validated_segments(
+    meta: MetaStore,
+    tickers: Sequence[str],
+    dataset_key: str,
+    start: date,
+    end: date,
+) -> list[ValidatedRequestSegment]:
+    """Resolve ticker requests into explicit ready and blocked date segments."""
+    from marketdata.identity import require_dataset_key
+
+    dataset_key = require_dataset_key(dataset_key)
+    if start > end:
+        raise ValueError("ingestion start must not be after end")
+    planned: list[ValidatedRequestSegment] = []
+    for ticker in dict.fromkeys(value.strip().upper() for value in tickers):
+        if not ticker:
+            raise ValueError("ticker must not be empty")
+        alias_report = meta.resolve_alias_range(ticker, start, end)
+        for alias_segment in alias_report.segments:
+            if alias_segment.status != "resolved":
+                weekend_gap = alias_segment.status == "zero_matches" and _weekend_only(
+                    alias_segment.start, alias_segment.end
+                )
+                planned.append(
+                    ValidatedRequestSegment(
+                        ticker=ticker,
+                        dataset_key=dataset_key,
+                        start=alias_segment.start,
+                        end=alias_segment.end,
+                        status=(
+                            "non_session_gap"
+                            if weekend_gap
+                            else f"alias_{alias_segment.status}"
+                        ),
+                        instrument_ids=alias_segment.instrument_ids,
+                        alias_ids=alias_segment.alias_ids,
+                        detail=(
+                            "weekend-only interval has no possible market bars"
+                            if weekend_gap
+                            else "ticker/date range does not resolve to exactly one instrument"
+                        ),
+                    )
+                )
+                continue
+            instrument_id = alias_segment.instrument_id
+            assert instrument_id is not None
+            identifier_segments = meta.resolve_vendor_identifier_range(
+                instrument_id,
+                dataset_key,
+                alias_segment.start,
+                alias_segment.end,
+            )
+            for identifier in identifier_segments:
+                status = (
+                    "ready"
+                    if identifier.status == "resolved"
+                    else f"identifier_{identifier.status}"
+                )
+                detail = ""
+                if status == "ready" and identifier.identifier_type.lower() == "ticker":
+                    if identifier.identifier_value.upper() != ticker:
+                        status = "identifier_alias_mismatch"
+                        detail = (
+                            "bare-ticker identifier does not match the requested alias"
+                        )
+                if status != "ready" and not detail:
+                    detail = "no unique validated identifier covers this exact dataset/date range"
+                if status == "identifier_zero_matches" and _weekend_only(
+                    identifier.start, identifier.end
+                ):
+                    status = "non_session_gap"
+                    detail = "weekend-only interval has no possible market bars"
+                planned.append(
+                    ValidatedRequestSegment(
+                        ticker=ticker,
+                        dataset_key=dataset_key,
+                        start=identifier.start,
+                        end=identifier.end,
+                        status=status,
+                        instrument_ids=(instrument_id,),
+                        alias_ids=alias_segment.alias_ids,
+                        instrument_id=instrument_id,
+                        identifier_type=identifier.identifier_type,
+                        identifier_value=identifier.identifier_value,
+                        vendor_identifier_ids=identifier.vendor_identifier_ids,
+                        conflicting_instrument_ids=(
+                            identifier.conflicting_instrument_ids
+                        ),
+                        detail=detail,
+                    )
+                )
+    return planned
+
+
+class _ValidatedSegmentsClient:
+    """Narrow a Tiingo client to a batch of pre-authorized request segments."""
+
+    def __init__(
+        self,
+        client: TiingoClient,
+        meta: MetaStore,
+        segments: Sequence[ValidatedRequestSegment],
+    ):
+        if any(
+            segment.status != "ready" or segment.identifier_value is None
+            for segment in segments
+        ):
+            raise ValueError("only ready identity segments may be fetched")
+        by_identifier = {segment.identifier_value: segment for segment in segments}
+        if len(by_identifier) != len(segments):
+            raise ValueError("validated batch contains duplicate request identifiers")
+        self._client = client
+        self._meta = meta
+        self._segments = by_identifier
+
+    def _validate_request(
+        self, identifier: str, start: date | str, end: date | str
+    ) -> tuple[ValidatedRequestSegment, date, date]:
+        request_start = date.fromisoformat(str(start))
+        request_end = date.fromisoformat(str(end))
+        segment = self._segments.get(identifier)
+        if segment is None:
+            raise TiingoError("request identifier differs from validated evidence")
+        if (
+            request_start < segment.start
+            or request_end > segment.end
+            or request_start > request_end
+        ):
+            raise TiingoError(
+                "request falls outside validated identity segment "
+                f"{segment.start}..{segment.end}"
+            )
+        return segment, request_start, request_end
+
+    def _validate_rows(
+        self,
+        segment: ValidatedRequestSegment,
+        rows: list[dict[str, Any]],
+        request_start: date,
+        request_end: date,
+    ) -> list[dict[str, Any]]:
+        for index, row in enumerate(rows):
+            raw_timestamp = row.get("date")
+            try:
+                row_date = date.fromisoformat(str(raw_timestamp)[:10])
+            except (TypeError, ValueError) as exc:
+                raise TiingoError(
+                    f"response row {index} has an invalid timestamp"
+                ) from exc
+            if not request_start <= row_date <= request_end:
+                raise TiingoError(
+                    f"response row {index} timestamp {row_date} falls outside "
+                    f"request {request_start}..{request_end}"
+                )
+            if not segment.start <= row_date <= segment.end:
+                raise TiingoError(
+                    f"response row {index} timestamp {row_date} falls outside "
+                    "the validated instrument envelope"
+                )
+            metadata_key = segment.identifier_type
+            metadata_matches = True
+            if metadata_key in row:
+                actual = str(row[metadata_key])
+                expected = str(segment.identifier_value)
+                metadata_matches = (
+                    actual.upper() == expected.upper()
+                    if metadata_key.lower() == "ticker"
+                    else actual == expected
+                )
+            if not metadata_matches:
+                raise TiingoError(
+                    f"response row {index} {metadata_key} conflicts with "
+                    "validated identity evidence"
+                )
+        return rows
+
+    def eod(
+        self,
+        identifier: str,
+        start: date | str | None = None,
+        end: date | str | None = None,
+    ) -> list[dict[str, Any]]:
+        if start is None or end is None:
+            raise TiingoError("EOD request does not match the validated dataset/span")
+        segment, request_start, request_end = self._validate_request(
+            identifier, start, end
+        )
+        if segment.dataset_key != "eod":
+            raise TiingoError("EOD request does not match the validated dataset/span")
+        rows = self._client.eod(identifier, request_start, request_end)
+        return self._validate_rows(segment, rows, request_start, request_end)
+
+    def full_refresh_eod(
+        self,
+        identifier: str,
+        start: date | str,
+        end: date | str,
+    ) -> list[dict[str, Any]]:
+        """Authorize a wider snapshot only for a stable non-ticker identifier."""
+        segment = self._segments.get(identifier)
+        if segment is None or segment.dataset_key != "eod":
+            raise TiingoError("full refresh identifier is not authorized for EOD")
+        request_start = date.fromisoformat(str(start))
+        request_end = date.fromisoformat(str(end))
+        if request_start > request_end:
+            raise TiingoError("full refresh start is after its end")
+        resolution = self._meta.resolve_vendor_identifier(
+            segment.instrument_id or "", "eod", request_start, request_end
+        )
+        alias_authorized = self._meta.instrument_aliases_cover_range(
+            segment.instrument_id or "", request_start, request_end
+        )
+        if segment.identifier_type.lower() == "ticker":
+            alias_report = self._meta.resolve_alias_range(
+                identifier, request_start, request_end
+            )
+            alias_authorized = alias_authorized and all(
+                alias_segment.status == "resolved"
+                and alias_segment.instrument_id == segment.instrument_id
+                for alias_segment in alias_report.segments
+            )
+        if (
+            resolution.status != "resolved"
+            or resolution.identifier_type != segment.identifier_type
+            or resolution.identifier_value != identifier
+            or not alias_authorized
+        ):
+            raise TiingoError(
+                "full-history refresh lacks identifier and alias evidence for "
+                f"{request_start}..{request_end}"
+            )
+        rows = self._client.eod(identifier, request_start, request_end)
+        expanded = replace(segment, start=request_start, end=request_end)
+        return self._validate_rows(expanded, rows, request_start, request_end)
+
+    def intraday(
+        self,
+        identifier: str,
+        start: date | str,
+        end: date | str | None = None,
+        freq: str = "1hour",
+    ) -> list[dict[str, Any]]:
+        if end is None:
+            raise TiingoError(
+                "intraday request does not match the validated exact dataset key"
+            )
+        segment, request_start, request_end = self._validate_request(
+            identifier, start, end
+        )
+        if segment.dataset_key != f"intraday_{freq}":
+            raise TiingoError(
+                "intraday request does not match the validated exact dataset key"
+            )
+        rows = self._client.intraday(identifier, request_start, request_end, freq=freq)
+        return self._validate_rows(segment, rows, request_start, request_end)
 
 
 def _require_registered_targets(meta: MetaStore, targets: list[IngestTarget]) -> None:
@@ -118,6 +456,35 @@ def _require_registered_targets(meta: MetaStore, targets: list[IngestTarget]) ->
         raise ValueError(
             f"ingestion targets contain unknown instruments: {sorted(unknown)}"
         )
+
+
+def _validated_target_ranges(
+    targets: Sequence[IngestTarget],
+    start: date,
+    end: date,
+    ranges: Mapping[str, tuple[date, date]] | None,
+) -> dict[str, tuple[date, date]]:
+    instrument_ids = {target.instrument_id for target in targets}
+    if ranges is not None:
+        unknown = set(ranges) - instrument_ids
+        if unknown:
+            raise ValueError(f"ranges contain unknown targets: {sorted(unknown)}")
+    resolved = {
+        target.instrument_id: (
+            ranges[target.instrument_id]
+            if ranges is not None and target.instrument_id in ranges
+            else (start, end)
+        )
+        for target in targets
+    }
+    invalid = {
+        instrument_id: requested
+        for instrument_id, requested in resolved.items()
+        if requested[0] > requested[1]
+    }
+    if invalid:
+        raise ValueError(f"ingestion start must not be after end: {invalid}")
+    return resolved
 
 
 def _missing_segments(
@@ -186,7 +553,8 @@ def _prepare_full_refresh_eod(
     values that disagree with the trigger — so callers report the ticker as
     failed rather than refreshed and the existing file is kept.
     """
-    rows = client.eod(target.identifier, first, end)
+    refresh = getattr(client, "full_refresh_eod", client.eod)
+    rows = refresh(target.identifier, first, end)
     if not rows:
         raise TiingoError(
             f"full refresh of {target.instrument_id} returned no rows for "
@@ -264,6 +632,7 @@ def backfill_eod(
     end: date | None = None,
     *,
     force: bool = False,
+    ranges: Mapping[str, tuple[date, date]] | None = None,
 ) -> IngestResult:
     """Fetch daily history for stable instruments, including
     missing leading history before existing coverage."""
@@ -271,6 +640,7 @@ def backfill_eod(
     _require_registered_targets(meta, targets)
     today = date.today()
     end = end or today
+    requested_ranges = _validated_target_ranges(targets, start, end, ranges)
     result = IngestResult()
     processed = 0
     for group in _bucket_groups(targets):
@@ -279,15 +649,17 @@ def backfill_eod(
         ready: dict[str, tuple[date, date, str]] = {}
         for target in group:
             instrument_id = target.instrument_id
+            target_start, target_end = requested_ranges[instrument_id]
             try:
-                covered = None if force else meta.get_coverage(instrument_id, "eod")
-                segments = _missing_segments((start, end), covered)
+                existing_coverage = meta.get_coverage(instrument_id, "eod")
+                covered = None if force else existing_coverage
+                segments = _missing_segments((target_start, target_end), covered)
                 if not segments:
                     result.skipped.append(instrument_id)
                     continue
                 got_rows = False
-                new_first = covered[0] if covered else None
-                new_last = covered[1] if covered else None
+                new_first = existing_coverage[0] if existing_coverage else None
+                new_last = existing_coverage[1] if existing_coverage else None
                 pending_frames: list[pl.DataFrame] = []
                 trigger_frames: list[pl.DataFrame] = []
                 for seg_start, seg_end in segments:
@@ -298,8 +670,8 @@ def backfill_eod(
                         pending_frames.append(frame)
                         got_rows = True
                         max_received = frame["date"].max()
-                        if covered is not None and _has_new_corp_action(
-                            frame, covered[1]
+                        if existing_coverage is not None and _has_new_corp_action(
+                            frame, existing_coverage[1]
                         ):
                             trigger_frames.append(frame)
                     covered_to = _covered_through(
@@ -321,9 +693,9 @@ def backfill_eod(
                         client,
                         bars,
                         target,
-                        min(new_first, start),
-                        covered[1],
-                        end,
+                        min(new_first, target_start),
+                        existing_coverage[1],
+                        target_end,
                         today,
                         trigger=pl.concat(trigger_frames),
                     )
@@ -467,6 +839,7 @@ def backfill_intraday(
     end: date | None = None,
     *,
     freq: str = DEFAULT_INTRADAY_FREQ,
+    ranges: Mapping[str, tuple[date, date]] | None = None,
 ) -> IngestResult:
     """Fetch intraday bars in chunks to cover [start, end], leading segments
     included. Note: Tiingo's IEX feed reaches back a bounded number of years,
@@ -476,6 +849,7 @@ def backfill_intraday(
     _require_registered_targets(meta, targets)
     today = date.today()
     end = end or today
+    requested_ranges = _validated_target_ranges(targets, start, end, ranges)
     dataset = f"intraday_{freq}"
     result = IngestResult()
     processed = 0
@@ -486,8 +860,9 @@ def backfill_intraday(
         failed: set[str] = set()
         planned: set[str] = set()
         for target in group:
+            target_start, target_end = requested_ranges[target.instrument_id]
             covered = meta.get_coverage(target.instrument_id, dataset)
-            segments = _missing_segments((start, end), covered)
+            segments = _missing_segments((target_start, target_end), covered)
             plan: list[tuple[date, date]] = []
             for seg_start, seg_end in segments:
                 leading = covered is not None and seg_end < covered[0]
@@ -575,6 +950,294 @@ def _chunks(
         out.append((cursor, chunk_end))
         cursor = chunk_end + timedelta(days=1)
     return list(reversed(out)) if reverse else out
+
+
+def _record_segment_result(
+    result: IngestResult,
+    segment: ValidatedRequestSegment,
+    sub_result: IngestResult,
+) -> None:
+    """Merge one low-level operation without losing its request identity."""
+    instrument_id = segment.instrument_id
+    assert instrument_id is not None
+    if instrument_id in sub_result.failed:
+        detail = sub_result.failed[instrument_id]
+        result.failed[segment.key] = detail
+        result.segments.append({**segment.to_dict(outcome="failed"), "detail": detail})
+        return
+    if instrument_id in sub_result.refreshed:
+        outcome = "refreshed"
+    elif instrument_id in sub_result.fetched:
+        outcome = "fetched"
+    else:
+        outcome = "skipped"
+    result.record_instrument_outcome(instrument_id, outcome)
+    result.segments.append(segment.to_dict(outcome=outcome))
+
+
+def _record_blocked_segment(
+    result: IngestResult, segment: ValidatedRequestSegment, detail: str | None = None
+) -> None:
+    reason = detail or segment.detail or segment.status
+    result.blocked[segment.key] = reason
+    result.segments.append({**segment.to_dict(outcome="blocked"), "detail": reason})
+
+
+def _record_unattempted_failure(
+    result: IngestResult, segment: ValidatedRequestSegment, detail: str
+) -> None:
+    result.failed[segment.key] = detail
+    result.segments.append({**segment.to_dict(outcome="failed"), "detail": detail})
+
+
+def _record_skipped_segment(
+    result: IngestResult, segment: ValidatedRequestSegment
+) -> None:
+    if segment.instrument_id is not None:
+        result.record_instrument_outcome(segment.instrument_id, "skipped")
+    result.segments.append(segment.to_dict(outcome="skipped"))
+
+
+def _adjacent_to_coverage(
+    segment: ValidatedRequestSegment, covered: tuple[date, date]
+) -> bool:
+    first, last = covered
+    if segment.end >= first and segment.start <= last:
+        return True
+    if segment.start > last:
+        return _weekend_only(
+            last + timedelta(days=1), segment.start - timedelta(days=1)
+        )
+    return _weekend_only(segment.end + timedelta(days=1), first - timedelta(days=1))
+
+
+def _execute_validated_segments(
+    client: TiingoClient,
+    bars: BarStore,
+    meta: MetaStore,
+    segments: Sequence[ValidatedRequestSegment],
+    *,
+    force: bool = False,
+    update: bool = False,
+) -> IngestResult:
+    """Execute ready segments without ever bridging a blocked coverage gap."""
+    result = IngestResult()
+    pending: dict[tuple[str, str], list[ValidatedRequestSegment]] = {}
+    for segment in segments:
+        if segment.status == "ready":
+            owner = (segment.instrument_id or "", segment.dataset_key)
+            pending.setdefault(owner, []).append(segment)
+        elif segment.status in {"inactive", "non_session_gap"}:
+            _record_skipped_segment(result, segment)
+        else:
+            _record_blocked_segment(result, segment)
+
+    # Work newest-to-oldest when an instrument has no edge yet.  Thereafter
+    # only an overlapping or adjacent unit is eligible, preserving the single
+    # contiguous coverage interval even when identity evidence has a gap.
+    for owned in pending.values():
+        owned.sort(key=lambda item: (item.end, item.start), reverse=True)
+    coverage = {owner: meta.get_coverage(*owner) for owner in pending}
+    while pending:
+        selected: list[ValidatedRequestSegment] = []
+        for owner in sorted(pending):
+            owned = pending[owner]
+            covered = coverage[owner]
+            selected_index = (
+                0
+                if covered is None
+                else next(
+                    (
+                        index
+                        for index, segment in enumerate(owned)
+                        if _adjacent_to_coverage(segment, covered)
+                    ),
+                    None,
+                )
+            )
+            if selected_index is None:
+                continue
+            selected.append(owned.pop(selected_index))
+
+        if not selected:
+            break
+        grouped: dict[str, list[ValidatedRequestSegment]] = {}
+        for segment in selected:
+            grouped.setdefault(segment.dataset_key, []).append(segment)
+        failed_owners: set[tuple[str, str]] = set()
+        for dataset_key, dataset_batch in sorted(grouped.items()):
+            # The transport request carries only the identifier value.  Keep
+            # same-value cross-type collisions in separate batches so lookup
+            # remains unambiguous without sacrificing normal bucket batching.
+            batches: list[list[ValidatedRequestSegment]] = []
+            identifier_occurrences: dict[str, int] = {}
+            for segment in sorted(
+                dataset_batch,
+                key=lambda item: (
+                    item.identifier_value or "",
+                    item.identifier_type or "",
+                    item.instrument_id or "",
+                ),
+            ):
+                identifier = segment.identifier_value or ""
+                lane = identifier_occurrences.get(identifier, 0)
+                identifier_occurrences[identifier] = lane + 1
+                if lane == len(batches):
+                    batches.append([])
+                batches[lane].append(segment)
+            for batch in batches:
+                segment_start = min(segment.start for segment in batch)
+                segment_end = max(segment.end for segment in batch)
+                ranges = {
+                    segment.instrument_id or "": (segment.start, segment.end)
+                    for segment in batch
+                }
+                targets = [
+                    IngestTarget(
+                        segment.instrument_id or "", segment.identifier_value or ""
+                    )
+                    for segment in batch
+                ]
+                validated_client = _ValidatedSegmentsClient(client, meta, batch)
+                if dataset_key == "eod":
+                    sub_result = backfill_eod(
+                        validated_client,  # type: ignore[arg-type]
+                        bars,
+                        meta,
+                        targets,
+                        segment_start,
+                        segment_end,
+                        force=True if update else force,
+                        ranges=ranges,
+                    )
+                else:
+                    freq = dataset_key.removeprefix("intraday_")
+                    sub_result = backfill_intraday(
+                        validated_client,  # type: ignore[arg-type]
+                        bars,
+                        meta,
+                        targets,
+                        segment_start,
+                        segment_end,
+                        freq=freq,
+                        ranges=ranges,
+                    )
+                for segment in batch:
+                    _record_segment_result(result, segment, sub_result)
+                    owner = (segment.instrument_id or "", segment.dataset_key)
+                    if segment.instrument_id in sub_result.failed:
+                        failed_owners.add(owner)
+                    else:
+                        coverage[owner] = meta.get_coverage(*owner)
+
+        for owner in failed_owners:
+            detail = "not attempted after another segment for this instrument failed"
+            for segment in pending.pop(owner, []):
+                _record_unattempted_failure(result, segment, detail)
+            coverage.pop(owner, None)
+        for owner in [owner for owner, owned in pending.items() if not owned]:
+            pending.pop(owner)
+            coverage.pop(owner, None)
+
+    for owned in pending.values():
+        for segment in owned:
+            _record_blocked_segment(
+                result,
+                segment,
+                "validated segment is not adjacent to stored coverage; an identity "
+                "gap must be resolved before coverage can advance across it",
+            )
+    return result
+
+
+def backfill_eod_validated(
+    client: TiingoClient,
+    bars: BarStore,
+    meta: MetaStore,
+    tickers: Sequence[str],
+    start: date,
+    end: date | None = None,
+    *,
+    force: bool = False,
+) -> IngestResult:
+    """Identity-plan and ingest EOD ticker ranges, reporting blocked slices."""
+    require_canonical_generation(bars, meta.storage_generation())
+    end = end or date.today()
+    segments = plan_validated_segments(meta, tickers, "eod", start, end)
+    return _execute_validated_segments(client, bars, meta, segments, force=force)
+
+
+def backfill_intraday_validated(
+    client: TiingoClient,
+    bars: BarStore,
+    meta: MetaStore,
+    tickers: Sequence[str],
+    start: date,
+    end: date | None = None,
+    *,
+    freq: str = DEFAULT_INTRADAY_FREQ,
+) -> IngestResult:
+    """Identity-plan and ingest one exact IEX frequency."""
+    require_intraday_freq(freq)
+    require_canonical_generation(bars, meta.storage_generation())
+    end = end or date.today()
+    segments = plan_validated_segments(meta, tickers, f"intraday_{freq}", start, end)
+    return _execute_validated_segments(client, bars, meta, segments)
+
+
+def update_eod_validated(
+    client: TiingoClient,
+    bars: BarStore,
+    meta: MetaStore,
+    tickers: Sequence[str],
+    *,
+    default_start: date = date(2000, 1, 3),
+) -> IngestResult:
+    """Update each ticker's current alias through an exact EOD identity plan."""
+    require_canonical_generation(bars, meta.storage_generation())
+    today = date.today()
+    segments: list[ValidatedRequestSegment] = []
+    for ticker in tickers:
+        alias_report = meta.resolve_alias_range(ticker, date.min, today)
+        current = alias_report.segments[-1]
+        if current.instrument_id is None:
+            latest_resolved = next(
+                (
+                    segment
+                    for segment in reversed(alias_report.segments[:-1])
+                    if segment.instrument_id is not None
+                ),
+                None,
+            )
+            if current.status == "zero_matches" and latest_resolved is not None:
+                segments.append(
+                    ValidatedRequestSegment(
+                        ticker=ticker.upper(),
+                        dataset_key="eod",
+                        start=today,
+                        end=today,
+                        status="inactive",
+                        instrument_ids=latest_resolved.instrument_ids,
+                        alias_ids=latest_resolved.alias_ids,
+                        instrument_id=latest_resolved.instrument_id,
+                        detail="ticker has no alias active today",
+                    )
+                )
+                continue
+            segments.extend(
+                plan_validated_segments(meta, [ticker], "eod", today, today)
+            )
+            continue
+        covered = meta.get_coverage(current.instrument_id, "eod")
+        request_start = (
+            max(current.start, covered[1] - timedelta(days=REFRESH_WINDOW_DAYS))
+            if covered is not None
+            else max(default_start, current.start)
+        )
+        segments.extend(
+            plan_validated_segments(meta, [ticker], "eod", request_start, today)
+        )
+    return _execute_validated_segments(client, bars, meta, segments, update=True)
 
 
 def reconcile(bars: BarStore, meta: MetaStore) -> dict[str, int]:

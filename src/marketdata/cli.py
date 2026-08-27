@@ -13,8 +13,15 @@ import polars as pl
 
 from marketdata import universe as universe_mod
 from marketdata.config import Config, load_config
-from marketdata.ingest import DEFAULT_INTRADAY_FREQ
+from marketdata.ingest import (
+    DEFAULT_INTRADAY_FREQ,
+    IngestResult,
+    backfill_eod_validated,
+    backfill_intraday_validated,
+    update_eod_validated,
+)
 from marketdata.migration import (
+    _write_json_atomic,
     default_migration_report_path,
     migrate_v1_bars,
 )
@@ -33,13 +40,39 @@ def _client(config: Config) -> TiingoClient:
 
 
 def _require_ingestion_ready(meta: MetaStore) -> None:
-    """Keep operator writes paused until validated request orchestration lands."""
-    generation = meta.storage_generation()
-    if generation == "v1":
-        detail = "migrate the warehouse to v2 first"
-    else:
-        detail = "the per-segment identity-validation flow is the next M1 step"
-    raise click.ClickException(f"production ingestion remains paused: {detail}")
+    if meta.storage_generation() != "v2":
+        raise click.ClickException(
+            "production ingestion remains paused: migrate the warehouse to v2 first"
+        )
+
+
+def _finish_ingest(result: IngestResult, summary_json: str | None) -> None:
+    click.echo(f"Done: {result.summary()}")
+    if summary_json:
+        _write_json_atomic(result.to_dict(), Path(summary_json))
+    if result.failed:
+        click.echo("Failed segments: " + ", ".join(sorted(result.failed)), err=True)
+    if result.blocked:
+        click.echo(
+            "Identity-blocked segments: " + ", ".join(sorted(result.blocked)),
+            err=True,
+        )
+    if not result.ok:
+        raise click.exceptions.Exit(1)
+
+
+def _raise_ingest_error(exc: Exception, summary_json: str | None) -> None:
+    if summary_json:
+        _write_json_atomic(
+            {"ok": False, "error": str(exc), "failed": {}, "blocked": {}},
+            Path(summary_json),
+        )
+    raise click.ClickException(str(exc)) from exc
+
+
+def _validate_cli_range(start, end, summary_json: str | None) -> None:
+    if end is not None and start.date() > end.date():
+        _raise_ingest_error(ValueError("--start must not be after --end"), summary_json)
 
 
 @click.group()
@@ -199,6 +232,46 @@ def _with_ticker_opts(f):
     return f
 
 
+def _resolve_tickers(
+    meta: MetaStore,
+    tickers: tuple[str, ...],
+    tickers_file: str | None,
+    universe_year: int | None,
+    *,
+    default_scope: str = "all",
+    summary_json: str | None = None,
+) -> list[str]:
+    if tickers:
+        normalized = [ticker.strip().upper() for ticker in tickers]
+        if any(not ticker for ticker in normalized):
+            _raise_ingest_error(
+                ValueError("--tickers values must not be blank"), summary_json
+            )
+        resolved = list(dict.fromkeys(normalized))
+    elif tickers_file:
+        text = Path(tickers_file).read_text()
+        resolved = list(
+            dict.fromkeys(ticker.strip().upper() for ticker in text.split() if ticker)
+        )
+    elif universe_year:
+        rows = meta.universe(universe_year)
+        if not rows:
+            raise click.ClickException(f"No universe stored for {universe_year}")
+        resolved = [row["ticker"] for row in rows]
+    else:
+        resolved = (
+            meta.latest_universe_tickers()
+            if default_scope == "latest"
+            else meta.all_universe_tickers()
+        )
+    if not resolved:
+        raise click.ClickException(
+            "No tickers specified and no universe exists yet. "
+            "Use --tickers/--tickers-file, or build a universe first."
+        )
+    return resolved
+
+
 @main.group()
 def backfill() -> None:
     """Backfill historical bars (resumable; rerun after interruptions)."""
@@ -221,10 +294,39 @@ def backfill() -> None:
 def backfill_eod_cmd(
     config, tickers, tickers_file, universe_year, start, end, force, summary_json
 ):
-    """Backfill daily bars (paused until M1 identity validation lands)."""
+    """Backfill daily bars through exact identity evidence."""
+    _validate_cli_range(start, end, summary_json)
     config.ensure_dirs()
     with MetaStore(config.meta_path) as meta:
         _require_ingestion_ready(meta)
+        ticker_list = _resolve_tickers(
+            meta,
+            tickers,
+            tickers_file,
+            universe_year,
+            summary_json=summary_json,
+        )
+        client = _client(config)
+        click.echo(f"Backfilling EOD for {len(ticker_list)} tickers...")
+        try:
+            result = backfill_eod_validated(
+                client,
+                BarStore(config.data_dir),
+                meta,
+                ticker_list,
+                start.date(),
+                end.date() if end else None,
+                force=force,
+            )
+        except (
+            OSError,
+            RuntimeError,
+            ValueError,
+            sqlite3.Error,
+            pl.exceptions.PolarsError,
+        ) as exc:
+            _raise_ingest_error(exc, summary_json)
+    _finish_ingest(result, summary_json)
 
 
 @backfill.command("intraday")
@@ -247,10 +349,39 @@ def backfill_eod_cmd(
 def backfill_intraday_cmd(
     config, tickers, tickers_file, universe_year, start, end, freq, summary_json
 ):
-    """Backfill intraday bars (paused until M1 identity validation lands)."""
+    """Backfill intraday bars through exact-frequency identity evidence."""
+    _validate_cli_range(start, end, summary_json)
     config.ensure_dirs()
     with MetaStore(config.meta_path) as meta:
         _require_ingestion_ready(meta)
+        ticker_list = _resolve_tickers(
+            meta,
+            tickers,
+            tickers_file,
+            universe_year,
+            summary_json=summary_json,
+        )
+        client = _client(config)
+        click.echo(f"Backfilling {freq} bars for {len(ticker_list)} tickers...")
+        try:
+            result = backfill_intraday_validated(
+                client,
+                BarStore(config.data_dir),
+                meta,
+                ticker_list,
+                start.date(),
+                end.date() if end else None,
+                freq=freq,
+            )
+        except (
+            OSError,
+            RuntimeError,
+            ValueError,
+            sqlite3.Error,
+            pl.exceptions.PolarsError,
+        ) as exc:
+            _raise_ingest_error(exc, summary_json)
+    _finish_ingest(result, summary_json)
 
 
 @main.command()
@@ -268,10 +399,33 @@ def backfill_intraday_cmd(
 )
 @click.pass_obj
 def update(config, tickers, tickers_file, universe_year, all_universes, summary_json):
-    """Incremental EOD update (paused until M1 identity validation lands)."""
+    """Incremental identity-validated EOD update."""
     config.ensure_dirs()
     with MetaStore(config.meta_path) as meta:
         _require_ingestion_ready(meta)
+        ticker_list = _resolve_tickers(
+            meta,
+            tickers,
+            tickers_file,
+            universe_year,
+            default_scope="all" if all_universes else "latest",
+            summary_json=summary_json,
+        )
+        client = _client(config)
+        click.echo(f"Updating EOD for {len(ticker_list)} tickers...")
+        try:
+            result = update_eod_validated(
+                client, BarStore(config.data_dir), meta, ticker_list
+            )
+        except (
+            OSError,
+            RuntimeError,
+            ValueError,
+            sqlite3.Error,
+            pl.exceptions.PolarsError,
+        ) as exc:
+            _raise_ingest_error(exc, summary_json)
+    _finish_ingest(result, summary_json)
 
 
 @main.command("reconcile")

@@ -328,6 +328,12 @@ a bare alias cannot replace a multi-alias instrument snapshot. Ingestion never
 selects the newest listing, merges histories, or guesses across an evidence
 gap.
 
+Tiingo archive boundaries are trading-day dates. A Saturday/Sunday-only gap
+between otherwise adjacent validated units may connect the derived coverage
+interval because no US stock/ETF bar can exist there; it does not authorize a
+request or returned row for those dates. Weekday holidays remain ordinary
+evidence gaps until M2's exchange calendar can identify them explicitly.
+
 Universe rows retain the imported ticker string as historical source data but
 must resolve to an instrument through aliases overlapping that universe year.
 Zero or multiple matches are explicit resolution failures. No Tiingo-backed

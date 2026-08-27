@@ -159,6 +159,8 @@ Identity and ingestion metadata:
   validated envelope, validation state, and evidence. Adjacent or overlapping
   validated evidence rows for the same identifier, instrument, and exact
   dataset key may jointly cover a request segment; an evidence gap never does.
+  A weekend-only interval between trading-day evidence boundaries is a
+  non-session continuity marker per D-014, not request or row authorization.
 - `universe`: original (`year`, `ticker`) seed record, rank, and dollar-volume
   value. Resolution to exactly one instrument is recorded separately so the
   imported source value is not destroyed.

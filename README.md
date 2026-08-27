@@ -45,9 +45,10 @@ market-data status
 market-data sql "SELECT instrument_id, max(date), count(*) FROM eod GROUP BY instrument_id ORDER BY 2 DESC LIMIT 10"
 ```
 
-During M1, `backfill` and `update` intentionally exit with a production-pause
-message. They are re-enabled only after request segments are identity-validated
-for their exact dataset key and the real-Tiingo canary passes.
+On a v2 warehouse, `backfill` and `update` partition each ticker/date request
+through alias and exact-dataset identifier evidence. Validated segments may
+proceed; unresolved/conflicting segments are reported and make the command exit
+nonzero. An unmigrated v1 warehouse remains blocked.
 
 The ingestion primitives are idempotent and resumable: each
 (`instrument_id`, exact dataset key) pair tracks
@@ -55,8 +56,8 @@ a coverage interval (so backfills fill missing leading history too), Parquet
 writes are merge-upserts keyed on date/timestamp, nightly updates refetch a
 rolling overlap to pick up corrections and restated adjustments, and a newly
 observed split/dividend triggers a full-history refresh for that instrument.
-The operator backfill/update commands remain paused until M1 finishes the
-validated request-segment flow. If coverage rows are lost or in doubt,
+Operational production use remains paused until M1's controlled real-Tiingo
+canary. If coverage rows are lost or in doubt,
 `market-data reconcile` rebuilds them from active v2 files or an unmigrated v1
 warehouse. This does not recreate a lost `meta.db`: identity evidence cannot be
 reconstructed from bar files, so restore the metadata database from backup
@@ -64,8 +65,8 @@ first.
 
 ### M1 bar migration
 
-Production ingestion remains paused while validated request orchestration is
-completed. The storage migration can be exercised with:
+Production use remains paused pending the controlled Tiingo canary. The storage
+migration can be exercised with:
 
 ```bash
 market-data migrate-v2-bars
@@ -81,8 +82,8 @@ is rebuilt conservatively after every run. The command exits nonzero while any
 source or canonical coverage slice remains unsafe. Establishing the v2 boundary
 records a durable generation marker, clears derived v1 ticker coverage, and
 disables legacy ticker-owned paths. Instrument-keyed queries are active; the
-operator ingestion commands fail clearly until the next M1 step validates and
-reports every request segment before calling the canonical primitives.
+operator ingestion commands validate and report every request segment before
+calling the canonical primitives, and reject any response outside that segment.
 Schema v3 names the canonical SQL table `meta.coverage` and retains the old
 shape explicitly as `meta.ticker_coverage_v1` during the transition.
 
@@ -147,9 +148,9 @@ Milestone **M1 (identity-safe canonical warehouse)** is in progress after the
 owner approved and closed M0 on 2026-08-27. The identity registry and explicit
 resolution reports plus the v2 hash-bucket storage migration, atomic bar
 publication, conservative reconciliation, and operator report are implemented.
-Instrument-owned ingestion primitives and canonical query APIs are also
-implemented. Validated per-segment ingestion orchestration and CSV transport
-are next; production ingestion remains paused until M1 is complete. The first
+Instrument-owned ingestion primitives, canonical query APIs, and validated
+per-segment orchestration are also implemented. CSV transport is next;
+production use remains paused pending M1's controlled canary. The first
 planned study asks whether stocks that open significantly down tend to recover
 over the next few hours; the research/backtesting layer begins in M3.
 
