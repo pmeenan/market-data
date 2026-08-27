@@ -171,9 +171,10 @@ Identity and ingestion metadata:
   D-017 boundary sets `v2` and clears derived ticker-keyed v1 coverage; legacy
   ingestion/query commands then fail closed until their instrument-keyed paths
   replace them.
-- scheduler/request accounting: billing-period byte usage and persisted
-  global date-band progress needed by D-013. This is operational state, not a
-  second statement of bar coverage.
+- scheduler/request accounting: billing-period byte usage plus the persisted
+  phase/dataset cohort, per-instrument frontier, and breadth-first sweep cursor
+  required by D-013 and D-020. This is operational state, not a second
+  statement of bar coverage.
 
 Research metadata follows D-016:
 
@@ -269,9 +270,16 @@ exists when it does not and is forbidden.
 
 Historical scheduling is a planning layer over this same idempotent unit. It
 refreshes current data first, enforces the vendor-period byte budget, and
-advances 5-minute history in global newest-to-oldest date bands (D-011,
-D-013). Transfer accounting records actual response bytes, including responses
-that later fail validation, because they still consume vendor bandwidth.
+advances every phase/dataset history breadth-first: one maximum-safe request
+unit from each eligible instrument's newest uncovered frontier per durable
+sweep before any instrument receives another older unit (D-011, D-013,
+D-020). A quota stop resumes the unfinished sweep. Failed and identity-blocked
+units retain their own frontier but count as attempted turns, so they do not
+stall safe peers. The client records encoded response-body bytes from the raw
+transport, including retry bodies, partial reads where the HTTP stack exposes
+their count, and responses that later fail validation. M2 must verify how that
+observable maps to Tiingo's vendor bandwidth ledger before enforcing the cap
+(RE-006).
 
 ## Query, calendar, and quality contracts
 

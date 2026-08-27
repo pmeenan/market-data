@@ -19,6 +19,8 @@ from typing import Any
 
 import polars as pl
 
+from marketdata.bar_fields import TIINGO_EOD_FIELD_MAP, TIINGO_INTRADAY_FIELD_MAP
+
 EOD_SCHEMA = {
     "ticker": pl.Utf8,
     "date": pl.Date,
@@ -56,27 +58,11 @@ CANONICAL_INTRADAY_SCHEMA = {"instrument_id": pl.Utf8} | {
 
 INTRADAY_FREQS = ("1hour", "5min")
 
-_TIINGO_EOD_FIELDS = {
-    "date": "date",
-    "open": "open",
-    "high": "high",
-    "low": "low",
-    "close": "close",
-    "volume": "volume",
-    "adjOpen": "adj_open",
-    "adjHigh": "adj_high",
-    "adjLow": "adj_low",
-    "adjClose": "adj_close",
-    "adjVolume": "adj_volume",
-    "divCash": "div_cash",
-    "splitFactor": "split_factor",
-}
-
 
 def eod_frame(ticker: str, rows: list[dict[str, Any]]) -> pl.DataFrame:
-    """Convert Tiingo EOD JSON rows into the normalized legacy frame."""
+    """Convert Tiingo EOD response rows into the normalized legacy frame."""
     records = [
-        {out: row.get(src) for src, out in _TIINGO_EOD_FIELDS.items()} for row in rows
+        {out: row.get(src) for src, out in TIINGO_EOD_FIELD_MAP.items()} for row in rows
     ]
     df = pl.DataFrame(
         records,
@@ -96,24 +82,16 @@ def eod_frame(ticker: str, rows: list[dict[str, Any]]) -> pl.DataFrame:
 def intraday_frame(ticker: str, rows: list[dict[str, Any]]) -> pl.DataFrame:
     records = [
         {
-            "ts": row["date"],
-            "open": row.get("open"),
-            "high": row.get("high"),
-            "low": row.get("low"),
-            "close": row.get("close"),
-            "volume": row.get("volume"),
+            out: row[src] if src == "date" else row.get(src)
+            for src, out in TIINGO_INTRADAY_FIELD_MAP.items()
         }
         for row in rows
     ]
     df = pl.DataFrame(
         records,
         schema={
-            "ts": pl.Utf8,
-            "open": pl.Float64,
-            "high": pl.Float64,
-            "low": pl.Float64,
-            "close": pl.Float64,
-            "volume": pl.Int64,
+            out: pl.Utf8 if out == "ts" else INTRADAY_SCHEMA[out]
+            for out in TIINGO_INTRADAY_FIELD_MAP.values()
         },
     )
     return (

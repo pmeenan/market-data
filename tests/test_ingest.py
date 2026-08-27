@@ -2,6 +2,8 @@
 
 from datetime import date, timedelta
 
+import responses
+
 from marketdata.ingest import (
     REFRESH_WINDOW_DAYS,
     IngestTarget,
@@ -22,7 +24,7 @@ from marketdata.ingest import (
 )
 from marketdata.store import BarStore, MetaStore
 from marketdata.store.bars import eod_frame, instrument_bucket
-from marketdata.tiingo import TiingoError
+from marketdata.tiingo import BASE_URL, TiingoClient, TiingoError
 
 
 def eod_row(
@@ -144,6 +146,51 @@ def test_ingestion_owns_bars_and_coverage_by_instrument_id(tmp_path):
     stored = bars.read_canonical_eod("stable-id")
     assert stored["instrument_id"].unique().to_list() == ["stable-id"]
     assert "ticker" not in stored.columns
+
+
+@responses.activate
+def test_csv_client_contract_reaches_eod_and_intraday_ingestion(tmp_path):
+    bars, meta = stores(tmp_path)
+    for instrument_id in ("eod-id", "intraday-id"):
+        meta.upsert_instrument(instrument_id)
+    responses.add(
+        responses.GET,
+        f"{BASE_URL}/tiingo/daily/aapl/prices",
+        body=(
+            "date,close,high,low,open,volume,adjClose,adjHigh,adjLow,adjOpen,"
+            "adjVolume,divCash,splitFactor\n"
+            "2024-01-02T00:00:00.000Z,101,102,99,100,123456,101,102,99,100,"
+            "123456,,1\n"
+        ),
+        status=200,
+    )
+    responses.add(
+        responses.GET,
+        f"{BASE_URL}/iex/aapl/prices",
+        body=(
+            "date,open,high,low,close,volume\n"
+            "2024-01-02T10:00:00-05:00,100,101,99.5,,1234\n"
+        ),
+        status=200,
+    )
+    client = TiingoClient("test-token", min_request_interval=0.0)
+    day = date(2024, 1, 2)
+
+    eod_result = _backfill_eod(
+        client, bars, meta, [IngestTarget("eod-id", "AAPL")], day, day
+    )
+    intraday_result = _backfill_intraday(
+        client,
+        bars,
+        meta,
+        [IngestTarget("intraday-id", "AAPL")],
+        day,
+        day,
+    )
+
+    assert eod_result.ok and intraday_result.ok
+    assert bars.read_canonical_eod("eod-id")["div_cash"].to_list() == [None]
+    assert bars.read_canonical_intraday("intraday-id")["close"].to_list() == [None]
 
 
 def _identity_target(

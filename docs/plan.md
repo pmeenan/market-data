@@ -169,8 +169,15 @@ Scope:
       as routine update skips, preserves the newest-first anchor after failures,
       accepts weekend-only evidence boundaries, batches heterogeneous request
       ranges per bucket, and publishes summaries atomically.
-- [ ] Switch bulk Tiingo bar fetches and fixtures to CSV while preserving
+- [x] Switch bulk Tiingo bar fetches and fixtures to CSV while preserving
       retries, normalization, response validation, and byte measurement.
+      Completed 2026-08-27: EOD and IEX bar requests use validated CSV
+      parsing; transport fixtures exercise the existing nullable normalized
+      schemas, while cumulative request/wire-byte counters charge HTTP retries,
+      partial transport failures, and payloads rejected after transport.
+      Review hardening added network retries, RFC-date `Retry-After`, exact
+      encoded-byte metering, defensive empty-result handling, and shared field
+      contracts.
 
 Exit criteria:
 
@@ -206,9 +213,14 @@ Scope:
   every minimum check listed there. Checks emit structured findings and never
   silently repair vendor bars; each study remains responsible for declaring
   which findings block that study.
-- [ ] Persist actual response-byte/request accounting and scheduler progress.
-  Execute D-011's phases and D-013's current-first, global-band, and budget
-  policy without duplicating their limits here.
+- [ ] Persist observed encoded-response-byte/request accounting and scheduler
+  progress.
+  Execute D-011's phases, D-013's current-first/budget policy, and D-020's
+  breadth-first request-depth sweeps for every manual or scheduled historical
+  entry point without duplicating their limits here. Before enforcing the
+  vendor bandwidth cap, verify Tiingo's billing-byte basis or budget against a
+  conservatively safe interpretation; RE-006 found no compression in current
+  bar responses but the published limit does not define its accounting basis.
 - [ ] Put ingestion, reconciliation, and later research publication behind the
   shared data-directory process lock. Preserve nonzero CLI exits and bounded
   machine-readable summaries for partial failure.
@@ -221,10 +233,12 @@ Exit criteria:
 - [ ] Offline boundary fixtures prove chunk planning neither loses nor duplicates
   rows at the row cap, year, alias, DST, holiday, and half-day boundaries; a
   controlled Tiingo run confirms the planner against both intraday frequencies.
-- [ ] Scheduler tests prove current work wins, completed global bands resume after
-  restart, failed/identity-blocked segments do not advance progress, actual
-  bytes are charged even for rejected responses, and neither monthly hard cap
-  can be exceeded.
+- [ ] Scheduler tests prove current work wins; quota stops resume the unvisited
+  remainder of the same deterministic sweep; no instrument reaches request
+  depth N+1 before every eligible peer receives a depth-N turn; failed or
+  identity-blocked segments retain their frontier without stalling safe peers;
+  actual bytes are charged even for rejected responses; and neither monthly
+  hard cap can be exceeded.
 - [ ] Every minimum architecture quality check has a focused fixture and appears in
   structured CLI/library reports on stored data. The mechanism for a consumer
   to declare findings blocking is tested; M3 defines the first study's set.
@@ -305,7 +319,8 @@ Exit criteria:
 
 - [ ] Every target in phases 1–3 is either covered to its defined range or listed
   in a durable unresolved/failed report; scheduler records show phase order,
-  date-band order, and every billing window remained within D-013's limits.
+  D-020 breadth-first sweep order, and every billing window remained within
+  D-013's limits.
 - [ ] Nightly EOD/hourly/five-minute collection is current for every resolvable
   all-ticker target, with honest per-dataset coverage and visible failures.
 - [ ] The full study publishes validated opening-half-hour and later-window

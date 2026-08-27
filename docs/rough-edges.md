@@ -22,6 +22,36 @@ Newest first. RE-numbers are never reused.
 
 ---
 
+## RE-006: Tiingo bar CSV is uncompressed and billing-byte semantics are undocumented  (2026-08-27, status: open)
+
+**Environment:** Authenticated Tiingo EOD and historical IEX REST endpoints,
+CSV, Power tier; measured 2026-08-27 with Requests streaming raw bodies.
+
+**Repro/measurement:** The same AAPL 5-minute response was requested with
+`Accept-Encoding` set to identity, gzip, Brotli, Zstandard, and
+`gzip, br, zstd`; every response had no `Content-Encoding` and the same
+107,179-byte `Content-Length` and raw-body length. A ten-year AAPL EOD response
+behaved identically at 353,190 bytes. The responses exposed no bandwidth or
+usage headers. Tiingo's documentation names a monthly bandwidth limit but does
+not state whether it counts encoded or decoded response bytes. A historical
+empty EOD CSV range returned the normal 94-byte header row, not JSON `[]`.
+
+**Observed:** Current bar endpoints do not use gzip, Brotli, or Zstandard even
+when explicitly offered, so encoded and decoded body sizes are currently
+identical. The future relationship between observable transport bytes and the
+vendor's billing ledger is unspecified.
+
+**Expected:** A bandwidth-limited bulk API either compresses repetitive CSV or
+documents why not, and defines the byte counter clients must enforce.
+
+**Impact:** Do not force identity encoding. Meter encoded bytes through the
+HTTP raw-stream count so future automatic decompression cannot corrupt the
+measurement, but verify the vendor ledger's accounting basis before M2 treats
+that counter as authoritative. Until then, a hard budget must use a
+conservatively safe interpretation. Keep exact JSON `[]`, header-only CSV,
+empty bodies, and BOM-only bodies as tested empty-result variants. See
+Tiingo's [general API documentation](https://www.tiingo.com/documentation/general).
+
 ## RE-005: Tiingo identity surfaces are incomplete and dataset-dependent  (2026-08-26, status: open)
 
 **Environment:** Tiingo public supported-tickers archive plus authenticated

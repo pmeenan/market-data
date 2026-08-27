@@ -131,8 +131,9 @@ data/                       (gitignored; set MARKET_DATA_DIR to relocate)
   quarantine/v1-ticker-bars/
     migration-report.json  durable per-source migration outcome
 src/marketdata/
+  bar_fields.py              shared Tiingo bar-field contract
   identity.py               fail-closed identity resolution result contracts
-  tiingo.py                 Tiingo REST client (throttling, retries)
+  tiingo.py                 Tiingo REST client (CSV bars, retries, metering)
   store/bars.py             Parquet bar storage (merge-upsert writes)
   store/meta.py             SQLite metadata store
   universe.py               candidate seeding + dollar-volume ranking
@@ -149,8 +150,9 @@ owner approved and closed M0 on 2026-08-27. The identity registry and explicit
 resolution reports plus the v2 hash-bucket storage migration, atomic bar
 publication, conservative reconciliation, and operator report are implemented.
 Instrument-owned ingestion primitives, canonical query APIs, and validated
-per-segment orchestration are also implemented. CSV transport is next;
-production use remains paused pending M1's controlled canary. The first
+per-segment orchestration plus CSV transport and in-memory request/wire-byte
+metering are also implemented. Production use remains paused pending M1's
+controlled canary. The first
 planned study asks whether stocks that open significantly down tend to recover
 over the next few hours; the research/backtesting layer begins in M3.
 

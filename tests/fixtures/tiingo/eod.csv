@@ -1,0 +1,2 @@
+date,close,high,low,open,volume,adjClose,adjHigh,adjLow,adjOpen,adjVolume,divCash,splitFactor
+2024-01-02T00:00:00.000Z,101.0,102.0,99.0,100.0,123456,101.0,102.0,99.0,100.0,123456,0.0,1.0

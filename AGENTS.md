@@ -41,6 +41,9 @@ affected docs. Until then, these govern.
   Parquet writes are merge-upserts; updates refetch a rolling overlap and a
   new split/dividend triggers a full-history refresh. A rerun after an
   interruption must converge to the same dataset. (D-003, D-009)
+- **Historical backfills advance breadth-first.** Within a phase/dataset, each
+  eligible instrument gets one maximum-safe request-depth turn before any gets
+  another; quota stops resume the unfinished deterministic sweep. (D-020)
 - **Apache-2.0, permissive direct deps.** Dependencies must carry
   Apache-2.0-compatible permissive licenses, verified against the package's own
   metadata. Every package in the universal lock plus the pinned build backend
@@ -113,7 +116,8 @@ registry and explicit alias/vendor/universe resolution reports are implemented;
 the v2 hash-bucket bar migration, atomic publication, reconciliation, and
 operator report plus instrument-keyed ingestion/query APIs are implemented;
 validated per-segment ingestion orchestration is implemented and CSV transport
-remains. Production use stays paused pending M1's controlled Tiingo canary; the
+with in-memory request/wire-byte metering is implemented. Production use
+stays paused pending M1's controlled Tiingo canary; the
 backtest layer does not exist yet. See
 [docs/plan.md](docs/plan.md). Keep this paragraph short and current when plan.md
 milestone status changes (rule 4).

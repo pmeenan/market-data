@@ -25,6 +25,52 @@ Decision / Context / Consequences / Reopen if
 
 ---
 
+## D-020: Historical backfills advance breadth-first by request depth  (2026-08-27, status: accepted, amends D-011 and D-013)
+
+**Decision:** Every historical backfill in phases 1–3, whether started
+manually or by the persisted scheduler, advances breadth-first within its
+current phase and exact dataset. A sweep gives each eligible instrument at
+most one request-sized unit from its newest uncovered frontier before any
+instrument receives a second, older unit. Each unit spans as far backward as
+the endpoint- and frequency-specific safe request envelope allows. It never
+relies on a response reaching Tiingo's silent row cap as proof that the range
+was complete.
+
+The cohort order and sweep cursor are deterministic and durable. If an hourly,
+daily, or monthly limit stops work partway through a sweep, the next run
+resumes with the instruments that have not yet received that turn; it does not
+restart at the first instrument or deepen an early ticker. A successful or
+verified-empty unit advances only that instrument's frontier. A failed or
+identity-blocked unit records an outcome for its turn but does not
+advance its frontier, so validated peers can progress after the full sweep
+without guessing identity or falsely covering the failed range. Current
+collection retains D-013's priority over all historical sweeps, and D-011's
+phase order is unchanged.
+
+**Context:** Tiingo silently limits historical IEX responses to 10,000 rows,
+while request quotas reset hourly and daily. A ticker-at-a-time traversal can
+consume a quota window on a few deep histories and leave most of the cohort
+with no recent history. It can also starve later tickers after every restart.
+Breadth-first sweeps maximize useful cross-sectional depth at each completed
+request layer and make quota interruptions fair and resumable. The owner
+generalized D-013's five-minute date-band preference to every historical
+backfill on 2026-08-27.
+
+**Consequences:** M2's range planner chooses the largest conservatively safe
+unit independently for EOD, hourly, and five-minute data, including IEX's
+required lookahead/discard behavior. Scheduler state includes the phase,
+dataset, cohort snapshot, per-instrument frontier, sweep order/cursor, and
+last-attempt status. Tests must prove a quota stop resumes the remainder
+of the same sweep, no instrument gets request depth N+1 before every eligible
+peer gets a depth-N turn, and failures or identity blocks neither advance that
+target nor stall safe peers. D-013 continues to own the special five-minute
+30 GB history cap and current-data reserve.
+
+**Reopen if:** Tiingo provides explicit complete pagination with different
+economics, the owner changes phase priority, or measured scheduler overhead
+makes a different fairness unit materially better while preserving comparable
+cross-sectional depth.
+
 ## D-019: Canonical bars use stable hash-bucket compaction  (2026-08-27, status: accepted, amends D-003, D-009, and D-017)
 
 **Decision:** Instrument-keyed canonical bars use 256 stable hash buckets,
@@ -385,7 +431,7 @@ identity semantics. Such a source can replace the resolver input, but does not
 remove the need for stable warehouse identity unless its IDs and guarantees
 are contractually durable.
 
-## D-013: Five-minute history fills newest-first with a 30 GB monthly hard cap  (2026-08-26, status: accepted, amends D-011)
+## D-013: Five-minute history fills newest-first with a 30 GB monthly hard cap  (2026-08-26, status: accepted, amended by D-020; amends D-011)
 
 **Decision:** The phase-3 seed-ticker 5-minute backfill proceeds in global
 date bands from the most recent completed session backward toward 2016-12-12.
@@ -461,7 +507,7 @@ record's 2011–2016 years.
 reframed to exclude the opening half-hour, or a validated consolidated Tiingo
 intraday feed replaces IEX for this dataset.
 
-## D-011: Backfill scope, priority, and API budget  (2026-08-26, status: accepted, amended by D-013 and D-014)
+## D-011: Backfill scope, priority, and API budget  (2026-08-26, status: accepted, amended by D-013, D-014, and D-020)
 
 **Decision:** The dataset is built in phases, bounded by the owner's Tiingo
 Power-tier budget:
@@ -506,7 +552,7 @@ requests/hour, 100,000/day, **40 GB bandwidth/month**, ~110k unique
 symbols/month. Bandwidth is the binding constraint, so **bulk fetches use
 `format=csv`, not JSON** — CSV responses carry no repeated field names and
 run roughly half to a third the bytes per bar (owner's call, 2026-08-26; the
-client currently requests JSON and switches in M1). With CSV, the OQ-2 spike
+client switch landed in M1 on 2026-08-27). With CSV, the OQ-2 spike
 measured a 68.5 GB seed-list projection for 5-minute history, within the
 original ~40–75 GB estimate, i.e. **1–2 months only if phase 3 could use the
 full vendor cap**. D-013 instead hard-caps history at 30 GB/month, making the
@@ -526,11 +572,21 @@ same day. Resolves OQ-7.
 **Consequences:** Phase ordering is owner intent — don't reorder it to
 "optimize". The backfill completing is measured in months, not hours; M2
 planning must treat it as a long-running metered process with resumable
-state (which D-009's coverage intervals already provide). The Tiingo client
-must move from `format=json` to CSV parsing for bulk endpoints (M1, with
-tests updated to CSV fixtures). The OQ-2 measurement calibrates the initial
+state (which D-009's coverage intervals already provide). The Tiingo client's
+M1 move to CSV parsing for bulk endpoints includes CSV transport fixtures and
+in-memory request/wire-byte measurement; durable scheduler accounting
+remains M2. The OQ-2 measurement calibrates the initial
 projection; the scheduler must continue tracking actual bytes/ticker because
 listing lifetimes and payload sizes vary.
+
+An authenticated 2026-08-27 follow-up offered identity, gzip, Brotli, and
+Zstandard encodings separately and together to representative EOD and IEX CSV
+requests. Tiingo returned every variant unencoded with identical
+`Content-Length` and raw-body size. The client therefore permits normal HTTP
+content negotiation and meters encoded bytes from the raw transport rather
+than forcing identity. Tiingo's published limit does not define whether its
+ledger charges encoded or decoded bytes; M2 must validate that mapping before
+using the client counter as the authoritative budget ledger (RE-006).
 
 **Reopen if:** Tiingo changes tier limits, the measured bytes/ticker differs
 wildly from the estimate, or the owner's study needs reprioritize which data

@@ -47,8 +47,8 @@ DuckDB temporary table, then timed merge-deduplication, zstd write, and atomic
 rename. It therefore measures canonical publication, not vendor transfer or
 response validation. The single-instrument case shows worst-case bucket write
 amplification. The batch case updates all 64 instruments in four complete
-buckets, matching the scheduler's global date-band direction and measuring
-each bucket rewrite once.
+buckets, matching the scheduler's breadth-first cross-sectional direction and
+measuring each bucket rewrite once.
 
 Run on the project Linux server (24 logical CPUs, NVMe storage, Python 3.12.3):
 
@@ -98,8 +98,8 @@ view; the bar store may still exploit the known bucket for point reads.
 Use stable 256-way hash buckets for canonical instrument-keyed bars (D-019).
 EOD uses one file per non-empty bucket; intraday uses one file per
 frequency/year/bucket. This removes the small-file penalty before data is
-migrated and aligns normal update/backfill publication with D-013's
-cross-sectional date bands.
+migrated and aligns normal update/backfill publication with D-020's
+cross-sectional request sweeps.
 
 The ingestion coordinator stages and validates responses independently, then
 groups publishable frames by dataset/year/bucket. A failed response is omitted

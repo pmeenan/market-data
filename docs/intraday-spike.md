@@ -9,6 +9,12 @@ Fetched AAPL (large-cap stock), CROX (mid-cap stock), and SPY (ETF) at
 `resampleFreq=1hour` and `resampleFreq=5min`, explicitly requesting
 `format=csv` and `open,high,low,close,volume`. Requests used identity encoding
 so byte counts are the actual CSV response bytes, not decompressed sizes.
+An authenticated follow-up on 2026-08-27 offered identity, gzip, Brotli, and
+Zstandard encodings to representative IEX and EOD CSV requests; all variants
+were returned unencoded with identical raw sizes. Identity therefore did not
+inflate this spike's transfer measurement, although Tiingo does not document
+whether its monthly ledger would charge encoded or decoded bytes if transport
+compression is enabled later (RE-006).
 
 A single long request is not a valid depth probe: the endpoint silently keeps
 only the newest 10,000 rows (RE-002). The final measurement therefore used
