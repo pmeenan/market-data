@@ -308,6 +308,14 @@ class MetaStore:
         rows = self._con.execute("SELECT instrument_id FROM instruments").fetchall()
         return {str(row["instrument_id"]) for row in rows}
 
+    def instrument_lifecycle(self) -> dict[str, str]:
+        """Return lifecycle state keyed by stable instrument id."""
+        rows = self._con.execute(
+            """SELECT instrument_id, lifecycle_status FROM instruments
+               ORDER BY instrument_id"""
+        ).fetchall()
+        return {str(row["instrument_id"]): str(row["lifecycle_status"]) for row in rows}
+
     def add_instrument_alias(
         self,
         instrument_id: str,

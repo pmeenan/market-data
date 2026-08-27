@@ -13,6 +13,7 @@ import polars as pl
 
 from marketdata import universe as universe_mod
 from marketdata.config import Config, load_config
+from marketdata.identity import DATASET_KEYS
 from marketdata.ingest import (
     DEFAULT_INTRADAY_FREQ,
     IngestResult,
@@ -24,6 +25,13 @@ from marketdata.migration import (
     _write_json_atomic,
     default_migration_report_path,
     migrate_v1_bars,
+)
+from marketdata.quality import (
+    DEFAULT_ZERO_VOLUME_RUN_LENGTH,
+    MIN_ZERO_VOLUME_RUN_LENGTH,
+    QUALITY_CHECKS,
+    check_quality,
+    evaluate_quality,
 )
 from marketdata.reconcile import reconcile_canonical, reconcile_legacy
 from marketdata.store import BarStore, MetaStore
@@ -73,6 +81,12 @@ def _raise_ingest_error(exc: Exception, summary_json: str | None) -> None:
 def _validate_cli_range(start, end, summary_json: str | None) -> None:
     if end is not None and start.date() > end.date():
         _raise_ingest_error(ValueError("--start must not be after --end"), summary_json)
+
+
+class _QualityCommandError(click.ClickException):
+    """Operational scan/report failure, distinct from a quality-gate failure."""
+
+    exit_code = 2
 
 
 @click.group()
@@ -502,6 +516,115 @@ def migrate_v2_bars_cmd(config: Config, report_path: Path | None) -> None:
 
 
 # ---- inspection ----------------------------------------------------------
+
+
+@main.command("quality")
+@click.option(
+    "--dataset",
+    "dataset_keys",
+    type=click.Choice(DATASET_KEYS),
+    multiple=True,
+    help="Dataset to scan (repeatable; default: all three)",
+)
+@click.option(
+    "--instrument-id",
+    "instrument_ids",
+    multiple=True,
+    help="Stable instrument id to scan (repeatable; default: all stored)",
+)
+@click.option("--start", type=click.DateTime(["%Y-%m-%d"]), default=None)
+@click.option("--end", type=click.DateTime(["%Y-%m-%d"]), default=None)
+@click.option(
+    "--zero-volume-run",
+    type=click.IntRange(min=MIN_ZERO_VOLUME_RUN_LENGTH),
+    default=DEFAULT_ZERO_VOLUME_RUN_LENGTH,
+    show_default=True,
+    help="Minimum consecutive zero-volume bars reported as suspicious",
+)
+@click.option(
+    "--block-on",
+    type=click.Choice(QUALITY_CHECKS),
+    multiple=True,
+    help=(
+        "Check whose warning/error findings make this command fail; a declared "
+        "check that could not run also fails closed"
+    ),
+)
+@click.option(
+    "--summary-json",
+    type=click.Path(),
+    default=None,
+    help="Write the complete structured report to this file",
+)
+@click.pass_obj
+def quality_cmd(
+    config: Config,
+    dataset_keys: tuple[str, ...],
+    instrument_ids: tuple[str, ...],
+    start,
+    end,
+    zero_volume_run: int,
+    block_on: tuple[str, ...],
+    summary_json: str | None,
+) -> None:
+    """Report stored-data quality without modifying canonical vendor bars."""
+    try:
+        report = check_quality(
+            config,
+            dataset_keys=dataset_keys or DATASET_KEYS,
+            instrument_ids=instrument_ids or None,
+            start=start.date() if start else None,
+            end=end.date() if end else None,
+            zero_volume_run_length=zero_volume_run,
+        )
+        gate = evaluate_quality(report, block_on)
+    except (
+        OSError,
+        RuntimeError,
+        ValueError,
+        sqlite3.Error,
+        duckdb.Error,
+        pl.exceptions.PolarsError,
+    ) as exc:
+        # A failed scan has no gate outcome. Preserve any standing successful
+        # report rather than replacing it with a structurally different file.
+        raise _QualityCommandError(f"quality scan failed: {exc}") from exc
+
+    payload = report.to_dict() | {"gate": gate.to_dict()}
+    if summary_json:
+        try:
+            _write_json_atomic(payload, Path(summary_json))
+        except OSError as exc:
+            raise _QualityCommandError(
+                f"could not write quality summary {summary_json}: {exc}"
+            ) from exc
+    counts = report.finding_counts()
+    click.echo(
+        "Quality findings: "
+        f"{counts['error']} error, {counts['warning']} warning, "
+        f"{counts['info']} info"
+    )
+    for finding in report.findings:
+        if finding.severity == "info":
+            continue
+        owner = f" {finding.instrument_id}" if finding.instrument_id else ""
+        click.echo(
+            f"{finding.severity}: {finding.dataset_key}{owner} "
+            f"{finding.check}: {finding.message} ({finding.count})",
+            err=finding.severity == "error",
+        )
+    if block_on:
+        if gate.checks_not_run:
+            click.echo(
+                "Quality checks not run: " + ", ".join(gate.checks_not_run),
+                err=True,
+            )
+        click.echo(
+            "Quality gate: " + ("passed" if gate.passed else "failed"),
+            err=not gate.passed,
+        )
+    if not gate.passed:
+        raise click.exceptions.Exit(1)
 
 
 @main.command()

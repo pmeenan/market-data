@@ -224,10 +224,16 @@ Scope:
   semantics without altering canonical bars. D-021 makes the one-session
   request extension discard-only context so delisted target envelopes remain
   exact rather than being falsely extended.
-- [ ] Implement the calendar and quality contracts in architecture.md, including
+- [x] Implement the calendar and quality contracts in architecture.md, including
   every minimum check listed there. Checks emit structured findings and never
   silently repair vendor bars; each study remains responsible for declaring
-  which findings block that study.
+  which findings block that study. Completed 2026-08-27: the XNYS calendar
+  surface from the preceding planner work now feeds read-only stored-data checks
+  for missing expected sessions, duplicate keys, raw/adjusted OHLC invariants,
+  negative values, configurable zero-volume runs, split sanity, off-session
+  intraday rows, and per-dataset coverage/lifecycle summaries. Library and CLI
+  reports are deterministic and structured; consumer-declared gates block on
+  warning/error findings and fail closed when a declared check was not run.
 - [ ] Persist observed encoded-response-byte/request accounting and scheduler
   progress.
   Execute D-011's phases, D-013's current-first/budget policy, and D-020's
@@ -254,9 +260,15 @@ Exit criteria:
   identity-blocked segments retain their frontier without stalling safe peers;
   actual bytes are charged even for rejected responses; and neither monthly
   hard cap can be exceeded.
-- [ ] Every minimum architecture quality check has a focused fixture and appears in
+- [x] Every minimum architecture quality check has a focused fixture and appears in
   structured CLI/library reports on stored data. The mechanism for a consumer
   to declare findings blocking is tested; M3 defines the first study's set.
+  Completed 2026-08-27; corrupt-input fixtures also prove checks do not rewrite
+  canonical Parquet. Review hardening made scans bounded DuckDB aggregations,
+  made empty scopes and unrun declared checks fail closed, treated missing
+  volume as invalid, made zero-volume runs key-unique and calendar-contiguous,
+  and separated operational CLI failures from gate failures. `make check`
+  passes with 134 tests.
 - [ ] Two consecutive scheduled current-update runs complete on the target server;
   an induced failure returns nonzero, records a bounded diagnostic, and reaches
   the owner's notification channel.

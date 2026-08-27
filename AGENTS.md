@@ -114,8 +114,9 @@ build → commit loop, on-demand reviews, and the human commit gate.
 
 Milestone **M2 (trustworthy scheduled ingestion)** is in progress. Cap-safe
 next-session IEX planning and the XNYS session-label surface are implemented;
-quality findings, durable scheduling/budgets, shared locking, and scheduled
-operations remain. M1 closed on 2026-08-27. Production ingestion is permitted
-only for validated request segments; unresolved work remains fail-closed. The
-backtest layer does not exist yet. See [docs/plan.md](docs/plan.md). Keep this
-paragraph short and current when plan.md milestone status changes (rule 4).
+structured quality findings and consumer-declared gates are also implemented.
+Durable scheduling/budgets, shared locking, and scheduled operations remain.
+M1 closed on 2026-08-27. Production ingestion is permitted only for validated
+request segments; unresolved work remains fail-closed. The backtest layer does
+not exist yet. See [docs/plan.md](docs/plan.md). Keep this paragraph short and
+current when plan.md milestone status changes (rule 4).

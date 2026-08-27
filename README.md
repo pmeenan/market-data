@@ -42,6 +42,7 @@ market-data universe list --year 2011
 
 # Inspect
 market-data status
+market-data quality --dataset eod --summary-json data/quality-eod.json
 market-data sql "SELECT instrument_id, max(date), count(*) FROM eod GROUP BY instrument_id ORDER BY 2 DESC LIMIT 10"
 ```
 
@@ -66,6 +67,20 @@ published (D-021). If coverage rows are lost or in doubt,
 warehouse. This does not recreate a lost `meta.db`: identity evidence cannot be
 reconstructed from bar files, so restore the metadata database from backup
 first.
+
+`market-data quality` scans canonical bars without repairing or rewriting them.
+It reports missing expected XNYS sessions, duplicate keys, OHLC and negative
+or missing-volume violations, suspicious calendar-contiguous zero-volume runs,
+split-factor sanity,
+off-session intraday rows, and coverage/lifecycle summaries. Findings alone do
+not imply one universal policy: use repeatable `--block-on CHECK` options when a
+consumer needs selected warning/error findings to return nonzero. The JSON
+report records the complete check scope and gate outcome; a declared check that
+was not applicable to the scanned datasets—or had an empty scope—fails closed.
+Full scans aggregate in DuckDB under a 4 GB memory limit and spill beneath the
+warehouse if necessary instead of materializing whole datasets in Python.
+Gate failures exit 1; scan/report operational failures exit 2 and preserve any
+standing successful summary JSON.
 
 ### M1 bar migration
 
@@ -95,6 +110,7 @@ shape explicitly as `meta.ticker_coverage_v1` during the transition.
 
 ```python
 from marketdata import load_config
+from marketdata.quality import check_quality, evaluate_quality
 from marketdata.query import connect, load_eod, load_intraday_sessions
 
 config = load_config()
@@ -115,6 +131,19 @@ intraday = load_intraday_sessions(
     instrument_ids=["apple-id"],
     start="2024-01-01",
     freq="5min",
+)
+
+# Each study declares its own blocking set. M3 will define the first study's
+# exact policy and persist this outcome with its run.
+quality = check_quality(
+    config,
+    dataset_keys=["eod", "intraday_1hour"],
+    instrument_ids=["apple-id"],
+    start="2024-01-01",
+)
+gate = evaluate_quality(
+    quality,
+    ["missing_expected_sessions", "ohlc_invariants", "negative_values"],
 )
 
 # Or raw DuckDB for arbitrary SQL (views: eod, intraday_<freq> per frequency
@@ -147,6 +176,7 @@ data/                       (gitignored; set MARKET_DATA_DIR to relocate)
 src/marketdata/
   bar_fields.py              shared Tiingo bar-field contract
   calendar.py                XNYS sessions, IEX request bounds, bar labels
+  quality.py                 structured checks + consumer-declared gates
   identity.py               fail-closed identity resolution result contracts
   tiingo.py                 Tiingo REST client (CSV bars, retries, metering)
   store/bars.py             Parquet bar storage (merge-upsert writes)
@@ -161,12 +191,12 @@ src/marketdata/
 ## Status
 
 Milestone **M2 (trustworthy scheduled ingestion)** is in progress. Its
-cap-safe intraday request planner and XNYS calendar/session-label surface are
-implemented; quality findings, durable scheduler/budget state, shared process
-locking, and scheduled operations remain. M1 closed on 2026-08-27 after its
-controlled EOD/IEX canary passed. Production ingestion is permitted only for
-validated segments; unresolved work remains fail-closed and visible. The
-research/backtesting layer begins in M3.
+cap-safe intraday request planner, XNYS calendar/session-label surface, and
+structured quality/gating layer are implemented; durable scheduler/budget
+state, shared process locking, and scheduled operations remain. M1 closed on
+2026-08-27 after its controlled EOD/IEX canary passed. Production ingestion is
+permitted only for validated segments; unresolved work remains fail-closed and
+visible. The research/backtesting layer begins in M3.
 
 ## Start here
 
