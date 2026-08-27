@@ -279,7 +279,7 @@ Apache-2.0-compatible license. The full method, results, limitations, and
 current-source links are in
 [backtest-engine-spike.md](backtest-engine-spike.md).
 
-**Consequences:** M2 builds focused research primitives and the gap study,
+**Consequences:** M3 builds focused research primitives and the gap study,
 not a framework-shaped abstraction layer. DuckDB performs Parquet scans,
 windowing, and large filters; polars handles strategy transformations and
 tidy outputs. Results remain compatible with OQ-6's settled SQLite-metadata +
@@ -518,7 +518,7 @@ inside the caps (~1–2 GB/month with CSV).
 same day. Resolves OQ-7.
 
 **Consequences:** Phase ordering is owner intent — don't reorder it to
-"optimize". The backfill completing is measured in months, not hours; M1
+"optimize". The backfill completing is measured in months, not hours; M2
 planning must treat it as a long-running metered process with resumable
 state (which D-009's coverage intervals already provide). The Tiingo client
 must move from `format=json` to CSV parsing for bulk endpoints (M1, with

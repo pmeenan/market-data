@@ -371,8 +371,9 @@ Implementations and tests preserve these properties:
 ## Planning boundary and ordering constraints
 
 This document does not assign milestone scope. [plan.md](plan.md) is the sole
-source for milestone names, status, and exit criteria; its current provisional
-ladder must be rewritten before implementation starts from it.
+source for milestone names, status, and exit criteria. Its M1–M4 ladder is the
+proposed implementation sequence, but M1 must not begin until the owner reviews
+the ladder and explicitly closes M0.
 
 The architecture imposes only these ordering constraints on that planning:
 

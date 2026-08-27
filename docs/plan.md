@@ -51,7 +51,7 @@ of it.
       (implementation deferred), budget-aware backfill scheduling, result
       persistence, benchmark series, notebooks; rejected universe provenance
       (D-010); web UI and realtime deliberately stay `proposed` until after
-      M2 (owner's call). OQ-4/5/6/7 answered (see features.md); OQ-1/2/3
+      M3 (owner's call). OQ-4/5/6/7 answered (see features.md); OQ-1/2/3
       remained for the spikes at triage. Backfill scope/priority and the 5-minute
       intraday addition recorded as D-011; universe reframing as D-010.
 - [x] Spike — intraday depth & semantics (OQ-2, OQ-3; 2026-08-26): fetched
@@ -107,8 +107,13 @@ of it.
       adopts 256 stable SHA-256 buckets and makes bucket batching the normal
       ingestion path. See
       [parquet-layout-benchmark.md](parquet-layout-benchmark.md).
-- [ ] Rewrite the provisional ladder below into real milestones with exit
-      criteria.
+- [x] Rewrite the provisional ladder into scoped milestones with explicit exit
+      criteria (2026-08-27). The implementation sequence is M1 identity-safe
+      storage, M2 trustworthy scheduled ingestion, M3 the first persisted
+      study, and M4 completion of the historical program plus the full
+      opening-window and second studies. This remains the proposed sequence
+      until the owner closes M0. Optional product layers remain outside the
+      ladder until the owner promotes them.
 
 **Exit criteria:** the owner has walked features.md and says the plan is good
 enough to build from; the former architecture-blocking question OQ-1 is
@@ -117,37 +122,187 @@ dissolved); toolchain decided; M1+ milestones have scopes. M0 is a
 conversation, not a phase — it exits on the owner's call, not on a checklist
 reaching zero.
 
-## Provisional milestone ladder  `pending — to be rewritten in M0`
+**Implementation gate:** M1 must not start until the owner reviews this ladder
+and explicitly closes M0.
 
-Ordered by risk: the riskiest substrate (intraday coverage) and one end-to-end
-research path before breadth. Sketch only — do not start work from these
-entries, and note that they freely reference `proposed` features.md rows;
-nothing here pre-empts the M0 triage.
+## M1 — Identity-safe canonical warehouse  `pending`
 
-- **M1 — Data substrate hardening.** Migrate the registry, coverage, Parquet
-  paths/rows, and ingestion API from bare tickers to D-014 instrument ids +
-  date-ranged aliases; build the identity resolver/validation report and
-  enforce envelope checks on every response so unresolved segments fail
-  closed while validated work can proceed.
-  Intraday ingestion (1-hour + 5-minute)
-  hardened against the 10,000-row cap and range-dependent chunk boundaries
-  (RE-002, RE-004), then verified end-to-end against real Tiingo data; Tiingo
-  client switched to `format=csv` for bulk fetches (D-011); exchange-calendar
-  filtering built before research; budget-aware backfill scheduler persists
-  global date-band progress, refreshes current data first, hard-caps historical
-  5-minute transfer at 30 GB per billing month, preserves the other 10 GB for
-  current/ongoing work, and fills history newest-to-oldest (D-013); D-011's
-  phases underway in order (seed EOD + 1-hour, then all-ticker EOD, then seed
-  5-minute — a metered, multi-month process that continues in the background
-  across later milestones); nightly cron in place with visible failures; ruff
-  + license audit wired in.
-- **M2 — First study end-to-end.** The gap-recovery study runs from stored
-  data to summary statistics with the chosen engine, selecting tickers from
-  the stored data itself (D-010); results persisted (per OQ-6).
-- **M3 — Research breadth.** Data-quality checks, coverage reports,
-  benchmark-relative metrics, a second strategy to prove the engine
-  generalizes.
-- **M4 — Web UI (if promoted).** Coverage browser + backtest-result viewer on
-  the server's public IP.
-- **M5 — Realtime layer (if promoted).** Intraday-refreshed signals for the
-  owner; still research-only (no execution, D-007).
+Goal: replace the ticker-keyed v1 substrate with the D-014/D-017/D-019 model
+and reopen production ingestion only for request segments whose identity can
+be proved.
+
+Scope:
+
+- Implement the identity metadata and resolution contracts specified by D-014
+  and the architecture's SQLite metadata section. Produce a report that leaves
+  zero/multiple matches explicit instead of guessing.
+- Implement the v2 storage migration, bar publication, and reconciliation
+  contracts in the architecture's persistent-data-model and identity/ingestion
+  sections, including the D-017 generation boundary and D-019 layout. Those
+  documents remain normative for the mechanics; this milestone owns their
+  implementation and migration reporting.
+- Move ingestion and query APIs to `instrument_id`. Ticker conveniences require
+  an as-of range and resolve through aliases; active DuckDB views never union
+  quarantined v1 files.
+- Implement the architecture's identity/ingestion flow for all three exact
+  dataset keys. Each independently validated segment may make progress while
+  an unresolved or conflicting segment remains fail-closed and reported.
+- Switch bulk Tiingo bar fetches and fixtures to CSV while preserving retries,
+  normalization, response validation, and byte measurement.
+
+Exit criteria:
+
+- A fixture containing a rename, a reused symbol, an evidence gap, and an
+  overlapping alias migrates deterministically: resolvable bars appear once
+  under the correct stable ids and every unsafe source remains quarantined and
+  reported.
+- No active bar row, path, coverage key, or durable research-facing join is
+  owned by a ticker string; all three dataset keys require independent
+  identity evidence, with tests proving cross-frequency evidence is rejected.
+- Crash-boundary and rerun tests prove unique keys, no falsely bridged
+  coverage, atomic per-bucket publication, and convergence after interruption.
+- A controlled real-Tiingo canary validates at least one resolved EOD and one
+  resolved IEX request without writing any unresolved segment. Production
+  ingestion is then permitted for validated segments; unresolved work remains
+  fail-closed and visible.
+- `make check` passes and the migration/operator report documents what moved,
+  what remains quarantined, and how to retry safely.
+
+## M2 — Trustworthy scheduled ingestion  `pending`
+
+Goal: make current collection and the long-running historical program safe to
+operate unattended within Tiingo's limits, and make data fitness visible before
+research consumes it.
+
+Scope:
+
+- Harden hourly and five-minute planning against the 10,000-row cap and
+  range-dependent IEX chunk boundaries (RE-002, RE-004). Filter and label
+  sessions through a US exchange calendar with explicit UTC, DST, half-day,
+  and vendor bar-label semantics; raw vendor timestamps remain unchanged.
+- Implement the calendar and quality contracts in architecture.md, including
+  every minimum check listed there. Checks emit structured findings and never
+  silently repair vendor bars; each study remains responsible for declaring
+  which findings block that study.
+- Persist actual response-byte/request accounting and scheduler progress.
+  Execute D-011's phases and D-013's current-first, global-band, and budget
+  policy without duplicating their limits here.
+- Put ingestion, reconciliation, and later research publication behind the
+  shared data-directory process lock. Preserve nonzero CLI exits and bounded
+  machine-readable summaries for partial failure.
+- Install the owner's scheduled Linux job for current updates with a bounded
+  status record and an actually observed notification path for failure. Start
+  phase 1 (seed EOD plus hourly) as the first resumable background backfill.
+
+Exit criteria:
+
+- Offline boundary fixtures prove chunk planning neither loses nor duplicates
+  rows at the row cap, year, alias, DST, holiday, and half-day boundaries; a
+  controlled Tiingo run confirms the planner against both intraday frequencies.
+- Scheduler tests prove current work wins, completed global bands resume after
+  restart, failed/identity-blocked segments do not advance progress, actual
+  bytes are charged even for rejected responses, and neither monthly hard cap
+  can be exceeded.
+- Every minimum architecture quality check has a focused fixture and appears in
+  structured CLI/library reports on stored data. The mechanism for a consumer
+  to declare findings blocking is tested; M3 defines the first study's set.
+- Two consecutive scheduled current-update runs complete on the target server;
+  an induced failure returns nonzero, records a bounded diagnostic, and reaches
+  the owner's notification channel.
+- Phase 1 is running through the persisted scheduler, its coverage and budget
+  state survive restart, and `make check` passes.
+
+## M3 — First persisted study, end to end  `pending`
+
+Goal: deliver the shortest honest research path while the metered backfill
+continues: the gap-recovery study from stored EOD/direct-hourly data through
+queryable, immutable results.
+
+Scope:
+
+- Add the D-016 result catalog, typed/canonical parameters, tidy metrics,
+  immutable Parquet observations, explicit input-file manifests and content
+  fingerprints, failure cleanup, and catalog-filtered DuckDB result loading.
+- Implement the library-level D-015 vectorized event runner and a CLI entry
+  point. It selects candidates from stored bars (not universe membership),
+  holds the shared lock through publication, applies declared calendar/quality
+  gates, and never claims portfolio/order semantics.
+- Implement the coarse gap-recovery study using adjusted EOD prior close/open
+  inputs and Tiingo's direct clock-hour checkpoints from 10:00 onward. Include
+  stored SPY benchmark-relative evaluation and label the absent 09:30–09:59
+  interval explicitly rather than inferring it.
+- Provide one reproducible example notebook that calls the same library runner
+  and loads the same published artifacts; notebooks do not contain a second
+  execution or publication path.
+- Report stale `running` rows and orphaned result artifacts without selecting
+  or deleting them automatically.
+
+Exit criteria:
+
+- One command runs the study on a representative stored cohort and publishes
+  a `succeeded` catalog row, manifest, observations, parameters, and summary
+  metrics that are queryable together through DuckDB.
+- Tests inject failures before and after each publication boundary and prove
+  that only complete compatible runs load, successful runs are immutable,
+  retries receive new ids, and input-fingerprint checks detect changed source
+  files.
+- Event counts and returns match a small hand-calculated fixture, candidate
+  selection is demonstrably independent of universe membership, and quality
+  failures block publication as declared.
+- The CLI output and notebook state the direct-hourly and IEX-volume limits;
+  benchmark conventions match the event observations; `make check` passes.
+
+## M4 — Full opening-window study and historical program  `pending`
+
+Goal: finish the planned dataset breadth and extend the coarse result into the
+complete five-minute, session-relative opening-window study promised by the
+vision, then exercise the research engine with a second strategy.
+
+Scope:
+
+- Keep the metered scheduler running through D-011 phase 1, phase 2 (20 years
+  of EOD for all supported US stocks/ETFs, including delisted listings), and
+  phase 3 (seed five-minute history back to 2016-12-12). Begin forward-only
+  all-ticker current five-minute collection no later than phase 3, as required
+  by D-013.
+- Extend the gap study with exchange-calendar-filtered five-minute observations
+  for the opening half-hour and other session-relative windows. Retain direct
+  hourly results as their own vendor-frequency checkpoints; do not relabel them
+  as session-aligned aggregates.
+- Run final coverage, identity-resolution, and blocking-quality reports for
+  each phase. Targets that cannot be safely resolved remain explicit exclusions
+  with evidence; milestone completion never authorizes guessed identity.
+- Compare the coarse and full study over their common instruments/sessions,
+  publish the complete study as a new schema-versioned run, and update the
+  example notebook with the full opening-window workflow.
+- Implement a second focused event study, selected with the owner at M4 start,
+  through the same query, quality-gate, evaluation, and publication surfaces to
+  prove the D-015 engine generalizes beyond gap recovery.
+
+Exit criteria:
+
+- Every target in phases 1–3 is either covered to its defined range or listed
+  in a durable unresolved/failed report; scheduler records show phase order,
+  date-band order, and every billing window remained within D-013's limits.
+- Nightly EOD/hourly/five-minute collection is current for every resolvable
+  all-ticker target, with honest per-dataset coverage and visible failures.
+- The full study publishes validated opening-half-hour and later-window
+  observations through the M3 result path, passes hand-calculated session and
+  early-close fixtures, and documents the measured effect of adding five-minute
+  coverage relative to the coarse run.
+- The second study publishes through the same runner without a parallel
+  framework or study-specific publication path, and its events and metrics
+  match a hand-calculated fixture.
+- The vision's end-to-end study and interactive-query success criteria are
+  demonstrated on the target server, and `make check` passes.
+
+## Work deliberately outside the committed ladder
+
+- After M3, the owner will revisit the proposed read-only web UI and realtime
+  research layer. If either is promoted, it gets a newly scoped milestone and
+  decision updates before implementation; neither is an implicit M4 task.
+- Corporate-action handling beyond Tiingo's adjusted columns is triggered by
+  a concrete study limitation. A stateful portfolio/order simulator is likewise
+  triggered only by a confirmed study that needs execution semantics.
+- Live or automated execution and non-US-stock/ETF assets remain non-goals,
+  not future milestones.

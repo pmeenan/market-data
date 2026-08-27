@@ -24,28 +24,28 @@ Status legend: `confirmed` · `proposed` · `rejected (D-NNN)`
 | Data-quality checks (missing trading days, zero-volume runs, OHLC invariants, split sanity, per-dataset coverage/delisting reporting) | confirmed | Promoted at triage 2026-08-26; treat as required before trusting any backtest. Absorbs the former delisting/coverage-report row |
 | Universe provenance metadata (ranking period, effective dates, methodology, selection params) | rejected (D-010) | Universes no longer drive backtests, so provenance has nothing to guard |
 | Exchange calendar / session semantics (NY sessions, DST, half-days, bar-label convention) | confirmed | Promoted at triage 2026-08-26; the intraday spike proved it mandatory because long-range IEX responses synthesize non-session rows (D-012, RE-004) |
-| Tiingo request-budget / bandwidth tracking with budget-aware backfill scheduling | confirmed | Required by D-011/D-013: track the 40 GB monthly cap, refresh current data first, hard-cap 5-minute history at 30 GB/month, and preserve 10 GB for current/ongoing work. Bulk fetches use `format=csv` (client switch from JSON lands in M1) |
+| Tiingo request-budget / bandwidth tracking with budget-aware backfill scheduling | confirmed | Required by D-011/D-013: track the 40 GB monthly cap, refresh current data first, hard-cap 5-minute history at 30 GB/month, and preserve 10 GB for current/ongoing work. Bulk fetches use `format=csv` (client switch from JSON lands in M1; scheduler/accounting lands in M2) |
 | Corporate-action awareness beyond Tiingo's adjusted columns | confirmed | Promoted at triage 2026-08-26; implementation deferred until a study actually hits the limit of adjusted columns |
 
 ## Research & backtesting
 
 | Feature | Status | Notes |
 | --- | --- | --- |
-| Strategy testing against the local dataset | confirmed | D-015: project-native vectorized event engine over DuckDB/polars; add stateful portfolio simulation only when a confirmed study needs it |
+| Strategy testing against the local dataset | confirmed | D-015: project-native vectorized event engine over DuckDB/polars; M3 delivers gap recovery and M4 adds a second focused event study to prove the engine generalizes; add stateful portfolio simulation only when a confirmed study needs it |
 | Morning gap-down over-reaction/recovery study | confirmed | The first strategy; uses EOD open plus direct hourly checkpoints for a coarse pass, and 5-minute bars for the complete opening-window study (D-012) |
 | DuckDB SQL + polars query surface | confirmed | Built (`query.py`, `market-data sql`) |
 | Backtest result persistence (runs, parameters, metrics) | confirmed | Promoted at triage 2026-08-26; D-016 stores run metadata/params/metrics in SQLite and large observation outputs as Parquet under `data/`, queryable via the same DuckDB surface |
 | Benchmark/risk-free comparison series in evaluation | confirmed | Promoted at triage 2026-08-26; SPY is already in the seed data |
-| Example notebooks for study workflows | confirmed | Promoted at triage 2026-08-26; lands with the M2 first-study implementation now that D-015 has settled the engine |
+| Example notebooks for study workflows | confirmed | Promoted at triage 2026-08-26; lands with the M3 first-study implementation now that D-015 has settled the engine |
 
 ## Interface & operations
 
 | Feature | Status | Notes |
 | --- | --- | --- |
 | CLI for ingestion/maintenance + importable Python library | confirmed | Built |
-| Nightly cron update | confirmed | `market-data update` exists; cron wiring + failure visibility is M1 |
-| Web UI for coverage browsing and backtest results | proposed | Triage 2026-08-26: owner deliberately keeps this proposed; revisit after the first study runs end-to-end (M2). Server has a public IP if wanted |
-| Realtime/streaming layer | proposed | Triage 2026-08-26: owner deliberately keeps this proposed; revisit after M2. Research-only per D-007 either way |
+| Nightly cron update | confirmed | `market-data update` exists; cron wiring + failure visibility is M2 |
+| Web UI for coverage browsing and backtest results | proposed | Triage 2026-08-26: owner deliberately keeps this proposed; revisit after the first study runs end-to-end (M3). Server has a public IP if wanted |
+| Realtime/streaming layer | proposed | Triage 2026-08-26: owner deliberately keeps this proposed; revisit after M3. Research-only per D-007 either way |
 | Live/automated trade execution | rejected (D-007) | Research tool only |
 | Options, futures, crypto data | rejected (D-008) | US stocks + ETFs only |
 

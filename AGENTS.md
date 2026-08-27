@@ -119,8 +119,9 @@ stateful portfolio simulation is deferred). The first full architecture draft
 is complete, including D-016's research-result publication and D-017's safe
 identity-migration storage contracts;
 the Parquet-layout benchmark is done (D-019: stable 256-way hash buckets), and
-the real milestone ladder remains. The toolchain is locked and checked in CI
-(D-018). Production ingestion is paused until the M1 identity migration;
+the real M1–M4 milestone ladder is written. The toolchain is locked and checked
+in CI (D-018). Production ingestion is paused until the M1 identity migration;
 the backtest layer does not exist yet. See
-[docs/plan.md](docs/plan.md). Keep this
-paragraph short and current when plan.md milestone status changes (rule 4).
+[docs/plan.md](docs/plan.md). M0 remains open pending the owner's plan walk and
+approval. Keep this paragraph short and current when plan.md milestone status
+changes (rule 4).
