@@ -25,6 +25,65 @@ Decision / Context / Consequences / Reopen if
 
 ---
 
+## D-018: Lock and continuously check the Python toolchain  (2026-08-26, status: accepted, amends D-001)
+
+**Decision:** The uv version declared in `pyproject.toml` manages a committed
+universal lockfile and exact development environments; the MIT-licensed
+Setuptools build backend is exactly pinned in the build contract. Ruff is the
+sole formatter/linter, using its stable formatter plus `E4`, `E7`, `E9`, `F`,
+`I`, `B`, and `UP` lint families. A single `make check` entry point uses one
+locked environment invocation to verify lint, formatting, offline tests, and
+dependency licenses. GitHub Actions runs it on Python 3.11 and 3.12 for pull
+requests and pushes to `main`. CI action revisions are pinned; the uv action
+and bootstrap script both read the sole uv-version constraint from
+`pyproject.toml`.
+
+D-001 continues to require permissive direct dependencies. The audit also
+compares every registry package/version in the universal lock plus every exact
+build requirement against a committed, normalized SPDX inventory. This covers
+platform-marked packages even when they are not installed locally. It permits
+one required named exception: `certifi`, an existing `requests` dependency, is
+MPL-2.0 and is consumed unmodified. Removing or changing that package fails the
+check until D-018 and the exception are deliberately updated; another MPL
+dependency also fails closed.
+
+**Context:** The project had lower-bounded dependencies and an ignored virtual
+environment, so two installs could test different code. Tests were the only
+automated check. A local metadata audit confirmed that all direct runtime and
+development dependencies are BSD, MIT, or Apache licensed. It also exposed the
+pre-existing `certifi` mismatch with D-001: MPL-2.0 is file-level copyleft, not
+permissive, despite arriving transitively through the Apache-licensed
+`requests`. Replacing the established HTTP client solely to remove an
+unmodified CA-certificate package would add application risk without changing
+the project's licensing, while silently treating all transitive dependencies
+as out of policy would make the audit misleading.
+
+`uv.lock` is cross-platform and locks exact versions while retaining
+`pyproject.toml` as the range-based package contract. Auditing the lock rather
+than only the installed environment is necessary because marker-selected
+packages such as Windows-only `colorama` are otherwise invisible on the Linux
+server and CI runner. Stored SPDX expressions keep policy separate from the
+free-text spellings exposed by older package metadata. Ruff replaces separate
+formatter, import sorter, and baseline lint tools. GitHub Actions is available
+on the existing origin and gives the human commit gate a visible, repeatable
+signal without adding a local hook that can be skipped or forgotten.
+
+**Consequences:** Dependency changes update `pyproject.toml`, `uv.lock`, and
+`dependency-licenses.toml`; any missing or stale review fails closed. The
+license inventory records the normalized SPDX conclusion and where it was
+verified in the package's own metadata. Developers run `uv sync --locked
+--extra dev`, `make check`, and optionally `make format`. `make check` finds a
+repo-local uv before falling back to `PATH`; `tools/install-uv` bootstraps the
+version declared in `pyproject.toml`. Updating uv or a pinned CI action is an
+explicit maintenance change. The lock supports the declared Python range, but
+CI exercises the minimum and current project versions (3.11 and 3.12), not
+every future interpreter admitted by `>=3.11`.
+
+**Reopen if:** The repository leaves GitHub; uv's lock ceases to be portable
+enough for the server; Ruff cannot express a needed check; Python support
+changes; or `requests`/`certifi` is replaced so the MPL exception can be
+removed.
+
 ## D-017: Identity migration isolates storage generations and preserves contiguous coverage  (2026-08-26, status: accepted, amends D-003, D-009, and D-014)
 
 **Decision:** Instrument-keyed canonical bars live under a new active
@@ -625,7 +684,7 @@ unadjusted, IEX-only volume) — measured in the M0 spike, not assumed.
 Tiingo cannot provide (that becomes a second-source decision, not a silent
 addition).
 
-## D-001: Apache-2.0 license, permissive dependencies  (2026-08-26, status: accepted)
+## D-001: Apache-2.0 license, permissive dependencies  (2026-08-26, status: accepted, amended by D-018)
 
 **Decision:** The project is licensed Apache-2.0 (LICENSE committed at repo
 creation by the owner). Dependencies must carry permissive,
@@ -635,6 +694,7 @@ Apache-2.0-compatible licenses, verified against each package's own metadata.
 kickoff. Current dependencies (click, duckdb, polars, pyarrow, python-dotenv,
 requests, pytest, responses) are all permissive (BSD/MIT/Apache).
 
-**Consequences:** Copyleft dependencies are excluded.
+**Consequences:** Copyleft dependencies are excluded except for D-018's named,
+transitive `certifi` exception.
 
 **Reopen if:** The owner relicenses; dependency policy would follow.

@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+
+project_root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+required_uv_version=$(
+    python3 -c 'import pathlib, sys, tomllib; print(tomllib.loads(pathlib.Path(sys.argv[1]).read_text())["tool"]["uv"]["required-version"].removeprefix("=="))' \
+        "$project_root/pyproject.toml"
+)
+mkdir -p "$project_root/.tools"
+curl -LsSf "https://astral.sh/uv/${required_uv_version}/install.sh" \
+    | env UV_UNMANAGED_INSTALL="$project_root/.tools" sh

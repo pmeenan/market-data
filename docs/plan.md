@@ -93,9 +93,12 @@ of it.
       OQ-6, including its honest non-versioned-input limitation. Review
       hardening in D-017 isolates the v1/v2 storage namespaces, unifies exact
       dataset keys, and prevents multi-file crash holes from becoming covered.
-- [ ] Toolchain hardening decisions: lint/format (e.g. ruff), CI or a local
-      pre-commit check, dependency locking, license audit. Record in
-      decisions.md.
+- [x] Toolchain hardening (2026-08-26): pinned uv + a committed universal
+      lockfile, Ruff formatting/linting, one `make check` entry point, and
+      pinned GitHub Actions checks on Python 3.11/3.12. The full resolved
+      universal lock plus the build backend is SPDX-license-audited; D-018
+      records the tools and the sole narrow MPL-2.0 transitive exception for
+      `certifi`.
 - [ ] Benchmark the Parquet file layout (per-ticker vs yearly/bucketed
       compaction) with representative cross-sectional scans and intraday
       ingestion before revisiting D-003's layout.

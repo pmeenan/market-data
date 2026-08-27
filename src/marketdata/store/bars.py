@@ -68,7 +68,11 @@ def eod_frame(ticker: str, rows: list[dict[str, Any]]) -> pl.DataFrame:
     records = [
         {out: row.get(src) for src, out in _TIINGO_EOD_FIELDS.items()} for row in rows
     ]
-    df = pl.DataFrame(records, schema={k: v for k, v in EOD_SCHEMA.items() if k != "ticker"} | {"date": pl.Utf8})
+    df = pl.DataFrame(
+        records,
+        schema={k: v for k, v in EOD_SCHEMA.items() if k != "ticker"}
+        | {"date": pl.Utf8},
+    )
     return (
         df.with_columns(
             pl.col("date").str.slice(0, 10).str.to_date(),
@@ -93,7 +97,14 @@ def intraday_frame(ticker: str, rows: list[dict[str, Any]]) -> pl.DataFrame:
     ]
     df = pl.DataFrame(
         records,
-        schema={"ts": pl.Utf8, "open": pl.Float64, "high": pl.Float64, "low": pl.Float64, "close": pl.Float64, "volume": pl.Int64},
+        schema={
+            "ts": pl.Utf8,
+            "open": pl.Float64,
+            "high": pl.Float64,
+            "low": pl.Float64,
+            "close": pl.Float64,
+            "volume": pl.Int64,
+        },
     )
     return (
         df.with_columns(

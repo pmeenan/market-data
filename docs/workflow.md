@@ -10,9 +10,9 @@ to commit is **one agent, one pass, one human scan**.
 ## The loop
 
 1. **Build.** One agent implements the task (scope from
-   [plan.md](plan.md)), runs the repo's checks (`.venv/bin/pytest`; tests are
-   offline — Tiingo is mocked), and ends with a short note: what changed, what
-   was verified.
+   [plan.md](plan.md)), runs the repo's checks (`make check`; tests are offline
+   — Tiingo is mocked), and ends with a short note: what changed, what was
+   verified.
 2. **Commit.** The human scans the note and the diff at whatever depth the
    change warrants, and commits. Agents never commit.
 

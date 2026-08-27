@@ -21,7 +21,9 @@ import requests
 log = logging.getLogger(__name__)
 
 BASE_URL = "https://api.tiingo.com"
-SUPPORTED_TICKERS_URL = "https://apimedia.tiingo.com/docs/tiingo/daily/supported_tickers.zip"
+SUPPORTED_TICKERS_URL = (
+    "https://apimedia.tiingo.com/docs/tiingo/daily/supported_tickers.zip"
+)
 
 
 class TiingoError(RuntimeError):
@@ -62,18 +64,30 @@ class TiingoClient:
                 return resp.json()
             if resp.status_code == 404:
                 raise TiingoError(f"Not found: {path}")
-            if resp.status_code in (429, 500, 502, 503, 504) and attempt < self._max_retries:
+            if (
+                resp.status_code in (429, 500, 502, 503, 504)
+                and attempt < self._max_retries
+            ):
                 retry_after = resp.headers.get("Retry-After")
                 delay = float(retry_after) if retry_after else backoff
-                log.warning("Tiingo %s on %s, retrying in %.1fs", resp.status_code, path, delay)
+                log.warning(
+                    "Tiingo %s on %s, retrying in %.1fs", resp.status_code, path, delay
+                )
                 time.sleep(delay)
                 backoff = min(backoff * 2, 60.0)
                 continue
-            raise TiingoError(f"Tiingo request failed ({resp.status_code}): {resp.text[:500]}")
-        raise TiingoError(f"Tiingo request failed after {self._max_retries} retries: {path}")
+            raise TiingoError(
+                f"Tiingo request failed ({resp.status_code}): {resp.text[:500]}"
+            )
+        raise TiingoError(
+            f"Tiingo request failed after {self._max_retries} retries: {path}"
+        )
 
     def eod(
-        self, ticker: str, start: date | str | None = None, end: date | str | None = None
+        self,
+        ticker: str,
+        start: date | str | None = None,
+        end: date | str | None = None,
     ) -> list[dict[str, Any]]:
         """Daily bars including adjusted OHLCV, dividends, and split factors."""
         params: dict[str, Any] = {"format": "json"}

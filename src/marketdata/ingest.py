@@ -153,7 +153,9 @@ def _full_refresh_eod(
     """
     rows = client.eod(ticker, first, end)
     if not rows:
-        raise TiingoError(f"full refresh of {ticker} returned no rows for {first}..{end}")
+        raise TiingoError(
+            f"full refresh of {ticker} returned no rows for {first}..{end}"
+        )
     df = eod_frame(ticker, rows)
     if df["date"].max() < prev_last:
         raise TiingoError(
@@ -165,9 +167,8 @@ def _full_refresh_eod(
         # Every date already stored through prev_last must survive the
         # replacement; a vendor deleting history is an explicit manual
         # operation, never an automated overwrite.
-        missing = (
-            existing.filter(pl.col("date") <= prev_last)
-            .join(df.select("date"), on="date", how="anti")
+        missing = existing.filter(pl.col("date") <= prev_last).join(
+            df.select("date"), on="date", how="anti"
         )
         if missing.height:
             raise TiingoError(
@@ -186,11 +187,15 @@ def _full_refresh_eod(
         actions = trigger.filter(
             (pl.col("split_factor") != 1.0) | (pl.col("div_cash") != 0.0)
         )
-        mismatched = actions.select("date", "div_cash", "split_factor").join(
-            df.select("date", "div_cash", "split_factor"), on="date", suffix="_snap"
-        ).filter(
-            (pl.col("div_cash") != pl.col("div_cash_snap"))
-            | (pl.col("split_factor") != pl.col("split_factor_snap"))
+        mismatched = (
+            actions.select("date", "div_cash", "split_factor")
+            .join(
+                df.select("date", "div_cash", "split_factor"), on="date", suffix="_snap"
+            )
+            .filter(
+                (pl.col("div_cash") != pl.col("div_cash_snap"))
+                | (pl.col("split_factor") != pl.col("split_factor_snap"))
+            )
         )
         if mismatched.height:
             raise TiingoError(
@@ -200,7 +205,9 @@ def _full_refresh_eod(
             )
     bars.replace_eod(ticker, df)
     covered = _covered_through(df["date"].max(), end, today, PUBLICATION_LAG_DAYS)
-    meta.set_coverage(ticker, "eod", min(first, df["date"].min()), covered or df["date"].max())
+    meta.set_coverage(
+        ticker, "eod", min(first, df["date"].min()), covered or df["date"].max()
+    )
 
 
 def backfill_eod(
@@ -247,13 +254,24 @@ def backfill_eod(
                     max_received, seg_end, today, PUBLICATION_LAG_DAYS
                 )
                 if covered_to is not None and covered_to >= seg_start:
-                    new_first = seg_start if new_first is None else min(new_first, seg_start)
-                    new_last = covered_to if new_last is None else max(new_last, covered_to)
+                    new_first = (
+                        seg_start if new_first is None else min(new_first, seg_start)
+                    )
+                    new_last = (
+                        covered_to if new_last is None else max(new_last, covered_to)
+                    )
             if trigger_frames:
                 trigger_df = pl.concat(trigger_frames)
                 _full_refresh_eod(
-                    client, bars, meta, ticker, min(new_first, start), covered[1],
-                    end, today, trigger=trigger_df,
+                    client,
+                    bars,
+                    meta,
+                    ticker,
+                    min(new_first, start),
+                    covered[1],
+                    end,
+                    today,
+                    trigger=trigger_df,
                 )
                 result.refreshed.append(ticker)
             elif new_first is not None and new_last is not None:
@@ -305,7 +323,15 @@ def update_eod(
                 df = eod_frame(ticker, rows)
                 if _has_new_corp_action(df, last):
                     _full_refresh_eod(
-                        client, bars, meta, ticker, first, last, today, today, trigger=df
+                        client,
+                        bars,
+                        meta,
+                        ticker,
+                        first,
+                        last,
+                        today,
+                        today,
+                        trigger=df,
                     )
                     result.refreshed.append(ticker)
                 else:
@@ -353,7 +379,9 @@ def backfill_intraday(
                 # Leading segments are fetched newest-chunk-first so the
                 # coverage interval stays contiguous if interrupted.
                 leading = covered is not None and seg_end < covered[0]
-                for chunk_start, chunk_end in _chunks(seg_start, seg_end, reverse=leading):
+                for chunk_start, chunk_end in _chunks(
+                    seg_start, seg_end, reverse=leading
+                ):
                     rows = client.intraday(ticker, chunk_start, chunk_end, freq=freq)
                     max_received = None
                     if rows:
@@ -373,7 +401,11 @@ def backfill_intraday(
             (result.fetched if wrote_any else result.skipped).append(ticker)
             if i % 10 == 0 or i == len(tickers):
                 log.info(
-                    "%s backfill: %d/%d (%s)", dataset, i, len(tickers), result.summary()
+                    "%s backfill: %d/%d (%s)",
+                    dataset,
+                    i,
+                    len(tickers),
+                    result.summary(),
                 )
         except TiingoError as e:
             log.warning("%s backfill failed for %s: %s", dataset, ticker, e)
@@ -402,9 +434,11 @@ def reconcile(bars: BarStore, meta: MetaStore) -> dict[str, int]:
     entries: dict[tuple[str, str], tuple[date, date]] = {}
     counts = {"eod": 0}
     for ticker in bars.eod_tickers():
-        df = pl.scan_parquet(bars.eod_path(ticker)).select(
-            pl.col("date").min().alias("lo"), pl.col("date").max().alias("hi")
-        ).collect()
+        df = (
+            pl.scan_parquet(bars.eod_path(ticker))
+            .select(pl.col("date").min().alias("lo"), pl.col("date").max().alias("hi"))
+            .collect()
+        )
         lo, hi = df["lo"][0], df["hi"][0]
         if lo is not None:
             entries[(ticker, "eod")] = (lo, hi)
@@ -420,10 +454,14 @@ def reconcile(bars: BarStore, meta: MetaStore) -> dict[str, int]:
                 files = sorted(ticker_dir.glob("*.parquet"))
                 if not files:
                     continue
-                df = pl.scan_parquet(files).select(
-                    pl.col("ts").dt.date().min().alias("lo"),
-                    pl.col("ts").dt.date().max().alias("hi"),
-                ).collect()
+                df = (
+                    pl.scan_parquet(files)
+                    .select(
+                        pl.col("ts").dt.date().min().alias("lo"),
+                        pl.col("ts").dt.date().max().alias("hi"),
+                    )
+                    .collect()
+                )
                 lo, hi = df["lo"][0], df["hi"][0]
                 if lo is not None and lo <= cap:
                     entries[(ticker_dir.name, dataset)] = (lo, min(hi, cap))

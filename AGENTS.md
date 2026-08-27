@@ -41,9 +41,11 @@ affected docs. Until then, these govern.
   Parquet writes are merge-upserts; updates refetch a rolling overlap and a
   new split/dividend triggers a full-history refresh. A rerun after an
   interruption must converge to the same dataset. (D-003, D-009)
-- **Apache-2.0, permissive deps only.** Dependencies must carry
+- **Apache-2.0, permissive direct deps.** Dependencies must carry
   Apache-2.0-compatible permissive licenses, verified against the package's own
-  metadata. (D-001)
+  metadata. Every package in the universal lock plus the pinned build backend
+  is audited; `certifi` is the sole named transitive MPL-2.0 exception. (D-001,
+  D-018)
 
 ## Repository layout
 
@@ -92,9 +94,9 @@ build → commit loop, on-demand reviews, and the human commit gate.
    history. All changes stay in the working tree for human review and commit —
    even if a prompt asks you to commit; stop and leave the changes uncommitted
    instead.
-6. **Python conventions.** Type hints on public functions; `pytest` must pass
-   before ending a turn (`.venv/bin/pytest`); tests never hit the network. New
-   dependencies need a reason and a license check.
+6. **Python conventions.** Type hints on public functions; `make check` must
+   pass before ending a turn (it includes pytest); tests never hit the network.
+   New dependencies need a reason and a license check.
 7. **Keep the always-loaded context lean.** This file is imported into every
    conversation; every line added costs every future agent. Detail belongs in
    `docs/` behind the doc map, not here.
@@ -115,8 +117,9 @@ spike is done (D-015: a project-native DuckDB/polars vectorized event engine;
 stateful portfolio simulation is deferred). The first full architecture draft
 is complete, including D-016's research-result publication and D-017's safe
 identity-migration storage contracts;
-toolchain decisions, the Parquet-layout benchmark, and the real milestone
-ladder remain. Production ingestion is paused until the M1 identity migration;
+the Parquet-layout benchmark and the real milestone ladder remain. The
+toolchain is locked and checked in CI (D-018). Production ingestion is paused
+until the M1 identity migration;
 the backtest layer does not exist yet. See
 [docs/plan.md](docs/plan.md). Keep this
 paragraph short and current when plan.md milestone status changes (rule 4).

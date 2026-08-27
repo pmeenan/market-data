@@ -14,7 +14,7 @@ reconcile`).
 from __future__ import annotations
 
 import sqlite3
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 SCHEMA_VERSION = 1
@@ -79,7 +79,7 @@ class MetaStore:
     def close(self) -> None:
         self._con.close()
 
-    def __enter__(self) -> "MetaStore":
+    def __enter__(self) -> MetaStore:
         return self
 
     def __exit__(self, *exc) -> None:
@@ -125,7 +125,12 @@ class MetaStore:
                     """INSERT INTO universe (year, ticker, rank, avg_dollar_volume)
                        VALUES (?, ?, ?, ?)""",
                     [
-                        (year, e["ticker"].upper(), e.get("rank"), e.get("avg_dollar_volume"))
+                        (
+                            year,
+                            e["ticker"].upper(),
+                            e.get("rank"),
+                            e.get("avg_dollar_volume"),
+                        )
                         for e in entries
                     ],
                 )
@@ -165,7 +170,9 @@ class MetaStore:
         ).fetchone()
         if row is None:
             return None
-        return date.fromisoformat(row["first_date"]), date.fromisoformat(row["last_date"])
+        return date.fromisoformat(row["first_date"]), date.fromisoformat(
+            row["last_date"]
+        )
 
     def set_coverage(self, ticker: str, dataset: str, first: date, last: date) -> None:
         """Set the covered interval outright (used by reconcile and full
@@ -180,7 +187,9 @@ class MetaStore:
                 (ticker.upper(), dataset, first.isoformat(), last.isoformat(), _now()),
             )
 
-    def extend_coverage(self, ticker: str, dataset: str, first: date, last: date) -> None:
+    def extend_coverage(
+        self, ticker: str, dataset: str, first: date, last: date
+    ) -> None:
         """Widen the covered interval to include [first, last]."""
         existing = self.get_coverage(ticker, dataset)
         if existing:
@@ -194,7 +203,10 @@ class MetaStore:
             (dataset,),
         ).fetchall()
         return {
-            r["ticker"]: (date.fromisoformat(r["first_date"]), date.fromisoformat(r["last_date"]))
+            r["ticker"]: (
+                date.fromisoformat(r["first_date"]),
+                date.fromisoformat(r["last_date"]),
+            )
             for r in rows
         }
 
@@ -224,4 +236,4 @@ class MetaStore:
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")

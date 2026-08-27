@@ -13,12 +13,23 @@ from marketdata.store import BarStore, MetaStore
 from marketdata.tiingo import TiingoError
 
 
-def eod_row(d: date, close: float = 100.0, div: float = 0.0, split: float = 1.0) -> dict:
+def eod_row(
+    d: date, close: float = 100.0, div: float = 0.0, split: float = 1.0
+) -> dict:
     return {
         "date": f"{d.isoformat()}T00:00:00.000Z",
-        "open": close, "high": close, "low": close, "close": close, "volume": 1000,
-        "adjOpen": close, "adjHigh": close, "adjLow": close, "adjClose": close,
-        "adjVolume": 1000, "divCash": div, "splitFactor": split,
+        "open": close,
+        "high": close,
+        "low": close,
+        "close": close,
+        "volume": 1000,
+        "adjOpen": close,
+        "adjHigh": close,
+        "adjLow": close,
+        "adjClose": close,
+        "adjVolume": 1000,
+        "divCash": div,
+        "splitFactor": split,
     }
 
 
@@ -47,7 +58,8 @@ class FakeTiingo:
         start, end = date.fromisoformat(str(start)), date.fromisoformat(str(end))
         self.eod_calls.append((ticker, start, end))
         return [
-            r for r in self.history.get(ticker, [])
+            r
+            for r in self.history.get(ticker, [])
             if start <= date.fromisoformat(r["date"][:10]) <= end
         ]
 
@@ -57,10 +69,16 @@ class FakeTiingo:
         rows = []
         for d in weekdays(start, end):
             if d.year >= 2024:  # simulate bounded IEX history
-                rows.append({
-                    "date": f"{d.isoformat()}T15:00:00.000Z",
-                    "open": 10.0, "high": 10.5, "low": 9.5, "close": 10.2, "volume": 100,
-                })
+                rows.append(
+                    {
+                        "date": f"{d.isoformat()}T15:00:00.000Z",
+                        "open": 10.0,
+                        "high": 10.5,
+                        "low": 9.5,
+                        "close": 10.2,
+                        "volume": 100,
+                    }
+                )
         return rows
 
 
@@ -71,7 +89,9 @@ def stores(tmp_path):
 def test_backfill_fetches_missing_leading_history(tmp_path):
     """The reviewer's blocker: rank-year fetch first, then full history."""
     bars, meta = stores(tmp_path)
-    history = {"AAPL": [eod_row(d) for d in weekdays(date(1995, 1, 2), date(2025, 12, 31))]}
+    history = {
+        "AAPL": [eod_row(d) for d in weekdays(date(1995, 1, 2), date(2025, 12, 31))]
+    }
     client = FakeTiingo(history)
 
     # Step 1: fetch the ranking year only
@@ -87,7 +107,9 @@ def test_backfill_fetches_missing_leading_history(tmp_path):
 
     # Fully covered now: a rerun makes no requests
     n = len(client.eod_calls)
-    result = backfill_eod(client, bars, meta, ["AAPL"], date(1995, 1, 1), date(2025, 12, 31))
+    result = backfill_eod(
+        client, bars, meta, ["AAPL"], date(1995, 1, 1), date(2025, 12, 31)
+    )
     assert len(client.eod_calls) == n and result.skipped == ["AAPL"]
 
 
@@ -258,9 +280,7 @@ def test_backfill_failed_full_refresh_keeps_file_untouched(tmp_path):
     bars, meta, client, last = _dividend_refresh_setup(tmp_path, OmittingTiingo)
     before = bars.read_eod("AAPL")
 
-    result = backfill_eod(
-        client, bars, meta, ["AAPL"], date(2024, 1, 1), date.today()
-    )
+    result = backfill_eod(client, bars, meta, ["AAPL"], date(2024, 1, 1), date.today())
 
     assert result.refreshed == [] and "AAPL" in result.failed
     assert bars.read_eod("AAPL").equals(before)
@@ -269,9 +289,13 @@ def test_backfill_failed_full_refresh_keeps_file_untouched(tmp_path):
 
 def test_backfill_reports_failures(tmp_path):
     bars, meta = stores(tmp_path)
-    history = {"AAPL": [eod_row(d) for d in weekdays(date(2024, 1, 1), date(2024, 6, 28))]}
+    history = {
+        "AAPL": [eod_row(d) for d in weekdays(date(2024, 1, 1), date(2024, 6, 28))]
+    }
     client = FakeTiingo(history, fail={"BADCO"})
-    result = backfill_eod(client, bars, meta, ["AAPL", "BADCO"], date(2024, 1, 1), date(2024, 6, 28))
+    result = backfill_eod(
+        client, bars, meta, ["AAPL", "BADCO"], date(2024, 1, 1), date(2024, 6, 28)
+    )
     assert result.fetched == ["AAPL"]
     assert "BADCO" in result.failed and not result.ok
 
@@ -287,13 +311,19 @@ def test_intraday_leading_backfill_and_freq_validation(tmp_path):
     backfill_intraday(
         client, bars, meta, ["AAPL"], date(2024, 6, 1), date(2024, 7, 31), freq="1hour"
     )
-    assert meta.get_coverage("AAPL", "intraday_1hour") == (date(2024, 6, 1), date(2024, 7, 31))
+    assert meta.get_coverage("AAPL", "intraday_1hour") == (
+        date(2024, 6, 1),
+        date(2024, 7, 31),
+    )
 
     # extending the range backwards fetches the leading gap
     backfill_intraday(
         client, bars, meta, ["AAPL"], date(2024, 4, 1), date(2024, 7, 31), freq="1hour"
     )
-    assert meta.get_coverage("AAPL", "intraday_1hour") == (date(2024, 4, 1), date(2024, 7, 31))
+    assert meta.get_coverage("AAPL", "intraday_1hour") == (
+        date(2024, 4, 1),
+        date(2024, 7, 31),
+    )
     assert all(c[3] == "1hour" for c in client.intraday_calls)
     df = bars.read_intraday("AAPL", freq="1hour")
     assert df["ts"].dt.date().min() == date(2024, 4, 1)  # a Monday: bars exist
@@ -301,7 +331,9 @@ def test_intraday_leading_backfill_and_freq_validation(tmp_path):
 
 def test_reconcile_rebuilds_coverage_from_parquet(tmp_path):
     bars, meta = stores(tmp_path)
-    history = {"AAPL": [eod_row(d) for d in weekdays(date(2024, 1, 1), date(2024, 6, 28))]}
+    history = {
+        "AAPL": [eod_row(d) for d in weekdays(date(2024, 1, 1), date(2024, 6, 28))]
+    }
     client = FakeTiingo(history)
     backfill_eod(client, bars, meta, ["AAPL"], date(2024, 1, 1), date(2024, 6, 28))
     meta.clear_coverage()
@@ -317,7 +349,9 @@ def test_reconcile_removes_stale_coverage(tmp_path):
     """Coverage for a ticker with no Parquet file must not survive reconcile
     — a ghost entry would make later backfills skip real fetches."""
     bars, meta = stores(tmp_path)
-    history = {"AAPL": [eod_row(d) for d in weekdays(date(2024, 1, 1), date(2024, 6, 28))]}
+    history = {
+        "AAPL": [eod_row(d) for d in weekdays(date(2024, 1, 1), date(2024, 6, 28))]
+    }
     client = FakeTiingo(history)
     backfill_eod(client, bars, meta, ["AAPL"], date(2024, 1, 1), date(2024, 6, 28))
     meta.set_coverage("GHOST", "eod", date(2020, 1, 1), date(2024, 12, 31))
@@ -360,11 +394,21 @@ def test_reconcile_caps_intraday_coverage_at_yesterday(tmp_path):
     past = today - timedelta(days=5)
 
     def bar(d: date) -> dict:
-        return {"date": f"{d.isoformat()}T15:00:00.000Z",
-                "open": 10.0, "high": 10.5, "low": 9.5, "close": 10.2, "volume": 100}
+        return {
+            "date": f"{d.isoformat()}T15:00:00.000Z",
+            "open": 10.0,
+            "high": 10.5,
+            "low": 9.5,
+            "close": 10.2,
+            "volume": 100,
+        }
 
-    bars.write_intraday("AAPL", intraday_frame("AAPL", [bar(past), bar(today)]), freq="1hour")
-    bars.write_intraday("ONLYTODAY", intraday_frame("ONLYTODAY", [bar(today)]), freq="1hour")
+    bars.write_intraday(
+        "AAPL", intraday_frame("AAPL", [bar(past), bar(today)]), freq="1hour"
+    )
+    bars.write_intraday(
+        "ONLYTODAY", intraday_frame("ONLYTODAY", [bar(today)]), freq="1hour"
+    )
 
     reconcile(bars, meta)
     first, last = meta.get_coverage("AAPL", "intraday_1hour")

@@ -1,0 +1,7 @@
+#!/bin/sh
+set -eu
+
+ruff check .
+ruff format --check .
+pytest
+python tools/check_licenses.py

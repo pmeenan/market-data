@@ -65,9 +65,7 @@ def load_eod(
         clauses.append("date <= ?")
         params.append(str(end))
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-    return con.execute(
-        f"SELECT * FROM eod {where} ORDER BY ticker, date", params
-    ).pl()
+    return con.execute(f"SELECT * FROM eod {where} ORDER BY ticker, date", params).pl()
 
 
 def load_intraday(

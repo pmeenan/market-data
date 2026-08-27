@@ -14,8 +14,8 @@ documentation, directed and reviewed by a human (see
 ## Setup
 
 ```bash
-python3 -m venv .venv
-.venv/bin/pip install -e '.[dev]'
+tools/install-uv
+make sync
 cp .env.example .env   # then add your TIINGO_API_TOKEN
 ```
 
@@ -155,5 +155,9 @@ Apache-2.0 ([LICENSE](LICENSE)).
 ## Tests
 
 ```bash
-.venv/bin/pytest
+make check
 ```
+
+This runs the lockfile check, Ruff lint/format checks, the offline pytest
+suite, and the dependency-license audit. Use `make format` to apply automatic
+lint and formatting fixes.

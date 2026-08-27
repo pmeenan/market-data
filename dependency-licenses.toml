@@ -1,0 +1,127 @@
+schema-version = 1
+
+[[package]]
+name = "certifi"
+version = "2026.7.22"
+license = "MPL-2.0"
+source = "License metadata"
+
+[[package]]
+name = "charset-normalizer"
+version = "3.5.1"
+license = "MIT"
+source = "License metadata"
+
+[[package]]
+name = "click"
+version = "8.5.0"
+license = "BSD-3-Clause"
+source = "License-Expression metadata"
+
+[[package]]
+name = "colorama"
+version = "0.4.6"
+license = "BSD-3-Clause"
+source = "Upstream LICENSE.txt (metadata classifier says BSD)"
+
+[[package]]
+name = "duckdb"
+version = "1.5.5"
+license = "MIT"
+source = "License classifier"
+
+[[package]]
+name = "idna"
+version = "3.19"
+license = "BSD-3-Clause"
+source = "License-Expression metadata"
+
+[[package]]
+name = "iniconfig"
+version = "2.3.0"
+license = "MIT"
+source = "License-Expression metadata"
+
+[[package]]
+name = "packaging"
+version = "26.3"
+license = "Apache-2.0 OR BSD-2-Clause"
+source = "License-Expression metadata"
+
+[[package]]
+name = "pluggy"
+version = "1.6.0"
+license = "MIT"
+source = "License metadata"
+
+[[package]]
+name = "polars"
+version = "1.44.1"
+license = "MIT"
+source = "License classifier and bundled license text"
+
+[[package]]
+name = "polars-runtime-32"
+version = "1.44.1"
+license = "MIT"
+source = "License metadata"
+
+[[package]]
+name = "pyarrow"
+version = "25.0.1"
+license = "Apache-2.0"
+source = "License-Expression metadata"
+
+[[package]]
+name = "pygments"
+version = "2.21.0"
+license = "BSD-2-Clause"
+source = "License-Expression metadata"
+
+[[package]]
+name = "pytest"
+version = "9.1.1"
+license = "MIT"
+source = "License-Expression metadata"
+
+[[package]]
+name = "python-dotenv"
+version = "1.2.3"
+license = "BSD-3-Clause"
+source = "License metadata"
+
+[[package]]
+name = "pyyaml"
+version = "6.0.3"
+license = "MIT"
+source = "License metadata"
+
+[[package]]
+name = "requests"
+version = "2.34.2"
+license = "Apache-2.0"
+source = "License metadata"
+
+[[package]]
+name = "responses"
+version = "0.26.3"
+license = "Apache-2.0"
+source = "License metadata"
+
+[[package]]
+name = "ruff"
+version = "0.16.4"
+license = "MIT"
+source = "License-Expression metadata"
+
+[[package]]
+name = "setuptools"
+version = "84.0.0"
+license = "MIT"
+source = "License-Expression metadata"
+
+[[package]]
+name = "urllib3"
+version = "2.7.0"
+license = "MIT"
+source = "License-Expression metadata"

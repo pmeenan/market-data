@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import logging
 import sys
-from datetime import date
 from pathlib import Path
 
 import click
@@ -115,8 +114,12 @@ def universe() -> None:
 
 
 @universe.command("candidates")
-@click.option("--year", type=int, required=True, help="Only tickers active in this year")
-@click.option("--out", type=click.Path(), default=None, help="Also write tickers to a file")
+@click.option(
+    "--year", type=int, required=True, help="Only tickers active in this year"
+)
+@click.option(
+    "--out", type=click.Path(), default=None, help="Also write tickers to a file"
+)
 @click.pass_obj
 def universe_candidates(config: Config, year: int, out: str | None) -> None:
     """Seed candidate tickers from Tiingo's supported-tickers list
@@ -137,8 +140,13 @@ def universe_candidates(config: Config, year: int, out: str | None) -> None:
 @universe.command("rank")
 @click.option("--year", type=int, required=True)
 @click.option("--top", type=int, default=1000, show_default=True)
-@click.option("--min-days", type=int, default=60, show_default=True,
-              help="Minimum trading days in the year to qualify")
+@click.option(
+    "--min-days",
+    type=int,
+    default=60,
+    show_default=True,
+    help="Minimum trading days in the year to qualify",
+)
 @click.pass_obj
 def universe_rank(config: Config, year: int, top: int, min_days: int) -> None:
     """Rank stored tickers by avg daily dollar volume over YEAR and save
@@ -151,8 +159,12 @@ def universe_rank(config: Config, year: int, top: int, min_days: int) -> None:
 
 
 @universe.command("import")
-@click.option("--year", type=int, default=None,
-              help="Required only if the CSV has no 'year' column")
+@click.option(
+    "--year",
+    type=int,
+    default=None,
+    help="Required only if the CSV has no 'year' column",
+)
 @click.argument("csv_file", type=click.Path(exists=True))
 @click.pass_obj
 def universe_import(config: Config, year: int | None, csv_file: str) -> None:
@@ -166,7 +178,7 @@ def universe_import(config: Config, year: int | None, csv_file: str) -> None:
         try:
             counts, warnings = universe_mod.import_csv(meta, csv_file, year)
         except ValueError as e:
-            raise click.ClickException(str(e))
+            raise click.ClickException(str(e)) from e
     for w in warnings:
         click.echo(f"warning: {w}", err=True)
     for y, n in counts.items():
@@ -185,7 +197,9 @@ def universe_list(config: Config, year: int | None, limit: int) -> None:
             raise click.ClickException("No universes stored yet")
         year = year or years[-1]
         rows = meta.universe(year)
-    click.echo(f"Universe {year} ({len(rows)} tickers, showing {min(limit, len(rows))}):")
+    click.echo(
+        f"Universe {year} ({len(rows)} tickers, showing {min(limit, len(rows))}):"
+    )
     for r in rows[:limit]:
         adv = f"${r['avg_dollar_volume']:,.0f}" if r["avg_dollar_volume"] else "-"
         click.echo(f"  {r['rank'] or '-':>5}  {r['ticker']:<8} {adv}")
@@ -194,11 +208,20 @@ def universe_list(config: Config, year: int | None, limit: int) -> None:
 # ---- ingestion -----------------------------------------------------------
 
 _ticker_opts = [
-    click.option("--tickers", "-t", multiple=True, help="Explicit tickers (repeatable)"),
-    click.option("--tickers-file", type=click.Path(exists=True),
-                 help="File with one ticker per line"),
-    click.option("--universe", "universe_year", type=int,
-                 help="Use the stored universe for this year"),
+    click.option(
+        "--tickers", "-t", multiple=True, help="Explicit tickers (repeatable)"
+    ),
+    click.option(
+        "--tickers-file",
+        type=click.Path(exists=True),
+        help="File with one ticker per line",
+    ),
+    click.option(
+        "--universe",
+        "universe_year",
+        type=int,
+        help="Use the stored universe for this year",
+    ),
 ]
 
 
@@ -217,12 +240,19 @@ def backfill() -> None:
 @_with_ticker_opts
 @click.option("--start", type=click.DateTime(["%Y-%m-%d"]), required=True)
 @click.option("--end", type=click.DateTime(["%Y-%m-%d"]), default=None)
-@click.option("--force", is_flag=True, help="Refetch even where coverage says up-to-date")
-@click.option("--summary-json", type=click.Path(), default=None,
-              help="Write a machine-readable result summary to this file")
+@click.option(
+    "--force", is_flag=True, help="Refetch even where coverage says up-to-date"
+)
+@click.option(
+    "--summary-json",
+    type=click.Path(),
+    default=None,
+    help="Write a machine-readable result summary to this file",
+)
 @click.pass_obj
-def backfill_eod_cmd(config, tickers, tickers_file, universe_year, start, end, force,
-                     summary_json):
+def backfill_eod_cmd(
+    config, tickers, tickers_file, universe_year, start, end, force, summary_json
+):
     """Backfill daily bars (fills missing leading and trailing history)."""
     client = _client(config)
     config.ensure_dirs()
@@ -230,8 +260,13 @@ def backfill_eod_cmd(config, tickers, tickers_file, universe_year, start, end, f
         ticker_list = _resolve_tickers(meta, tickers, tickers_file, universe_year)
         click.echo(f"Backfilling EOD for {len(ticker_list)} tickers...")
         result = backfill_eod(
-            client, BarStore(config.data_dir), meta, ticker_list,
-            start.date(), end.date() if end else None, force=force,
+            client,
+            BarStore(config.data_dir),
+            meta,
+            ticker_list,
+            start.date(),
+            end.date() if end else None,
+            force=force,
         )
     _finish_ingest(result, summary_json)
 
@@ -240,13 +275,22 @@ def backfill_eod_cmd(config, tickers, tickers_file, universe_year, start, end, f
 @_with_ticker_opts
 @click.option("--start", type=click.DateTime(["%Y-%m-%d"]), required=True)
 @click.option("--end", type=click.DateTime(["%Y-%m-%d"]), default=None)
-@click.option("--freq", type=click.Choice(INTRADAY_FREQS),
-              default=DEFAULT_INTRADAY_FREQ, show_default=True)
-@click.option("--summary-json", type=click.Path(), default=None,
-              help="Write a machine-readable result summary to this file")
+@click.option(
+    "--freq",
+    type=click.Choice(INTRADAY_FREQS),
+    default=DEFAULT_INTRADAY_FREQ,
+    show_default=True,
+)
+@click.option(
+    "--summary-json",
+    type=click.Path(),
+    default=None,
+    help="Write a machine-readable result summary to this file",
+)
 @click.pass_obj
-def backfill_intraday_cmd(config, tickers, tickers_file, universe_year, start, end, freq,
-                          summary_json):
+def backfill_intraday_cmd(
+    config, tickers, tickers_file, universe_year, start, end, freq, summary_json
+):
     """Backfill intraday bars (IEX feed: recent years only, unadjusted,
     IEX-only volume)."""
     client = _client(config)
@@ -255,18 +299,30 @@ def backfill_intraday_cmd(config, tickers, tickers_file, universe_year, start, e
         ticker_list = _resolve_tickers(meta, tickers, tickers_file, universe_year)
         click.echo(f"Backfilling {freq} bars for {len(ticker_list)} tickers...")
         result = backfill_intraday(
-            client, BarStore(config.data_dir), meta, ticker_list,
-            start.date(), end.date() if end else None, freq=freq,
+            client,
+            BarStore(config.data_dir),
+            meta,
+            ticker_list,
+            start.date(),
+            end.date() if end else None,
+            freq=freq,
         )
     _finish_ingest(result, summary_json)
 
 
 @main.command()
 @_with_ticker_opts
-@click.option("--all-universes", is_flag=True,
-              help="Update every ticker from every year's universe, not just the latest")
-@click.option("--summary-json", type=click.Path(), default=None,
-              help="Write a machine-readable result summary to this file")
+@click.option(
+    "--all-universes",
+    is_flag=True,
+    help="Update every ticker from every year's universe, not just the latest",
+)
+@click.option(
+    "--summary-json",
+    type=click.Path(),
+    default=None,
+    help="Write a machine-readable result summary to this file",
+)
 @click.pass_obj
 def update(config, tickers, tickers_file, universe_year, all_universes, summary_json):
     """Incremental EOD update (cron-friendly; exits nonzero on any failure).
@@ -283,7 +339,10 @@ def update(config, tickers, tickers_file, universe_year, all_universes, summary_
     config.ensure_dirs()
     with MetaStore(config.meta_path) as meta:
         ticker_list = _resolve_tickers(
-            meta, tickers, tickers_file, universe_year,
+            meta,
+            tickers,
+            tickers_file,
+            universe_year,
             default_scope="all" if all_universes else "latest",
         )
         click.echo(f"Updating EOD for {len(ticker_list)} tickers...")

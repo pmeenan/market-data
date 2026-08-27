@@ -21,7 +21,6 @@ import duckdb
 
 from marketdata.store import BarStore, MetaStore
 
-
 # Header aliases (lowercased, underscores stripped) accepted for the
 # dollar-volume metric column on import.
 _DV_ALIASES = {"avgdollarvolume", "mediandollarvolume", "dollarvolume", "adv"}
@@ -79,9 +78,7 @@ def import_csv(
             if prior is None:
                 seen[key] = entry
             elif prior != entry:
-                keep = max(
-                    prior, entry, key=lambda e: (e["avg_dollar_volume"] or 0.0)
-                )
+                keep = max(prior, entry, key=lambda e: e["avg_dollar_volume"] or 0.0)
                 warnings.append(
                     f"conflicting duplicate {row_year}/{ticker}: kept "
                     f"dollar volume {keep['avg_dollar_volume']}"
@@ -155,7 +152,9 @@ def seed_candidates_from_tiingo(
         if not start:
             continue
         if active_in_year is not None:
-            if start > f"{active_in_year}-12-31" or (end and end < f"{active_in_year}-01-01"):
+            if start > f"{active_in_year}-12-31" or (
+                end and end < f"{active_in_year}-01-01"
+            ):
                 continue
         out.append(
             {

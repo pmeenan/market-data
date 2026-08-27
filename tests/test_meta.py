@@ -5,10 +5,13 @@ from marketdata.store.meta import MetaStore
 
 def test_universe_roundtrip(tmp_path):
     with MetaStore(tmp_path / "meta.db") as meta:
-        meta.set_universe(2024, [
-            {"ticker": "aapl", "rank": 1, "avg_dollar_volume": 1e10},
-            {"ticker": "MSFT", "rank": 2, "avg_dollar_volume": 9e9},
-        ])
+        meta.set_universe(
+            2024,
+            [
+                {"ticker": "aapl", "rank": 1, "avg_dollar_volume": 1e10},
+                {"ticker": "MSFT", "rank": 2, "avg_dollar_volume": 9e9},
+            ],
+        )
         meta.set_universe(2025, [{"ticker": "NVDA", "rank": 1}])
 
         rows = meta.universe(2024)
@@ -44,7 +47,9 @@ def test_migration_from_v0(tmp_path):
 
     path = tmp_path / "meta.db"
     con = sqlite3.connect(path)
-    con.execute("CREATE TABLE watermarks (ticker TEXT, dataset TEXT, last_date TEXT, updated_at TEXT)")
+    con.execute(
+        "CREATE TABLE watermarks (ticker TEXT, dataset TEXT, last_date TEXT, updated_at TEXT)"
+    )
     con.commit()
     con.close()
 
@@ -53,7 +58,9 @@ def test_migration_from_v0(tmp_path):
         assert meta.get_coverage("AAPL", "eod") is None
         tables = {
             r["name"]
-            for r in meta._con.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            for r in meta._con.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
         }
         assert "watermarks" not in tables
         assert "coverage" in tables
