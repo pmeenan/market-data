@@ -14,7 +14,8 @@ data handling over service infrastructure or a general backtesting framework.
 The load-bearing boundaries are:
 
 - Parquet is the canonical bar and large-result store; SQLite holds small,
-  relational metadata; DuckDB is the analytical query engine (D-003, D-016).
+  relational metadata; DuckDB is the analytical query engine (D-003, D-016,
+  D-019).
 - Tiingo is the sole market-data source. Vendor concerns stop at the client,
   identity resolver, and normalization boundary (D-002).
 - Stable internal `instrument_id` values own bars and research results.
@@ -78,10 +79,10 @@ renamed into place only after validation.
 data/
   meta.db
   bars/
-    eod/{instrument_id}.parquet
+    eod/bucket={00..ff}/bars.parquet
     intraday/
-      1hour/{instrument_id}/{year}.parquet
-      5min/{instrument_id}/{year}.parquet
+      1hour/year={YYYY}/bucket={00..ff}/bars.parquet
+      5min/year={YYYY}/bucket={00..ff}/bars.parquet
   quarantine/
     v1-ticker-bars/eod/{ticker}.parquet
     v1-ticker-bars/intraday/{freq}/{ticker}/{year}.parquet
@@ -90,20 +91,26 @@ data/
     {study_name}/{run_id}/input_files.parquet
 ```
 
-`instrument_id` and `run_id` are opaque, filesystem-safe identifiers;
-`study_name` is a registered filesystem-safe slug. A rename or symbol reuse
-therefore changes neither a canonical path nor a join key.
+`instrument_id` is opaque; `run_id` is opaque and filesystem-safe; and
+`study_name` is a registered filesystem-safe slug. D-019 assigns an instrument
+to one of 256 stable buckets using the first byte of SHA-256 over its UTF-8 id.
+A rename or symbol reuse therefore changes neither a bucket nor a join key.
+Empty buckets need no placeholder file.
 
 Before any instrument-keyed file is published, the migration moves the whole
 v1 `eod/` and `intraday/` roots out of the active namespace and into
-`quarantine/v1-ticker-bars/`. Files are copied from quarantine into `bars/`
-only after their complete stored ranges resolve to one instrument. Query globs
-read `bars/` exclusively. Ambiguous files remain quarantined and reported,
-never unioned with or overwritten by the new generation.
+`quarantine/v1-ticker-bars/`. Rows are read from quarantine and merged into
+their target buckets only after each source file's complete stored range
+resolves to one instrument. Query globs read `bars/` exclusively. Ambiguous
+files remain quarantined and reported, never unioned with or overwritten by
+the new generation.
 
-The per-instrument and per-instrument-year bar layout remains the baseline
-until the planned layout benchmark justifies compaction. Code outside the bar
-store must query globs/views and must not construct these paths itself.
+The M0 layout benchmark chose hash-bucket compaction: it materially reduced
+small-file discovery and improved the representative cross-sectional scans
+and batched ingestion. See
+[parquet-layout-benchmark.md](parquet-layout-benchmark.md). Code outside the
+bar store must query globs/views and must not construct or hash these paths
+itself.
 
 ### Canonical bar schemas
 
@@ -228,24 +235,27 @@ Identity validation precedes every production write:
 4. Normalize to the canonical schema. If a new EOD corporate action requires
    a full refresh, validate that complete snapshot before publishing any frame
    from the triggering operation.
-5. Split intraday data at year/storage-file boundaries (D-017). Each
-   publication unit affects exactly one canonical Parquet file and is ordered
-   inward from an existing coverage edge (or from the scheduler's chosen edge
-   when no coverage exists), so a crash cannot create a published interior
-   hole.
-6. Atomically publish one unit, then advance coverage for that adjacent unit
-   before publishing the next. Empty units may advance coverage only after
-   identity validation and the publication-lag rule. A failed write never
-   advances coverage.
+5. Split intraday data at year/storage-file boundaries (D-017), then stage and
+   group validated frames by dataset/year/bucket (D-019). A failed response is
+   absent from the group and does not block validated peers. Each instrument's
+   units are ordered inward from an existing coverage edge (or from the
+   scheduler's chosen edge when no coverage exists), so a crash cannot create
+   a published interior hole.
+6. Atomically rewrite one bucket file with its ready units, then transactionally
+   advance coverage for exactly those adjacent units before publishing the
+   next group. An isolated retry may rewrite its bucket alone. Empty units may
+   advance coverage only after identity validation and the publication-lag
+   rule. A failed write never advances coverage.
 
 There is no transaction spanning Parquet and SQLite. The safe ordering makes
 Parquet canonical: a crash after one file publication but before its metadata
 update causes redundant refetching. `reconcile` only rebuilds an interval when
-the available year partitions form one contiguous sequence; it reports and
-omits coverage rather than bridging a missing partition. Verified-empty edges
-are not recoverable from row data and may be conservatively refetched. The
-inverse publication ordering could claim data exists when it does not and is
-forbidden.
+each instrument's available year partitions form one contiguous sequence; the
+presence of other instruments in a bucket-year is irrelevant. It reports and
+omits coverage rather than bridging a missing instrument partition.
+Verified-empty edges are not recoverable from row data and may be
+conservatively refetched. The inverse publication ordering could claim data
+exists when it does not and is forbidden.
 
 Historical scheduling is a planning layer over this same idempotent unit. It
 refreshes current data first, enforces the vendor-period byte budget, and
@@ -343,10 +353,13 @@ Implementations and tests preserve these properties:
 - no bar, coverage row, or research join is durably owned by a ticker string;
 - no response writes until its exact-dataset-key identity envelope validates;
 - canonical bar keys are unique and rerunning an ingestion unit converges;
+- bucket assignment is the stable D-019 SHA-256 function, never a process- or
+  language-dependent hash;
 - each coverage boundary is justified by a validated published row or an
   identity-validated historical empty response permitted by D-009; reconcile
   never bridges a missing storage partition (D-017);
-- one EOD file never mixes corporate-action adjustment vintages;
+- one instrument's EOD slice never mixes corporate-action adjustment
+  vintages;
 - intraday coverage excludes the incomplete current session/day;
 - research never gains point-in-time membership semantics from `universe`;
 - opening-window results never infer the missing 09:30-09:59 interval from
@@ -363,9 +376,8 @@ ladder must be rewritten before implementation starts from it.
 
 The architecture imposes only these ordering constraints on that planning:
 
-- benchmark the current Parquet layout before changing D-003's file
-  granularity or completing a migration that would make the comparison costly
-  to act on;
+- implement D-019's settled bucket layout as part of the identity migration,
+  before instrument-keyed production files are published;
 - move the v1 roots out of the active namespace before publishing any
   instrument-keyed files, and complete the identity migration before
   production ingestion resumes;

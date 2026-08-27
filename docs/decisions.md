@@ -25,6 +25,65 @@ Decision / Context / Consequences / Reopen if
 
 ---
 
+## D-019: Canonical bars use stable hash-bucket compaction  (2026-08-27, status: accepted, amends D-003, D-009, and D-017)
+
+**Decision:** Instrument-keyed canonical bars use 256 stable hash buckets,
+selected by the first byte of SHA-256 over the UTF-8 `instrument_id`. EOD has
+one Parquet file per non-empty bucket. Each intraday dataset has one file per
+year and bucket. The exact active paths are
+`bars/eod/bucket={00..ff}/bars.parquet` and
+`bars/intraday/{1hour|5min}/year={YYYY}/bucket={00..ff}/bars.parquet`.
+Bucket assignment is a storage concern: canonical keys and coverage remain
+instrument-based, and code must use the shared bucket function rather than an
+implementation-dependent language hash.
+
+Validated responses are staged independently and grouped by
+(dataset, year when intraday, bucket) for publication. One atomic bucket-file
+rewrite may merge any validated subset; a failed response is excluded and
+does not block validated peers. Normal current updates and date-band
+backfills batch all ready frames for a bucket so that file is rewritten once.
+An isolated retry may rewrite one bucket immediately. Every response still
+advances its own coverage only after the file rename succeeds. Reconciliation
+checks year continuity per instrument, not from the mere presence of a shared
+bucket-year file.
+
+An EOD corporate-action snapshot replacement removes and replaces only that
+instrument's complete slice while atomically rewriting its bucket file. The
+snapshot must pass D-009 and D-014 validation before it joins the preserved
+slices for other instruments; this retains the one-vintage-per-instrument
+invariant without treating a shared physical file as one adjustment vintage.
+
+**Context:** The reproducible M0 benchmark generated 39,468,000 canonical
+five-minute-shaped rows (1,000 instruments, two full-depth instrument-years)
+per candidate. Relative to 2,000 per-instrument-year files, 64 year/bucket
+files per year reduced file count 93.6% and bytes 14.6%. Median warm DuckDB
+queries improved 3.86x for a one-session cross section, 2.11x for a grouped
+20-session event shape, and 1.15x for a full scan. A single-instrument
+merge/write was 6.14x slower because it rewrote the shared bucket, but a
+64-instrument/four-complete-bucket publish was 2.31x faster. Sixty-four buckets
+at 1,000 instruments modeled 15.6 instruments per bucket; 256 buckets at the
+5,403-symbol seed scale yields a comparable 21.1. Full method, results, and
+limitations are in
+[parquet-layout-benchmark.md](parquet-layout-benchmark.md).
+
+**Consequences:** M1 builds the new active namespace directly in the compact
+layout; it does not first copy v1 into per-instrument files. Bar-store point
+reads compute the bucket, while cross-sectional consumers continue through
+DuckDB views/globs. The coordinator needs a staging/grouping boundary, and a
+rare isolated update has bounded write amplification of roughly one bucket's
+instrument population. File publication remains atomic and crash-safe under
+D-017 because every unit affects one canonical file; a crash after rename but
+before coverage commit only causes conservative refetching. Backups and file
+discovery handle hundreds to low thousands of files per dataset instead of
+tens of thousands of small files.
+
+**Reopen if:** Real instrument counts make bucket files materially larger than
+the modeled density, isolated-update latency becomes operationally important,
+full-scale cold-cache scans cease to be interactive, or an atomic
+manifest/append-compaction design demonstrates a better read/write balance.
+Re-benchmark before changing bucket count, hash, partitions, row groups, or
+batching.
+
 ## D-018: Lock and continuously check the Python toolchain  (2026-08-26, status: accepted, amends D-001)
 
 **Decision:** The uv version declared in `pyproject.toml` manages a committed
@@ -84,7 +143,7 @@ enough for the server; Ruff cannot express a needed check; Python support
 changes; or `requests`/`certifi` is replaced so the MPL exception can be
 removed.
 
-## D-017: Identity migration isolates storage generations and preserves contiguous coverage  (2026-08-26, status: accepted, amends D-003, D-009, and D-014)
+## D-017: Identity migration isolates storage generations and preserves contiguous coverage  (2026-08-26, status: accepted, amended by D-019; amends D-003, D-009, and D-014)
 
 **Decision:** Instrument-keyed canonical bars live under a new active
 `data/bars/` root, preserving the current per-instrument EOD and
@@ -504,7 +563,7 @@ per-segment fail-closed validation, and makes research joins instrument-keyed.)*
 that would resurrect point-in-time semantics and the lookahead question,
 and needs its own decision.
 
-## D-009: EOD coverage and refresh policy  (2026-08-26, status: accepted, amended by D-017; identity key amended by D-014; provisional-default caveat lifted by D-010)
+## D-009: EOD coverage and refresh policy  (2026-08-26, status: accepted, amended by D-017 and D-019; identity key amended by D-014; provisional-default caveat lifted by D-010)
 
 **Decision:** Ingestion state is a per-(ticker, dataset) coverage *interval*
 [first_date, last_date], not a single high watermark; backfills fill missing
@@ -643,7 +702,7 @@ zero or multiple matches fail closed.)*
 **Reopen if:** Studies need finer-grained (e.g. quarterly) membership or a
 different selection metric.
 
-## D-003: Storage is Parquet + DuckDB with SQLite metadata  (2026-08-26, status: accepted, amended by D-009, D-014, and D-017)
+## D-003: Storage is Parquet + DuckDB with SQLite metadata  (2026-08-26, status: accepted, amended by D-009, D-014, D-017, and D-019)
 
 **Decision:** Bars are stored as zstd Parquet files (per-ticker EOD,
 per-ticker-year intraday), queried via DuckDB; small relational state

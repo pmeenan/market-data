@@ -72,6 +72,7 @@ build → commit loop, on-demand reviews, and the human commit gate.
 | [docs/intraday-spike.md](docs/intraday-spike.md) | Measured IEX depth, payload sizes, bar semantics, and bandwidth projections |
 | [docs/instrument-identity-spike.md](docs/instrument-identity-spike.md) | Reused-symbol measurements, Tiingo identity behavior, and the D-014 model |
 | [docs/backtest-engine-spike.md](docs/backtest-engine-spike.md) | OQ-1 prototype comparison, benchmark, library-fit findings, and D-015 recommendation |
+| [docs/parquet-layout-benchmark.md](docs/parquet-layout-benchmark.md) | Measured per-instrument vs hash-bucket Parquet tradeoffs and the D-019 layout |
 | [docs/rough-edges.md](docs/rough-edges.md) | Findings log (RE-NNN). Grep before adding a finding or debugging weirdness |
 
 ## Rules for all agents
@@ -117,9 +118,9 @@ spike is done (D-015: a project-native DuckDB/polars vectorized event engine;
 stateful portfolio simulation is deferred). The first full architecture draft
 is complete, including D-016's research-result publication and D-017's safe
 identity-migration storage contracts;
-the Parquet-layout benchmark and the real milestone ladder remain. The
-toolchain is locked and checked in CI (D-018). Production ingestion is paused
-until the M1 identity migration;
+the Parquet-layout benchmark is done (D-019: stable 256-way hash buckets), and
+the real milestone ladder remains. The toolchain is locked and checked in CI
+(D-018). Production ingestion is paused until the M1 identity migration;
 the backtest layer does not exist yet. See
 [docs/plan.md](docs/plan.md). Keep this
 paragraph short and current when plan.md milestone status changes (rule 4).

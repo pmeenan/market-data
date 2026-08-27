@@ -99,9 +99,14 @@ of it.
       universal lock plus the build backend is SPDX-license-audited; D-018
       records the tools and the sole narrow MPL-2.0 transitive exception for
       `certifi`.
-- [ ] Benchmark the Parquet file layout (per-ticker vs yearly/bucketed
-      compaction) with representative cross-sectional scans and intraday
-      ingestion before revisiting D-003's layout.
+- [x] Benchmark the Parquet file layout (2026-08-27): a reproducible
+      39.5-million-row, five-minute-shaped comparison found that year/hash
+      buckets cut file count 93.6% and storage 14.6%, improved representative
+      warm cross-sectional queries 2.1–3.9x, and made a 64-instrument batched
+      publish 2.3x faster, at the cost of a 6.1x slower isolated write. D-019
+      adopts 256 stable SHA-256 buckets and makes bucket batching the normal
+      ingestion path. See
+      [parquet-layout-benchmark.md](parquet-layout-benchmark.md).
 - [ ] Rewrite the provisional ladder below into real milestones with exit
       criteria.
 
