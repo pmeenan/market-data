@@ -28,19 +28,64 @@ def test_universe_roundtrip(tmp_path):
 
 def test_coverage(tmp_path):
     with MetaStore(tmp_path / "meta.db") as meta:
-        assert meta.get_coverage("AAPL", "eod") is None
-        meta.set_coverage("aapl", "eod", date(2020, 1, 2), date(2024, 6, 28))
-        assert meta.get_coverage("AAPL", "eod") == (date(2020, 1, 2), date(2024, 6, 28))
+        assert meta.get_ticker_coverage_v1("AAPL", "eod") is None
+        meta.set_ticker_coverage_v1("aapl", "eod", date(2020, 1, 2), date(2024, 6, 28))
+        assert meta.get_ticker_coverage_v1("AAPL", "eod") == (
+            date(2020, 1, 2),
+            date(2024, 6, 28),
+        )
 
         # extend widens in both directions and never shrinks
-        meta.extend_coverage("AAPL", "eod", date(1995, 1, 3), date(1999, 12, 31))
-        assert meta.get_coverage("AAPL", "eod") == (date(1995, 1, 3), date(2024, 6, 28))
-        meta.extend_coverage("AAPL", "eod", date(2024, 6, 1), date(2024, 7, 1))
-        assert meta.get_coverage("AAPL", "eod") == (date(1995, 1, 3), date(2024, 7, 1))
+        meta.extend_ticker_coverage_v1(
+            "AAPL", "eod", date(1995, 1, 3), date(1999, 12, 31)
+        )
+        assert meta.get_ticker_coverage_v1("AAPL", "eod") == (
+            date(1995, 1, 3),
+            date(2024, 6, 28),
+        )
+        meta.extend_ticker_coverage_v1(
+            "AAPL", "eod", date(2024, 6, 1), date(2024, 7, 1)
+        )
+        assert meta.get_ticker_coverage_v1("AAPL", "eod") == (
+            date(1995, 1, 3),
+            date(2024, 7, 1),
+        )
 
-        assert meta.coverage("eod") == {"AAPL": (date(1995, 1, 3), date(2024, 7, 1))}
-        meta.clear_coverage("eod")
+        assert meta.ticker_coverage_v1("eod") == {
+            "AAPL": (date(1995, 1, 3), date(2024, 7, 1))
+        }
+        meta.clear_ticker_coverage_v1("eod")
+        assert meta.ticker_coverage_v1("eod") == {}
+
+
+def test_instrument_coverage_is_exact_keyed_and_replaced_atomically(tmp_path):
+    import pytest
+
+    with MetaStore(tmp_path / "meta.db") as meta:
+        meta.upsert_instrument("opaque-lowercase-id")
+        meta.set_coverage(
+            "opaque-lowercase-id", "eod", date(2020, 1, 2), date(2024, 6, 28)
+        )
+        assert meta.get_coverage("opaque-lowercase-id", "eod") == (
+            date(2020, 1, 2),
+            date(2024, 6, 28),
+        )
+        assert meta.get_coverage("OPAQUE-LOWERCASE-ID", "eod") is None
+
+        meta.replace_coverage(
+            {
+                ("opaque-lowercase-id", "intraday_1hour"): (
+                    date(2024, 1, 2),
+                    date(2024, 12, 30),
+                )
+            }
+        )
         assert meta.coverage("eod") == {}
+        assert meta.coverage("intraday_1hour") == {
+            "opaque-lowercase-id": (date(2024, 1, 2), date(2024, 12, 30))
+        }
+        with pytest.raises(ValueError, match="dataset_key"):
+            meta.coverage("iex")
 
 
 def test_migration_from_v0(tmp_path):
@@ -56,7 +101,7 @@ def test_migration_from_v0(tmp_path):
 
     with MetaStore(path) as meta:
         # watermarks dropped, coverage available, version stamped
-        assert meta.get_coverage("AAPL", "eod") is None
+        assert meta.get_ticker_coverage_v1("AAPL", "eod") is None
         tables = {
             r["name"]
             for r in meta._con.execute(
@@ -65,7 +110,8 @@ def test_migration_from_v0(tmp_path):
         }
         assert "watermarks" not in tables
         assert "coverage" in tables
-        assert meta._con.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert meta._con.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert "ticker_coverage_v1" in tables
 
 
 def test_migration_from_v1_preserves_existing_universe(tmp_path):
@@ -90,7 +136,7 @@ def test_migration_from_v1_preserves_existing_universe(tmp_path):
 
     with MetaStore(path) as meta:
         assert [row["ticker"] for row in meta.universe(2025)] == ["AAPL"]
-        assert meta._con.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert meta._con.execute("PRAGMA user_version").fetchone()[0] == 3
         assert (
             meta._con.execute(
                 "SELECT COUNT(*) FROM sqlite_master WHERE name = 'instruments'"

@@ -7,7 +7,8 @@ documentation, directed and reviewed by a human (see
 [AGENTS.md](AGENTS.md)).
 
 - **Source**: [Tiingo](https://www.tiingo.com/) (EOD daily bars with split/dividend adjustments; IEX intraday bars)
-- **Storage**: Parquet files (zstd-compressed, one file per ticker for EOD, per ticker-year for intraday) + a small SQLite database for metadata (ticker universes, coverage intervals)
+- **Storage**: canonical instrument-keyed Parquet in stable hash buckets + a
+  small SQLite database for identities, universes, and coverage intervals
 - **Query engine**: [DuckDB](https://duckdb.org/) over the Parquet files, with the metadata DB attached — fast analytical scans for backtesting, no database server to run
 - **Interface**: a `market-data` CLI for ingestion/maintenance and an importable `marketdata` Python library for research and strategy code
 
@@ -82,10 +83,39 @@ writes are merge-upserts keyed on date/timestamp, nightly updates refetch a
 rolling overlap to pick up corrections and restated adjustments, and a newly
 observed split/dividend triggers a full-history refresh for that ticker.
 Partial failures exit nonzero (cron-friendly; add `--summary-json out.json`
-for a machine-readable result). If coverage metadata is ever lost or in
-doubt, `market-data reconcile` rebuilds it from the Parquet files.
+for a machine-readable result). If coverage rows are lost or in doubt,
+`market-data reconcile` rebuilds them from Parquet. This does not recreate a
+lost `meta.db`: identity evidence cannot be reconstructed from bar files, so
+restore the metadata database from backup first.
 
-## Using the library
+### M1 bar migration
+
+Production ingestion remains paused while its APIs are converted to stable
+identities. The completed storage migration can be exercised with:
+
+```bash
+market-data migrate-v2-bars
+```
+
+The command first moves both ticker-keyed roots beneath
+`quarantine/v1-ticker-bars/`, then copies only complete source-file ranges
+that resolve to one instrument. Its durable `migration-report.json` lists
+every migrated, unresolved, conflicting, invalid, or failed file and its
+target. Quarantined sources are retained: add or correct identity evidence and
+rerun the same command safely; canonical writes are merge-upserts and coverage
+is rebuilt conservatively after every run. The command exits nonzero while any
+source or canonical coverage slice remains unsafe. Establishing the v2 boundary
+records a durable generation marker, clears derived v1 ticker coverage, and
+disables the legacy ingestion/query commands until their `instrument_id` APIs
+land; they fail clearly instead of recreating or reading ticker-keyed files.
+Schema v3 names the canonical SQL table `meta.coverage` and retains the old
+shape explicitly as `meta.ticker_coverage_v1` during the transition.
+
+## Using the library (transitional v1 surface)
+
+The calls below describe the pre-migration query API. They intentionally fail
+closed after the v2 boundary until the next M1 step converts filters and views
+to `instrument_id`.
 
 ```python
 from marketdata import load_config
@@ -113,9 +143,11 @@ raw columns reflect prices as traded.
 
 ```
 data/                       (gitignored; set MARKET_DATA_DIR to relocate)
-  meta.db                   SQLite: identities, universes, transitional coverage
-  eod/AAPL.parquet          full daily history per ticker
-  intraday/1hour/AAPL/2025.parquet
+  meta.db                   SQLite: identities, generation, universes, coverage
+  bars/eod/bucket=ab/bars.parquet
+  bars/intraday/1hour/year=2025/bucket=ab/bars.parquet
+  quarantine/v1-ticker-bars/
+    migration-report.json  durable per-source migration outcome
 src/marketdata/
   identity.py               fail-closed identity resolution result contracts
   tiingo.py                 Tiingo REST client (throttling, retries)
@@ -131,11 +163,12 @@ src/marketdata/
 
 Milestone **M1 (identity-safe canonical warehouse)** is in progress after the
 owner approved and closed M0 on 2026-08-27. The identity registry and explicit
-resolution reports are implemented; migration from the working ticker-keyed v1
-substrate to instrument-keyed hash-bucket storage is next. Production ingestion
-remains paused until that migration is complete. The first planned study asks
-whether stocks that open significantly down tend to recover over the next few
-hours; the research/backtesting layer begins in M3.
+resolution reports plus the v2 hash-bucket storage migration, atomic bar
+publication, conservative reconciliation, and operator report are implemented.
+Moving ingestion and query APIs to `instrument_id` is next. Production ingestion
+remains paused until M1 is complete. The first planned study asks whether stocks
+that open significantly down tend to recover over the next few hours; the
+research/backtesting layer begins in M3.
 
 ## Start here
 

@@ -1,18 +1,18 @@
-"""Parquet-backed bar storage.
+"""Parquet-backed legacy and canonical bar storage.
 
 Layout:
     {data_dir}/eod/{TICKER}.parquet                     full daily history per ticker
     {data_dir}/intraday/{freq}/{TICKER}/{year}.parquet  one file per ticker-year
 
-Each file carries a `ticker` column so DuckDB can query globs directly
-without relying on filenames. Writes are merge-upserts keyed on the
-timestamp column: refetching an overlapping range replaces those rows,
-which also picks up Tiingo's restated adjusted values after splits and
-dividends.
+The ticker-keyed paths are the quarantined v1 generation and remain here only
+until ingestion is moved to stable identities.  Canonical v2 bars live below
+``bars/`` in stable SHA-256 buckets and carry ``instrument_id`` instead.
 """
 
 from __future__ import annotations
 
+import hashlib
+from collections.abc import Mapping
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -46,6 +46,16 @@ INTRADAY_SCHEMA = {
     "volume": pl.Int64,
 }
 
+CANONICAL_EOD_SCHEMA = {"instrument_id": pl.Utf8} | {
+    key: value for key, value in EOD_SCHEMA.items() if key != "ticker"
+}
+
+CANONICAL_INTRADAY_SCHEMA = {"instrument_id": pl.Utf8} | {
+    key: value for key, value in INTRADAY_SCHEMA.items() if key != "ticker"
+}
+
+INTRADAY_FREQS = ("1hour", "5min")
+
 _TIINGO_EOD_FIELDS = {
     "date": "date",
     "open": "open",
@@ -64,7 +74,7 @@ _TIINGO_EOD_FIELDS = {
 
 
 def eod_frame(ticker: str, rows: list[dict[str, Any]]) -> pl.DataFrame:
-    """Convert Tiingo EOD JSON rows into the canonical EOD frame."""
+    """Convert Tiingo EOD JSON rows into the normalized legacy frame."""
     records = [
         {out: row.get(src) for src, out in _TIINGO_EOD_FIELDS.items()} for row in rows
     ]
@@ -134,6 +144,61 @@ class BarStore:
     def intraday_glob(self, freq: str = "1hour") -> str:
         return str(self.data_dir / "intraday" / freq / "*" / "*.parquet")
 
+    # ---- canonical v2 paths ---------------------------------------------
+
+    def canonical_eod_path(self, instrument_id: str) -> Path:
+        return canonical_bucket_path(
+            self.data_dir, "eod", instrument_bucket(instrument_id)
+        )
+
+    def canonical_intraday_path(
+        self, instrument_id: str, year: int, freq: str = "1hour"
+    ) -> Path:
+        return canonical_bucket_path(
+            self.data_dir,
+            f"intraday_{freq}",
+            instrument_bucket(instrument_id),
+            year,
+        )
+
+    def canonical_eod_glob(self) -> str:
+        return canonical_dataset_glob(self.data_dir, "eod")
+
+    def canonical_intraday_glob(self, freq: str = "1hour") -> str:
+        return canonical_dataset_glob(self.data_dir, f"intraday_{freq}")
+
+    def canonical_eod_files(self) -> list[Path]:
+        return sorted(
+            canonical_dataset_root(self.data_dir, "eod").glob("bucket=*/bars.parquet")
+        )
+
+    def canonical_intraday_files(self, freq: str) -> list[Path]:
+        return sorted(
+            canonical_dataset_root(self.data_dir, f"intraday_{freq}").glob(
+                "year=*/bucket=*/bars.parquet"
+            )
+        )
+
+    def has_canonical_bars(self) -> bool:
+        return any((self.data_dir / "bars").rglob("*.parquet"))
+
+    def has_legacy_bars(self) -> bool:
+        return any((self.data_dir / "eod").glob("*.parquet")) or any(
+            (self.data_dir / "intraday").rglob("*.parquet")
+        )
+
+    def validate_generation(self, generation: str) -> None:
+        """Reject bar files that contradict the durable generation marker."""
+        if generation == "v2" and self.has_legacy_bars():
+            raise RuntimeError(
+                "v1 bar files exist after the recorded v2 generation boundary"
+            )
+        if generation == "v1" and self.has_canonical_bars():
+            raise RuntimeError(
+                "canonical bars exist but meta.db records v1; restore the matching "
+                "metadata backup or rerun the migration"
+            )
+
     # ---- EOD -------------------------------------------------------------
 
     def write_eod(self, ticker: str, df: pl.DataFrame) -> int:
@@ -186,6 +251,152 @@ class BarStore:
             return None
         return pl.concat([pl.read_parquet(f) for f in files]).sort("ts")
 
+    # ---- canonical v2 publication ---------------------------------------
+
+    def publish_eod(
+        self,
+        frames: Mapping[str, pl.DataFrame],
+        *,
+        replace_instruments: frozenset[str] = frozenset(),
+    ) -> dict[str, int]:
+        """Publish validated instrument frames, rewriting each bucket once.
+
+        Normal frames merge-upsert by ``(instrument_id, date)``. Instruments
+        named in ``replace_instruments`` have their complete slice replaced,
+        which is the corporate-action snapshot operation from D-019.
+        """
+        missing_replacements = replace_instruments - frames.keys()
+        if missing_replacements:
+            raise ValueError(
+                "replacement snapshots require frames for every instrument: "
+                f"{sorted(missing_replacements)}"
+            )
+        grouped: dict[str, list[pl.DataFrame]] = {}
+        for instrument_id, frame in frames.items():
+            if instrument_id in replace_instruments and frame.is_empty():
+                raise ValueError(
+                    f"replacement snapshot for {instrument_id!r} must not be empty"
+                )
+            canonical = _canonical_frame(
+                instrument_id, frame, CANONICAL_EOD_SCHEMA, "date"
+            )
+            grouped.setdefault(instrument_bucket(instrument_id), []).append(canonical)
+
+        result: dict[str, int] = {}
+        for bucket, incoming_frames in sorted(grouped.items()):
+            path = canonical_bucket_path(self.data_dir, "eod", bucket)
+            incoming = pl.concat(incoming_frames)
+            merged = _merge_canonical(
+                path,
+                incoming,
+                key=["instrument_id", "date"],
+                replace_instruments=replace_instruments,
+            )
+            _atomic_write(merged, path)
+            counts = dict(merged.group_by("instrument_id").len().iter_rows())
+            result.update(
+                {
+                    instrument_id: counts[instrument_id]
+                    for instrument_id in incoming["instrument_id"].unique()
+                }
+            )
+        return result
+
+    def publish_intraday(
+        self, frames: Mapping[str, pl.DataFrame], *, freq: str = "1hour"
+    ) -> dict[tuple[str, int], int]:
+        """Publish validated intraday frames, split by year and bucket."""
+        _require_freq(freq)
+        grouped: dict[tuple[int, str], list[pl.DataFrame]] = {}
+        for instrument_id, frame in frames.items():
+            canonical = _canonical_frame(
+                instrument_id, frame, CANONICAL_INTRADAY_SCHEMA, "ts"
+            )
+            for (year,), part in canonical.group_by(
+                pl.col("ts").dt.year(), maintain_order=True
+            ):
+                group = (int(year), instrument_bucket(instrument_id))
+                grouped.setdefault(group, []).append(part)
+
+        result: dict[tuple[str, int], int] = {}
+        for (year, bucket), incoming_frames in sorted(grouped.items()):
+            path = canonical_bucket_path(
+                self.data_dir, f"intraday_{freq}", bucket, year
+            )
+            incoming = pl.concat(incoming_frames)
+            merged = _merge_canonical(path, incoming, key=["instrument_id", "ts"])
+            _atomic_write(merged, path)
+            counts = dict(merged.group_by("instrument_id").len().iter_rows())
+            result.update(
+                {
+                    (instrument_id, year): counts[instrument_id]
+                    for instrument_id in incoming["instrument_id"].unique()
+                }
+            )
+        return result
+
+    def read_canonical_eod(self, instrument_id: str) -> pl.DataFrame | None:
+        path = self.canonical_eod_path(instrument_id)
+        if not path.exists():
+            return None
+        frame = (
+            pl.read_parquet(path)
+            .filter(pl.col("instrument_id") == instrument_id)
+            .sort("date")
+        )
+        return frame if frame.height else None
+
+    def read_canonical_intraday(
+        self, instrument_id: str, freq: str = "1hour"
+    ) -> pl.DataFrame | None:
+        files = self.canonical_intraday_files(freq)
+        if not files:
+            return None
+        frame = (
+            pl.scan_parquet(files)
+            .filter(pl.col("instrument_id") == instrument_id)
+            .collect()
+        )
+        return frame.sort("ts") if frame.height else None
+
+
+def instrument_bucket(instrument_id: str) -> str:
+    """Return D-019's stable first-SHA-256-byte bucket."""
+    if not instrument_id:
+        raise ValueError("instrument_id must not be empty")
+    return hashlib.sha256(instrument_id.encode("utf-8")).hexdigest()[:2]
+
+
+def canonical_dataset_root(data_dir: Path, dataset_key: str) -> Path:
+    if dataset_key == "eod":
+        return Path(data_dir) / "bars" / "eod"
+    if dataset_key.startswith("intraday_"):
+        freq = dataset_key.removeprefix("intraday_")
+        _require_freq(freq)
+        return Path(data_dir) / "bars" / "intraday" / freq
+    raise ValueError(f"unsupported canonical dataset_key {dataset_key!r}")
+
+
+def canonical_bucket_path(
+    data_dir: Path, dataset_key: str, bucket: str, year: int | None = None
+) -> Path:
+    root = canonical_dataset_root(data_dir, dataset_key)
+    if dataset_key == "eod":
+        if year is not None:
+            raise ValueError("EOD bucket paths do not have a year")
+    else:
+        if year is None:
+            raise ValueError("intraday bucket paths require a year")
+        root = root / f"year={year}"
+    return root / f"bucket={bucket}" / "bars.parquet"
+
+
+def canonical_dataset_glob(data_dir: Path, dataset_key: str) -> str:
+    root = canonical_dataset_root(data_dir, dataset_key)
+    if dataset_key == "eod":
+        return str(root / "bucket=*" / "bars.parquet")
+    return str(root / "year=*" / "bucket=*" / "bars.parquet")
+
 
 def _safe(ticker: str) -> str:
     return ticker.upper().replace("/", "-")
@@ -198,6 +409,71 @@ def _merge(path: Path, incoming: pl.DataFrame, key: str) -> pl.DataFrame:
     else:
         combined = incoming
     return combined.unique(subset=[key], keep="last").sort(key)
+
+
+def _canonical_frame(
+    instrument_id: str,
+    frame: pl.DataFrame,
+    schema: dict[str, pl.DataType],
+    time_key: str,
+) -> pl.DataFrame:
+    if not instrument_id:
+        raise ValueError("instrument_id must not be empty")
+    if "ticker" in frame.columns:
+        frame = frame.drop("ticker")
+    if "instrument_id" in frame.columns:
+        ids = frame["instrument_id"].drop_nulls().unique().to_list()
+        if ids != [instrument_id]:
+            raise ValueError(f"frame identity {ids!r} does not match {instrument_id!r}")
+    else:
+        frame = frame.with_columns(instrument_id=pl.lit(instrument_id))
+    missing = set(schema) - set(frame.columns)
+    extra = set(frame.columns) - set(schema)
+    if missing or extra:
+        raise ValueError(
+            f"invalid canonical schema; missing={sorted(missing)}, extra={sorted(extra)}"
+        )
+    canonical = frame.select(schema.keys()).cast(schema)
+    if (
+        canonical.select(
+            pl.any_horizontal(pl.col(["instrument_id", time_key]).is_null())
+        )
+        .to_series()
+        .any()
+    ):
+        raise ValueError("canonical keys must not contain nulls")
+    canonical = canonical.unique(maintain_order=True)
+    if canonical.select(
+        pl.struct(["instrument_id", time_key]).is_duplicated().any()
+    ).item():
+        raise ValueError(f"duplicate canonical key (instrument_id, {time_key})")
+    return canonical.sort(["instrument_id", time_key])
+
+
+def _merge_canonical(
+    path: Path,
+    incoming: pl.DataFrame,
+    *,
+    key: list[str],
+    replace_instruments: frozenset[str] = frozenset(),
+) -> pl.DataFrame:
+    if path.exists():
+        existing = pl.read_parquet(path)
+        if existing.schema != incoming.schema:
+            raise ValueError(f"canonical schema mismatch in {path}")
+        if replace_instruments:
+            existing = existing.filter(
+                ~pl.col("instrument_id").is_in(list(replace_instruments))
+            )
+        combined = pl.concat([existing, incoming])
+    else:
+        combined = incoming
+    return combined.unique(subset=key, keep="last").sort(key)
+
+
+def _require_freq(freq: str) -> None:
+    if freq not in INTRADAY_FREQS:
+        raise ValueError(f"freq must be one of {INTRADAY_FREQS}, got {freq!r}")
 
 
 def _atomic_write(df: pl.DataFrame, path: Path) -> None:

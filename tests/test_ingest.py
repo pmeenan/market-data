@@ -96,12 +96,18 @@ def test_backfill_fetches_missing_leading_history(tmp_path):
 
     # Step 1: fetch the ranking year only
     backfill_eod(client, bars, meta, ["AAPL"], date(2025, 1, 1), date(2025, 12, 31))
-    assert meta.get_coverage("AAPL", "eod") == (date(2025, 1, 1), date(2025, 12, 31))
+    assert meta.get_ticker_coverage_v1("AAPL", "eod") == (
+        date(2025, 1, 1),
+        date(2025, 12, 31),
+    )
 
     # Step 2: full history from 1995 must fetch the LEADING gap, not start in 2026
     backfill_eod(client, bars, meta, ["AAPL"], date(1995, 1, 1), date(2025, 12, 31))
     assert (("AAPL", date(1995, 1, 1), date(2024, 12, 31))) in client.eod_calls
-    assert meta.get_coverage("AAPL", "eod") == (date(1995, 1, 1), date(2025, 12, 31))
+    assert meta.get_ticker_coverage_v1("AAPL", "eod") == (
+        date(1995, 1, 1),
+        date(2025, 12, 31),
+    )
     df = bars.read_eod("AAPL")
     assert df["date"].min() == date(1995, 1, 2)
 
@@ -120,7 +126,7 @@ def test_empty_recent_response_not_marked_covered(tmp_path):
 
     backfill_eod(client, bars, meta, ["NEWCO"], today - timedelta(days=2), today)
     # publication lag: the range ends now, so it must NOT be marked covered
-    assert meta.get_coverage("NEWCO", "eod") is None
+    assert meta.get_ticker_coverage_v1("NEWCO", "eod") is None
 
     # a rerun tries again rather than skipping
     backfill_eod(client, bars, meta, ["NEWCO"], today - timedelta(days=2), today)
@@ -131,7 +137,10 @@ def test_empty_historical_response_is_covered(tmp_path):
     bars, meta = stores(tmp_path)
     client = FakeTiingo({"GONE": []})  # e.g. delisted before the range
     backfill_eod(client, bars, meta, ["GONE"], date(2010, 1, 1), date(2010, 12, 31))
-    assert meta.get_coverage("GONE", "eod") == (date(2010, 1, 1), date(2010, 12, 31))
+    assert meta.get_ticker_coverage_v1("GONE", "eod") == (
+        date(2010, 1, 1),
+        date(2010, 12, 31),
+    )
     n = len(client.eod_calls)
     backfill_eod(client, bars, meta, ["GONE"], date(2010, 1, 1), date(2010, 12, 31))
     assert len(client.eod_calls) == n  # no refetch
@@ -144,7 +153,7 @@ def test_update_refetches_rolling_overlap(tmp_path):
     history = {"AAPL": [eod_row(d) for d in weekdays(date(2024, 1, 1), last)]}
     client = FakeTiingo(history)
     backfill_eod(client, bars, meta, ["AAPL"], date(2024, 1, 1), last)
-    cov_last = meta.get_coverage("AAPL", "eod")[1]
+    cov_last = meta.get_ticker_coverage_v1("AAPL", "eod")[1]
 
     # correction lands inside the refresh window
     corrected = cov_last - timedelta(days=3)
@@ -160,7 +169,7 @@ def test_update_refetches_rolling_overlap(tmp_path):
 
     if corrected.weekday() < 5:
         assert df.filter(pl.col("date") == corrected)["close"][0] == 555.0
-    assert meta.get_coverage("AAPL", "eod")[0] == date(2024, 1, 1)
+    assert meta.get_ticker_coverage_v1("AAPL", "eod")[0] == date(2024, 1, 1)
 
 
 def test_new_dividend_triggers_full_refresh(tmp_path):
@@ -211,7 +220,7 @@ def test_prefix_truncated_full_refresh_keeps_history(tmp_path):
     # dividend row) but must still be rejected
     assert result.refreshed == [] and "AAPL" in result.failed
     assert bars.read_eod("AAPL").height == rows_before  # history intact
-    assert meta.get_coverage("AAPL", "eod")[1] == last
+    assert meta.get_ticker_coverage_v1("AAPL", "eod")[1] == last
 
 
 def _dividend_refresh_setup(tmp_path, client_cls):
@@ -244,7 +253,7 @@ def test_full_refresh_must_contain_trigger_dates(tmp_path):
     bars, meta, client, last = _dividend_refresh_setup(tmp_path, OmittingTiingo)
     result = update_eod(client, bars, meta, ["AAPL"])
     assert result.refreshed == [] and "AAPL" in result.failed
-    assert meta.get_coverage("AAPL", "eod")[1] == last  # retried next run
+    assert meta.get_ticker_coverage_v1("AAPL", "eod")[1] == last  # retried next run
 
 
 def test_full_refresh_must_agree_on_corp_action_values(tmp_path):
@@ -263,7 +272,7 @@ def test_full_refresh_must_agree_on_corp_action_values(tmp_path):
     bars, meta, client, last = _dividend_refresh_setup(tmp_path, ZeroingTiingo)
     result = update_eod(client, bars, meta, ["AAPL"])
     assert result.refreshed == [] and "AAPL" in result.failed
-    assert meta.get_coverage("AAPL", "eod")[1] == last
+    assert meta.get_ticker_coverage_v1("AAPL", "eod")[1] == last
 
 
 def test_backfill_failed_full_refresh_keeps_file_untouched(tmp_path):
@@ -284,7 +293,7 @@ def test_backfill_failed_full_refresh_keeps_file_untouched(tmp_path):
 
     assert result.refreshed == [] and "AAPL" in result.failed
     assert bars.read_eod("AAPL").equals(before)
-    assert meta.get_coverage("AAPL", "eod")[1] == last
+    assert meta.get_ticker_coverage_v1("AAPL", "eod")[1] == last
 
 
 def test_backfill_reports_failures(tmp_path):
@@ -314,7 +323,7 @@ def test_intraday_leading_backfill_and_freq_validation(tmp_path):
     backfill_intraday(
         client, bars, meta, ["AAPL"], date(2024, 6, 1), date(2024, 7, 31), freq="1hour"
     )
-    assert meta.get_coverage("AAPL", "intraday_1hour") == (
+    assert meta.get_ticker_coverage_v1("AAPL", "intraday_1hour") == (
         date(2024, 6, 1),
         date(2024, 7, 31),
     )
@@ -323,7 +332,7 @@ def test_intraday_leading_backfill_and_freq_validation(tmp_path):
     backfill_intraday(
         client, bars, meta, ["AAPL"], date(2024, 4, 1), date(2024, 7, 31), freq="1hour"
     )
-    assert meta.get_coverage("AAPL", "intraday_1hour") == (
+    assert meta.get_ticker_coverage_v1("AAPL", "intraday_1hour") == (
         date(2024, 4, 1),
         date(2024, 7, 31),
     )
@@ -339,12 +348,12 @@ def test_reconcile_rebuilds_coverage_from_parquet(tmp_path):
     }
     client = FakeTiingo(history)
     backfill_eod(client, bars, meta, ["AAPL"], date(2024, 1, 1), date(2024, 6, 28))
-    meta.clear_coverage()
-    assert meta.get_coverage("AAPL", "eod") is None
+    meta.clear_ticker_coverage_v1()
+    assert meta.get_ticker_coverage_v1("AAPL", "eod") is None
 
     counts = reconcile(bars, meta)
     assert counts["eod"] == 1
-    first, last = meta.get_coverage("AAPL", "eod")
+    first, last = meta.get_ticker_coverage_v1("AAPL", "eod")
     assert first == date(2024, 1, 1) and last == date(2024, 6, 28)
 
 
@@ -357,11 +366,11 @@ def test_reconcile_removes_stale_coverage(tmp_path):
     }
     client = FakeTiingo(history)
     backfill_eod(client, bars, meta, ["AAPL"], date(2024, 1, 1), date(2024, 6, 28))
-    meta.set_coverage("GHOST", "eod", date(2020, 1, 1), date(2024, 12, 31))
+    meta.set_ticker_coverage_v1("GHOST", "eod", date(2020, 1, 1), date(2024, 12, 31))
 
     reconcile(bars, meta)
-    assert meta.get_coverage("GHOST", "eod") is None
-    assert meta.get_coverage("AAPL", "eod") is not None
+    assert meta.get_ticker_coverage_v1("GHOST", "eod") is None
+    assert meta.get_ticker_coverage_v1("AAPL", "eod") is not None
 
     # and a backfill for GHOST now actually fetches
     backfill_eod(client, bars, meta, ["GHOST"], date(2024, 1, 1), date(2024, 6, 28))
@@ -377,7 +386,7 @@ def test_intraday_today_stays_refreshable(tmp_path):
     start = today - timedelta(days=3)
 
     backfill_intraday(client, bars, meta, ["AAPL"], start, today, freq="1hour")
-    cov = meta.get_coverage("AAPL", "intraday_1hour")
+    cov = meta.get_ticker_coverage_v1("AAPL", "intraday_1hour")
     if cov is not None:
         assert cov[1] <= today - timedelta(days=1)
 
@@ -414,9 +423,9 @@ def test_reconcile_caps_intraday_coverage_at_yesterday(tmp_path):
     )
 
     reconcile(bars, meta)
-    first, last = meta.get_coverage("AAPL", "intraday_1hour")
+    first, last = meta.get_ticker_coverage_v1("AAPL", "intraday_1hour")
     assert first == past and last <= today - timedelta(days=1)
-    assert meta.get_coverage("ONLYTODAY", "intraday_1hour") is None
+    assert meta.get_ticker_coverage_v1("ONLYTODAY", "intraday_1hour") is None
 
 
 def test_empty_full_refresh_is_a_failure(tmp_path):
@@ -447,4 +456,4 @@ def test_empty_full_refresh_is_a_failure(tmp_path):
     assert result.refreshed == []
     assert "AAPL" in result.failed and not result.ok
     # coverage untouched: the refresh will be retried next run
-    assert meta.get_coverage("AAPL", "eod")[1] == last
+    assert meta.get_ticker_coverage_v1("AAPL", "eod")[1] == last

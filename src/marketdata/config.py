@@ -27,7 +27,6 @@ class Config:
 
     def ensure_dirs(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
-        self.eod_dir.mkdir(parents=True, exist_ok=True)
 
 
 def load_config(data_dir: str | Path | None = None) -> Config:

@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 import sys
 from pathlib import Path
 
 import click
+import polars as pl
 
 from marketdata import universe as universe_mod
 from marketdata.config import Config, load_config
@@ -19,6 +21,11 @@ from marketdata.ingest import (
     backfill_intraday,
     reconcile,
     update_eod,
+)
+from marketdata.migration import (
+    default_migration_report_path,
+    migrate_v1_bars,
+    reconcile_canonical,
 )
 from marketdata.store import BarStore, MetaStore
 from marketdata.tiingo import TiingoClient
@@ -41,6 +48,15 @@ def _client(config: Config) -> TiingoClient:
             "TIINGO_API_TOKEN is not set (put it in .env or the environment)"
         )
     return TiingoClient(config.tiingo_token)
+
+
+def _require_legacy_ingestion(meta: MetaStore) -> None:
+    """Fail clearly until M1 moves ingestion onto canonical instrument APIs."""
+    if meta.storage_generation() != "v1":
+        raise click.ClickException(
+            "ticker-keyed ingestion is disabled after the v2 storage migration; "
+            "production ingestion remains paused until the instrument_id APIs land"
+        )
 
 
 def _resolve_tickers(
@@ -152,6 +168,7 @@ def universe_rank(config: Config, year: int, top: int, min_days: int) -> None:
     """Rank stored tickers by avg daily dollar volume over YEAR and save
     the top N as that year's universe."""
     with MetaStore(config.meta_path) as meta:
+        _require_legacy_ingestion(meta)
         n = universe_mod.rank_by_dollar_volume(
             meta, BarStore(config.data_dir), year, top, min_days
         )
@@ -257,6 +274,7 @@ def backfill_eod_cmd(
     client = _client(config)
     config.ensure_dirs()
     with MetaStore(config.meta_path) as meta:
+        _require_legacy_ingestion(meta)
         ticker_list = _resolve_tickers(meta, tickers, tickers_file, universe_year)
         click.echo(f"Backfilling EOD for {len(ticker_list)} tickers...")
         result = backfill_eod(
@@ -296,6 +314,7 @@ def backfill_intraday_cmd(
     client = _client(config)
     config.ensure_dirs()
     with MetaStore(config.meta_path) as meta:
+        _require_legacy_ingestion(meta)
         ticker_list = _resolve_tickers(meta, tickers, tickers_file, universe_year)
         click.echo(f"Backfilling {freq} bars for {len(ticker_list)} tickers...")
         result = backfill_intraday(
@@ -338,6 +357,7 @@ def update(config, tickers, tickers_file, universe_year, all_universes, summary_
     client = _client(config)
     config.ensure_dirs()
     with MetaStore(config.meta_path) as meta:
+        _require_legacy_ingestion(meta)
         ticker_list = _resolve_tickers(
             meta,
             tickers,
@@ -354,10 +374,73 @@ def update(config, tickers, tickers_file, universe_year, all_universes, summary_
 @click.pass_obj
 def reconcile_cmd(config):
     """Rebuild coverage metadata from the canonical Parquet files."""
-    with MetaStore(config.meta_path) as meta:
-        counts = reconcile(BarStore(config.data_dir), meta)
+    bars = BarStore(config.data_dir)
+    owner_label = "tickers"
+    report = None
+    try:
+        with MetaStore(config.meta_path) as meta:
+            generation = meta.storage_generation()
+            bars.validate_generation(generation)
+            if generation == "v2":
+                report = reconcile_canonical(bars, meta)
+                counts = report.counts
+                owner_label = "instruments"
+                for issue in report.issues:
+                    click.echo(
+                        f"warning: {issue.dataset_key} {issue.instrument_id}: "
+                        f"{issue.issue} ({issue.detail})",
+                        err=True,
+                    )
+            else:
+                counts = reconcile(bars, meta)
+    except (OSError, RuntimeError, sqlite3.Error, pl.exceptions.PolarsError) as exc:
+        raise click.ClickException(str(exc)) from exc
     for dataset, n in counts.items():
-        click.echo(f"{dataset}: coverage rebuilt for {n} tickers")
+        click.echo(f"{dataset}: coverage rebuilt for {n} {owner_label}")
+    if report is not None and report.issues:
+        raise click.exceptions.Exit(1)
+
+
+@main.command("migrate-v2-bars")
+@click.option(
+    "--report",
+    "report_path",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Migration report path (default: inside the v1 quarantine)",
+)
+@click.pass_obj
+def migrate_v2_bars_cmd(config: Config, report_path: Path | None) -> None:
+    """Quarantine ticker-keyed bars and copy resolvable files into v2."""
+    config.data_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        with MetaStore(config.meta_path) as meta:
+            report = migrate_v1_bars(
+                BarStore(config.data_dir), meta, report_path=report_path
+            )
+    except (
+        OSError,
+        RuntimeError,
+        ValueError,
+        sqlite3.Error,
+        pl.exceptions.PolarsError,
+    ) as exc:
+        raise click.ClickException(str(exc)) from exc
+    counts = ", ".join(f"{count} {status}" for status, count in report.counts().items())
+    click.echo(f"Migration pass complete: {counts or 'no source files'}")
+    if report.reconciliation_issues:
+        click.echo(
+            f"Coverage omitted for {len(report.reconciliation_issues)} "
+            "disconnected or invalid canonical slices",
+            err=True,
+        )
+    click.echo(
+        f"Report: {report_path or default_migration_report_path(config.data_dir)}"
+    )
+    if report.reconciliation_issues or any(
+        item.status != "migrated" for item in report.items
+    ):
+        raise click.exceptions.Exit(1)
 
 
 # ---- inspection ----------------------------------------------------------
@@ -370,21 +453,53 @@ def status(config: Config) -> None:
     from marketdata.query import connect
 
     bars = BarStore(config.data_dir)
-    tickers = bars.eod_tickers()
     click.echo(f"Warehouse: {config.data_dir}")
-    click.echo(f"EOD tickers: {len(tickers)}")
-    if tickers:
-        con = connect(config)
-        n, lo, hi = con.execute(
-            "SELECT count(*), min(date), max(date) FROM eod"
-        ).fetchone()
-        click.echo(f"EOD bars: {n:,} rows, {lo} .. {hi}")
     with MetaStore(config.meta_path) as meta:
+        generation = meta.storage_generation()
+        try:
+            bars.validate_generation(generation)
+        except RuntimeError as exc:
+            raise click.ClickException(str(exc)) from exc
+        click.echo(f"Storage generation: {generation}")
+        if generation == "v2":
+            files = bars.canonical_eod_files()
+            if files:
+                summary = (
+                    pl.scan_parquet(files)
+                    .select(
+                        pl.len().alias("rows"),
+                        pl.col("instrument_id").n_unique().alias("instruments"),
+                        pl.col("date").min().alias("lo"),
+                        pl.col("date").max().alias("hi"),
+                    )
+                    .collect()
+                    .row(0, named=True)
+                )
+                click.echo(f"EOD instruments: {summary['instruments']}")
+                click.echo(
+                    f"EOD bars: {summary['rows']:,} rows, "
+                    f"{summary['lo']} .. {summary['hi']}"
+                )
+            else:
+                click.echo("EOD instruments: 0")
+        else:
+            tickers = bars.eod_tickers()
+            click.echo(f"EOD tickers: {len(tickers)}")
+            if tickers:
+                con = connect(config)
+                n, lo, hi = con.execute(
+                    "SELECT count(*), min(date), max(date) FROM eod"
+                ).fetchone()
+                click.echo(f"EOD bars: {n:,} rows, {lo} .. {hi}")
         years = meta.universe_years()
         if years:
             counts = ", ".join(f"{y}: {len(meta.universe(y))}" for y in years)
             click.echo(f"Universes: {counts}")
-        cov = meta.coverage("eod")
+        cov = (
+            meta.coverage("eod")
+            if generation == "v2"
+            else meta.ticker_coverage_v1("eod")
+        )
         if cov:
             oldest_edge = min(last for _, last in cov.values())
             click.echo(f"Oldest EOD coverage edge: {oldest_edge}")
@@ -399,6 +514,11 @@ def sql(config: Config, query: str) -> None:
     meta.*)."""
     from marketdata.query import connect
 
+    with MetaStore(config.meta_path) as meta:
+        if meta.storage_generation() == "v2":
+            raise click.ClickException(
+                "the SQL query surface is paused until its instrument_id migration lands"
+            )
     con = connect(config)
     con.execute(query)
     click.echo(con.pl())

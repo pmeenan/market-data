@@ -15,6 +15,7 @@ import polars as pl
 
 from marketdata.config import Config
 from marketdata.store.bars import BarStore
+from marketdata.store.meta import MetaStore
 
 
 def connect(config: Config) -> duckdb.DuckDBPyConnection:
@@ -27,6 +28,14 @@ def connect(config: Config) -> duckdb.DuckDBPyConnection:
       meta.*           the SQLite metadata tables (universe, coverage, ...)
     """
     bars = BarStore(config.data_dir)
+    if config.meta_path.exists():
+        with MetaStore(config.meta_path) as meta:
+            generation = meta.storage_generation()
+            bars.validate_generation(generation)
+            if generation == "v2":
+                raise RuntimeError(
+                    "query APIs are paused until their instrument_id migration lands"
+                )
     con = duckdb.connect()
     if any(config.eod_dir.glob("*.parquet")):
         con.execute(

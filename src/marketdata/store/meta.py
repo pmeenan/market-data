@@ -5,8 +5,8 @@ small relational state around it, so it stays tiny and trivially portable.
 The schema is versioned via PRAGMA user_version with explicit migrations.
 
 The v1 ticker registry and ticker-keyed coverage remain temporarily readable
-while M1 migrates quarantined bars.  New identity tables are instrument-keyed;
-production writes remain paused until the v2 bar/coverage migration is done.
+under explicitly named legacy storage while M1 converts ingestion. Canonical
+coverage is instrument-keyed and uses exact dataset keys.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ from marketdata.identity import (
     require_validation_state,
 )
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _SCHEMA_V1 = """
 CREATE TABLE IF NOT EXISTS tickers (
@@ -138,6 +138,26 @@ CREATE TABLE IF NOT EXISTS universe_resolutions (
 );
 """
 
+_SCHEMA_V3 = """
+CREATE TABLE IF NOT EXISTS coverage (
+    instrument_id TEXT NOT NULL REFERENCES instruments(instrument_id),
+    dataset_key   TEXT NOT NULL,
+    first_date    TEXT NOT NULL,
+    last_date     TEXT NOT NULL,
+    updated_at    TEXT NOT NULL,
+    PRIMARY KEY (instrument_id, dataset_key),
+    CHECK (dataset_key IN ('eod', 'intraday_1hour', 'intraday_5min')),
+    CHECK (first_date <= last_date)
+);
+
+CREATE TABLE IF NOT EXISTS storage_state (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+INSERT OR IGNORE INTO storage_state (key, value)
+VALUES ('storage_generation', 'v1');
+"""
+
 
 def _migrate(con: sqlite3.Connection) -> None:
     version = con.execute("PRAGMA user_version").fetchone()[0]
@@ -153,11 +173,28 @@ def _migrate(con: sqlite3.Connection) -> None:
         with con:
             con.executescript(_SCHEMA_V2)
             con.execute("PRAGMA user_version = 2")
-    elif version > SCHEMA_VERSION:
+        version = 2
+    if version < 3:
+        with con:
+            columns = {
+                row[1]
+                for row in con.execute("PRAGMA table_info('coverage')").fetchall()
+            }
+            if "ticker" in columns:
+                con.execute("ALTER TABLE coverage RENAME TO ticker_coverage_v1")
+            con.executescript(_SCHEMA_V3)
+            con.execute("PRAGMA user_version = 3")
+        version = 3
+    if version > SCHEMA_VERSION:
         raise RuntimeError(
             f"meta.db schema version {version} is newer than this code "
             f"supports ({SCHEMA_VERSION}) — update the tool"
         )
+    # Keep additions made during the still-uncommitted v3 implementation
+    # idempotent for local databases opened by an earlier working-tree build.
+    if version == 3:
+        with con:
+            con.executescript(_SCHEMA_V3)
 
 
 class MetaStore:
@@ -177,6 +214,25 @@ class MetaStore:
 
     def __exit__(self, *exc) -> None:
         self.close()
+
+    # ---- warehouse generation ------------------------------------------
+
+    def storage_generation(self) -> str:
+        row = self._con.execute(
+            "SELECT value FROM storage_state WHERE key = 'storage_generation'"
+        ).fetchone()
+        if row is None or row["value"] not in {"v1", "v2"}:
+            raise RuntimeError("meta.db has no valid storage_generation marker")
+        return str(row["value"])
+
+    def activate_canonical_generation(self) -> None:
+        """Record the v2 boundary and discard derived ticker coverage."""
+        with self._con:
+            self._con.execute(
+                """UPDATE storage_state SET value = 'v2'
+                   WHERE key = 'storage_generation'"""
+            )
+            self._con.execute("DELETE FROM ticker_coverage_v1")
 
     # ---- tickers ---------------------------------------------------------
 
@@ -247,6 +303,10 @@ class MetaStore:
                 ),
             )
         return instrument_id
+
+    def instrument_ids(self) -> set[str]:
+        rows = self._con.execute("SELECT instrument_id FROM instruments").fetchall()
+        return {str(row["instrument_id"]) for row in rows}
 
     def add_instrument_alias(
         self,
@@ -623,11 +683,15 @@ class MetaStore:
         ).fetchall()
         return [r["ticker"] for r in rows]
 
-    # ---- coverage --------------------------------------------------------
+    # ---- legacy v1 ticker coverage --------------------------------------
 
-    def get_coverage(self, ticker: str, dataset: str) -> tuple[date, date] | None:
+    def get_ticker_coverage_v1(
+        self, ticker: str, dataset: str
+    ) -> tuple[date, date] | None:
+        """Read quarantined v1 coverage (temporary ingestion compatibility)."""
         row = self._con.execute(
-            "SELECT first_date, last_date FROM coverage WHERE ticker = ? AND dataset = ?",
+            """SELECT first_date, last_date FROM ticker_coverage_v1
+               WHERE ticker = ? AND dataset = ?""",
             (ticker.upper(), dataset),
         ).fetchone()
         if row is None:
@@ -636,12 +700,14 @@ class MetaStore:
             row["last_date"]
         )
 
-    def set_coverage(self, ticker: str, dataset: str, first: date, last: date) -> None:
-        """Set the covered interval outright (used by reconcile and full
-        refreshes)."""
+    def set_ticker_coverage_v1(
+        self, ticker: str, dataset: str, first: date, last: date
+    ) -> None:
+        """Set quarantined v1 ticker coverage."""
         with self._con:
             self._con.execute(
-                """INSERT INTO coverage (ticker, dataset, first_date, last_date, updated_at)
+                """INSERT INTO ticker_coverage_v1
+                       (ticker, dataset, first_date, last_date, updated_at)
                    VALUES (?, ?, ?, ?, ?)
                    ON CONFLICT(ticker, dataset) DO UPDATE SET
                      first_date=excluded.first_date, last_date=excluded.last_date,
@@ -649,19 +715,20 @@ class MetaStore:
                 (ticker.upper(), dataset, first.isoformat(), last.isoformat(), _now()),
             )
 
-    def extend_coverage(
+    def extend_ticker_coverage_v1(
         self, ticker: str, dataset: str, first: date, last: date
     ) -> None:
         """Widen the covered interval to include [first, last]."""
-        existing = self.get_coverage(ticker, dataset)
+        existing = self.get_ticker_coverage_v1(ticker, dataset)
         if existing:
             first = min(first, existing[0])
             last = max(last, existing[1])
-        self.set_coverage(ticker, dataset, first, last)
+        self.set_ticker_coverage_v1(ticker, dataset, first, last)
 
-    def coverage(self, dataset: str) -> dict[str, tuple[date, date]]:
+    def ticker_coverage_v1(self, dataset: str) -> dict[str, tuple[date, date]]:
         rows = self._con.execute(
-            "SELECT ticker, first_date, last_date FROM coverage WHERE dataset = ?",
+            """SELECT ticker, first_date, last_date FROM ticker_coverage_v1
+               WHERE dataset = ?""",
             (dataset,),
         ).fetchall()
         return {
@@ -672,16 +739,17 @@ class MetaStore:
             for r in rows
         }
 
-    def replace_coverage(
+    def replace_ticker_coverage_v1(
         self, entries: dict[tuple[str, str], tuple[date, date]]
     ) -> None:
         """Atomically replace ALL coverage rows (used by reconcile): stale
         entries for vanished files must not survive a rebuild."""
         with self._con:
-            self._con.execute("DELETE FROM coverage")
+            self._con.execute("DELETE FROM ticker_coverage_v1")
             now = _now()
             self._con.executemany(
-                """INSERT INTO coverage (ticker, dataset, first_date, last_date, updated_at)
+                """INSERT INTO ticker_coverage_v1
+                       (ticker, dataset, first_date, last_date, updated_at)
                    VALUES (?, ?, ?, ?, ?)""",
                 [
                     (ticker.upper(), dataset, first.isoformat(), last.isoformat(), now)
@@ -689,12 +757,101 @@ class MetaStore:
                 ],
             )
 
-    def clear_coverage(self, dataset: str | None = None) -> None:
+    def clear_ticker_coverage_v1(self, dataset: str | None = None) -> None:
         with self._con:
             if dataset is None:
-                self._con.execute("DELETE FROM coverage")
+                self._con.execute("DELETE FROM ticker_coverage_v1")
             else:
-                self._con.execute("DELETE FROM coverage WHERE dataset = ?", (dataset,))
+                self._con.execute(
+                    "DELETE FROM ticker_coverage_v1 WHERE dataset = ?", (dataset,)
+                )
+
+    # ---- canonical instrument coverage ----------------------------------
+
+    def get_coverage(
+        self, instrument_id: str, dataset_key: str
+    ) -> tuple[date, date] | None:
+        dataset_key = require_dataset_key(dataset_key)
+        row = self._con.execute(
+            """SELECT first_date, last_date FROM coverage
+               WHERE instrument_id = ? AND dataset_key = ?""",
+            (instrument_id, dataset_key),
+        ).fetchone()
+        if row is None:
+            return None
+        return date.fromisoformat(row["first_date"]), date.fromisoformat(
+            row["last_date"]
+        )
+
+    def coverage(self, dataset_key: str) -> dict[str, tuple[date, date]]:
+        dataset_key = require_dataset_key(dataset_key)
+        rows = self._con.execute(
+            """SELECT instrument_id, first_date, last_date FROM coverage
+               WHERE dataset_key = ? ORDER BY instrument_id""",
+            (dataset_key,),
+        ).fetchall()
+        return {
+            row["instrument_id"]: (
+                date.fromisoformat(row["first_date"]),
+                date.fromisoformat(row["last_date"]),
+            )
+            for row in rows
+        }
+
+    def set_coverage(
+        self,
+        instrument_id: str,
+        dataset_key: str,
+        first: date,
+        last: date,
+    ) -> None:
+        dataset_key = require_dataset_key(dataset_key)
+        if first > last:
+            raise ValueError("coverage first date must not be after last date")
+        with self._con:
+            self._con.execute(
+                """INSERT INTO coverage
+                       (instrument_id, dataset_key, first_date, last_date, updated_at)
+                   VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT(instrument_id, dataset_key) DO UPDATE SET
+                     first_date=excluded.first_date, last_date=excluded.last_date,
+                     updated_at=excluded.updated_at""",
+                (
+                    instrument_id,
+                    dataset_key,
+                    first.isoformat(),
+                    last.isoformat(),
+                    _now(),
+                ),
+            )
+
+    def replace_coverage(
+        self, entries: dict[tuple[str, str], tuple[date, date]]
+    ) -> None:
+        """Atomically replace canonical coverage after reconciliation."""
+        normalized = []
+        now = _now()
+        for (instrument_id, dataset_key), (first, last) in entries.items():
+            dataset_key = require_dataset_key(dataset_key)
+            if first > last:
+                raise ValueError("coverage first date must not be after last date")
+            normalized.append(
+                (
+                    instrument_id,
+                    dataset_key,
+                    first.isoformat(),
+                    last.isoformat(),
+                    now,
+                )
+            )
+        with self._con:
+            self._con.execute("DELETE FROM coverage")
+            self._con.executemany(
+                """INSERT INTO coverage
+                       (instrument_id, dataset_key, first_date, last_date, updated_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                normalized,
+            )
 
 
 def _now() -> str:

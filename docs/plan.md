@@ -140,11 +140,15 @@ Scope:
       Completed 2026-08-27: schema-v2 identity registry, date-segmented alias
       reports, exact-dataset-key vendor-identifier resolution, and recorded
       universe resolution.
-- [ ] Implement the v2 storage migration, bar publication, and reconciliation
+- [x] Implement the v2 storage migration, bar publication, and reconciliation
   contracts in the architecture's persistent-data-model and identity/ingestion
   sections, including the D-017 generation boundary and D-019 layout. Those
   documents remain normative for the mechanics; this milestone owns their
-  implementation and migration reporting.
+  implementation and migration reporting. Completed 2026-08-27: stable
+  SHA-256 bucket paths and batch merge-upsert/snapshot publication, whole-root
+  v1 quarantine, deterministic fail-closed migration reporting, schema-v3
+  instrument coverage, an explicit guarded storage-generation boundary, and
+  conservative per-instrument reconciliation.
 - [ ] Move ingestion and query APIs to `instrument_id`. Ticker conveniences
       require an as-of range and resolve through aliases; active DuckDB views
       never union quarantined v1 files.

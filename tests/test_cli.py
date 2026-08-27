@@ -152,3 +152,80 @@ def test_reconcile_command(tmp_path, monkeypatch):
     result = runner.invoke(main, ["--data-dir", data_dir, "reconcile"])
     assert result.exit_code == 0
     assert "eod: coverage rebuilt for 1 tickers" in result.output
+
+
+def test_migrate_v2_bars_command_writes_default_report(tmp_path):
+    from marketdata.store import MetaStore
+
+    data_dir = tmp_path / "data"
+    MetaStore(data_dir / "meta.db").close()
+
+    result = CliRunner().invoke(main, ["--data-dir", str(data_dir), "migrate-v2-bars"])
+
+    assert result.exit_code == 0, result.output
+    assert "Migration pass complete: no source files" in result.output
+    assert (
+        data_dir / "quarantine" / "v1-ticker-bars" / "migration-report.json"
+    ).exists()
+
+
+def test_legacy_ingestion_is_blocked_after_v2_boundary(tmp_path, monkeypatch):
+    from marketdata.config import Config
+    from marketdata.store import MetaStore
+
+    data_dir = tmp_path / "data"
+    with MetaStore(data_dir / "meta.db") as meta:
+        meta.set_ticker_coverage_v1("AAPL", "eod", date(2000, 1, 1), date(2025, 1, 1))
+        meta.activate_canonical_generation()
+        assert meta.ticker_coverage_v1("eod") == {}
+    Config(data_dir, None).ensure_dirs()
+    assert not (data_dir / "eod").exists()
+    monkeypatch.setattr(cli_mod, "_client", _fake_client({}))
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "--data-dir",
+            str(data_dir),
+            "backfill",
+            "eod",
+            "-t",
+            "AAPL",
+            "--start",
+            "2024-01-01",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "ticker-keyed ingestion is disabled" in result.output
+    assert not (data_dir / "eod").exists()
+
+
+def test_canonical_reconcile_issues_exit_nonzero(tmp_path):
+    from marketdata.store import BarStore, MetaStore
+    from marketdata.store.bars import eod_frame
+
+    data_dir = tmp_path / "data"
+    with MetaStore(data_dir / "meta.db") as meta:
+        meta.activate_canonical_generation()
+    BarStore(data_dir).publish_eod(
+        {"unknown": eod_frame("UNKNOWN", [eod_row(date(2024, 1, 2))])}
+    )
+
+    result = CliRunner().invoke(main, ["--data-dir", str(data_dir), "reconcile"])
+
+    assert result.exit_code == 1
+    assert "unknown_instrument" in result.output
+
+
+def test_migration_os_error_is_reported_as_click_error(tmp_path, monkeypatch):
+    def fail_migration(*args, **kwargs):
+        raise OSError("simulated permission failure")
+
+    monkeypatch.setattr(cli_mod, "migrate_v1_bars", fail_migration)
+    result = CliRunner().invoke(
+        main, ["--data-dir", str(tmp_path / "data"), "migrate-v2-bars"]
+    )
+
+    assert result.exit_code == 1
+    assert "Error: simulated permission failure" in result.output

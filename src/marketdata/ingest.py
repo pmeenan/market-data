@@ -30,7 +30,7 @@ from datetime import date, timedelta
 import polars as pl
 
 from marketdata.store import BarStore, MetaStore
-from marketdata.store.bars import eod_frame, intraday_frame
+from marketdata.store.bars import INTRADAY_FREQS, eod_frame, intraday_frame
 from marketdata.tiingo import TiingoClient, TiingoError
 
 log = logging.getLogger(__name__)
@@ -49,7 +49,6 @@ REFRESH_WINDOW_DAYS = 7
 PUBLICATION_LAG_DAYS = 5
 INTRADAY_PUBLICATION_LAG_DAYS = 1
 
-INTRADAY_FREQS = ("5min", "1hour")
 DEFAULT_INTRADAY_FREQ = "1hour"
 
 
@@ -205,7 +204,7 @@ def _full_refresh_eod(
             )
     bars.replace_eod(ticker, df)
     covered = _covered_through(df["date"].max(), end, today, PUBLICATION_LAG_DAYS)
-    meta.set_coverage(
+    meta.set_ticker_coverage_v1(
         ticker, "eod", min(first, df["date"].min()), covered or df["date"].max()
     )
 
@@ -227,7 +226,7 @@ def backfill_eod(
     result = IngestResult()
     for i, ticker in enumerate(tickers, 1):
         try:
-            covered = None if force else meta.get_coverage(ticker, "eod")
+            covered = None if force else meta.get_ticker_coverage_v1(ticker, "eod")
             segments = _missing_segments((start, end), covered)
             if not segments:
                 result.skipped.append(ticker)
@@ -277,7 +276,7 @@ def backfill_eod(
             elif new_first is not None and new_last is not None:
                 for df in pending_frames:
                     bars.write_eod(ticker, df)
-                meta.set_coverage(ticker, "eod", new_first, new_last)
+                meta.set_ticker_coverage_v1(ticker, "eod", new_first, new_last)
                 (result.fetched if got_rows else result.skipped).append(ticker)
             else:
                 result.skipped.append(ticker)
@@ -308,7 +307,7 @@ def update_eod(
     result = IngestResult()
     for i, ticker in enumerate(tickers, 1):
         try:
-            covered = meta.get_coverage(ticker, "eod")
+            covered = meta.get_ticker_coverage_v1(ticker, "eod")
             if covered is None:
                 sub = backfill_eod(client, bars, meta, [ticker], default_start)
                 result.fetched += sub.fetched
@@ -336,7 +335,9 @@ def update_eod(
                     result.refreshed.append(ticker)
                 else:
                     bars.write_eod(ticker, df)
-                    meta.set_coverage(ticker, "eod", first, max(last, df["date"].max()))
+                    meta.set_ticker_coverage_v1(
+                        ticker, "eod", first, max(last, df["date"].max())
+                    )
                     result.fetched.append(ticker)
             else:
                 result.skipped.append(ticker)
@@ -369,7 +370,7 @@ def backfill_intraday(
     result = IngestResult()
     for i, ticker in enumerate(tickers, 1):
         try:
-            covered = meta.get_coverage(ticker, dataset)
+            covered = meta.get_ticker_coverage_v1(ticker, dataset)
             segments = _missing_segments((start, end), covered)
             if not segments:
                 result.skipped.append(ticker)
@@ -397,7 +398,9 @@ def backfill_intraday(
                         # covered — it stays refreshable until the day ends.
                         covered_to = min(covered_to, today - timedelta(days=1))
                     if covered_to is not None and covered_to >= chunk_start:
-                        meta.extend_coverage(ticker, dataset, chunk_start, covered_to)
+                        meta.extend_ticker_coverage_v1(
+                            ticker, dataset, chunk_start, covered_to
+                        )
             (result.fetched if wrote_any else result.skipped).append(ticker)
             if i % 10 == 0 or i == len(tickers):
                 log.info(
@@ -466,5 +469,5 @@ def reconcile(bars: BarStore, meta: MetaStore) -> dict[str, int]:
                 if lo is not None and lo <= cap:
                     entries[(ticker_dir.name, dataset)] = (lo, min(hi, cap))
                     counts[dataset] += 1
-    meta.replace_coverage(entries)
+    meta.replace_ticker_coverage_v1(entries)
     return counts

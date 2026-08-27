@@ -165,6 +165,10 @@ Identity and ingestion metadata:
 - `coverage`: one closed interval per (`instrument_id`, `dataset_key`). It is
   derived state that `reconcile` can atomically rebuild conservatively from
   Parquet; verified-empty tails may be forgotten and safely refetched.
+- `storage_state`: the explicit `v1`/`v2` generation marker. Establishing the
+  D-017 boundary sets `v2` and clears derived ticker-keyed v1 coverage; legacy
+  ingestion/query commands then fail closed until their instrument-keyed paths
+  replace them.
 - scheduler/request accounting: billing-period byte usage and persisted
   global date-band progress needed by D-013. This is operational state, not a
   second statement of bar coverage.
