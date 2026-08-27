@@ -23,7 +23,7 @@ def connect(config: Config) -> duckdb.DuckDBPyConnection:
     Views (when the underlying files exist):
       eod              all daily bars, all tickers
       intraday_{freq}  one view per intraday frequency present on disk
-                       (e.g. intraday_1hour, intraday_1min)
+                       (intraday_1hour or intraday_5min)
       meta.*           the SQLite metadata tables (universe, coverage, ...)
     """
     bars = BarStore(config.data_dir)

@@ -22,7 +22,7 @@ class Config:
     def eod_dir(self) -> Path:
         return self.data_dir / "eod"
 
-    def intraday_dir(self, freq: str = "1min") -> Path:
+    def intraday_dir(self, freq: str = "1hour") -> Path:
         return self.data_dir / "intraday" / freq
 
     def ensure_dirs(self) -> None:

@@ -113,10 +113,11 @@ raw columns reflect prices as traded.
 
 ```
 data/                       (gitignored; set MARKET_DATA_DIR to relocate)
-  meta.db                   SQLite: universes, tickers, coverage intervals
+  meta.db                   SQLite: identities, universes, transitional coverage
   eod/AAPL.parquet          full daily history per ticker
   intraday/1hour/AAPL/2025.parquet
 src/marketdata/
+  identity.py               fail-closed identity resolution result contracts
   tiingo.py                 Tiingo REST client (throttling, retries)
   store/bars.py             Parquet bar storage (merge-upsert writes)
   store/meta.py             SQLite metadata store
@@ -128,13 +129,13 @@ src/marketdata/
 
 ## Status
 
-Milestone **M0 (plan the plan)**. The data warehouse above (ingestion,
-storage, CLI) is built and tested; the research/backtesting layer is being
-planned. The first study: whether stocks that open significantly down tend to
-recover over the next few hours. Candidate features beyond confirmed scope
-(web UI, realtime layer, data-quality tooling) are tracked in
-[docs/features.md](docs/features.md) pending triage — they are not product
-yet.
+Milestone **M1 (identity-safe canonical warehouse)** is in progress after the
+owner approved and closed M0 on 2026-08-27. The identity registry and explicit
+resolution reports are implemented; migration from the working ticker-keyed v1
+substrate to instrument-keyed hash-bucket storage is next. Production ingestion
+remains paused until that migration is complete. The first planned study asks
+whether stocks that open significantly down tend to recover over the next few
+hours; the research/backtesting layer begins in M3.
 
 ## Start here
 

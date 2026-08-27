@@ -152,9 +152,13 @@ Identity and ingestion metadata:
   human-readable description are attributes, not identity.
 - `instrument_aliases`: ticker, exchange, asset type, and closed effective
   date range keyed to an instrument. Conflicting overlapping aliases remain
-  unresolved and visible.
+  unresolved and visible. The registry helper represents an active/open-ended
+  alias consistently with the closed `9999-12-31` sentinel; callers pass no
+  end date rather than choosing a snapshot date or today's date.
 - `vendor_identifiers`: identifier value and type, instrument, `dataset_key`,
-  validated envelope, validation state, and evidence.
+  validated envelope, validation state, and evidence. Adjacent or overlapping
+  validated evidence rows for the same identifier, instrument, and exact
+  dataset key may jointly cover a request segment; an evidence gap never does.
 - `universe`: original (`year`, `ticker`) seed record, rank, and dollar-volume
   value. Resolution to exactly one instrument is recorded separately so the
   imported source value is not destroyed.
@@ -372,8 +376,8 @@ Implementations and tests preserve these properties:
 
 This document does not assign milestone scope. [plan.md](plan.md) is the sole
 source for milestone names, status, and exit criteria. Its M1–M4 ladder is the
-proposed implementation sequence, but M1 must not begin until the owner reviews
-the ladder and explicitly closes M0.
+approved implementation sequence; the owner reviewed the ladder, closed M0,
+and opened M1 on 2026-08-27.
 
 The architecture imposes only these ordering constraints on that planning:
 

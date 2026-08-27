@@ -107,21 +107,11 @@ build → commit loop, on-demand reviews, and the human commit gate.
 
 ## Current status
 
-Milestone **M0 (plan the plan)** — the data-warehouse substrate (ingestion,
-storage, CLI) was scaffolded before this workflow was adopted and works, with
-tests. Feature triage and the intraday depth/semantics spike are done
-(2026-08-26): scope, backfill phasing/budget priority (D-011, D-013), universe
-reframing (D-010), and intraday semantics (D-012) are settled; the instrument-
-identity spike is also done (D-014: stable instrument ids + date-ranged
-aliases; unresolved segments fail closed). The engine
-spike is done (D-015: a project-native DuckDB/polars vectorized event engine;
-stateful portfolio simulation is deferred). The first full architecture draft
-is complete, including D-016's research-result publication and D-017's safe
-identity-migration storage contracts;
-the Parquet-layout benchmark is done (D-019: stable 256-way hash buckets), and
-the real M1–M4 milestone ladder is written. The toolchain is locked and checked
-in CI (D-018). Production ingestion is paused until the M1 identity migration;
-the backtest layer does not exist yet. See
-[docs/plan.md](docs/plan.md). M0 remains open pending the owner's plan walk and
-approval. Keep this paragraph short and current when plan.md milestone status
-changes (rule 4).
+Milestone **M1 (identity-safe canonical warehouse)** is in progress after the
+owner approved the plan and closed M0 on 2026-08-27. The schema-v2 identity
+registry and explicit alias/vendor/universe resolution reports are implemented;
+the v2 hash-bucket bar migration, instrument-keyed ingestion/query paths, and
+CSV transport remain. Production ingestion stays paused until that migration
+is complete; the backtest layer does not exist yet. See
+[docs/plan.md](docs/plan.md). Keep this paragraph short and current when plan.md
+milestone status changes (rule 4).

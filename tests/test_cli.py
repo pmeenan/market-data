@@ -74,7 +74,7 @@ def test_backfill_success_exits_zero(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
 
 
-def test_intraday_rejects_unknown_freq(tmp_path, monkeypatch):
+def test_intraday_rejects_unsupported_freq(tmp_path, monkeypatch):
     monkeypatch.setattr(cli_mod, "_client", _fake_client({}))
     runner = CliRunner()
     result = runner.invoke(
@@ -89,7 +89,7 @@ def test_intraday_rejects_unknown_freq(tmp_path, monkeypatch):
             "--start",
             "2024-01-01",
             "--freq",
-            "2min",
+            "1min",
         ],
     )
     assert result.exit_code != 0

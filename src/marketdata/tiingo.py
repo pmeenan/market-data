@@ -102,7 +102,7 @@ class TiingoClient:
         ticker: str,
         start: date | str,
         end: date | str | None = None,
-        freq: str = "1min",
+        freq: str = "1hour",
     ) -> list[dict[str, Any]]:
         """Intraday bars from Tiingo's IEX feed (unadjusted)."""
         params: dict[str, Any] = {

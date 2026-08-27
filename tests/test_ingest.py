@@ -305,8 +305,11 @@ def test_intraday_leading_backfill_and_freq_validation(tmp_path):
     client = FakeTiingo({})
     import pytest
 
-    with pytest.raises(ValueError):
-        backfill_intraday(client, bars, meta, ["AAPL"], date(2024, 1, 1), freq="2min")
+    for unsupported in ("1min", "2min", "15min", "30min"):
+        with pytest.raises(ValueError):
+            backfill_intraday(
+                client, bars, meta, ["AAPL"], date(2024, 1, 1), freq=unsupported
+            )
 
     backfill_intraday(
         client, bars, meta, ["AAPL"], date(2024, 6, 1), date(2024, 7, 31), freq="1hour"

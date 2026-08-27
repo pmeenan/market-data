@@ -125,13 +125,13 @@ class BarStore:
     def eod_path(self, ticker: str) -> Path:
         return self.data_dir / "eod" / f"{_safe(ticker)}.parquet"
 
-    def intraday_path(self, ticker: str, year: int, freq: str = "1min") -> Path:
+    def intraday_path(self, ticker: str, year: int, freq: str = "1hour") -> Path:
         return self.data_dir / "intraday" / freq / _safe(ticker) / f"{year}.parquet"
 
     def eod_glob(self) -> str:
         return str(self.data_dir / "eod" / "*.parquet")
 
-    def intraday_glob(self, freq: str = "1min") -> str:
+    def intraday_glob(self, freq: str = "1hour") -> str:
         return str(self.data_dir / "intraday" / freq / "*" / "*.parquet")
 
     # ---- EOD -------------------------------------------------------------
@@ -169,7 +169,7 @@ class BarStore:
 
     # ---- intraday --------------------------------------------------------
 
-    def write_intraday(self, ticker: str, df: pl.DataFrame, freq: str = "1min") -> int:
+    def write_intraday(self, ticker: str, df: pl.DataFrame, freq: str = "1hour") -> int:
         """Merge-upsert intraday bars, splitting rows across per-year files."""
         total = 0
         for (year,), part in df.group_by(pl.col("ts").dt.year(), maintain_order=True):
@@ -179,7 +179,7 @@ class BarStore:
             total += merged.height
         return total
 
-    def read_intraday(self, ticker: str, freq: str = "1min") -> pl.DataFrame | None:
+    def read_intraday(self, ticker: str, freq: str = "1hour") -> pl.DataFrame | None:
         tdir = self.data_dir / "intraday" / freq / _safe(ticker)
         files = sorted(tdir.glob("*.parquet")) if tdir.exists() else []
         if not files:
