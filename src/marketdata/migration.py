@@ -1,16 +1,17 @@
-"""Generation-safe migration and reconciliation for canonical v2 bars."""
+"""Generation-safe migration from quarantined v1 bars to canonical v2."""
 
 from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, replace
-from datetime import date, timedelta
+from datetime import date
 from pathlib import Path
 from typing import Literal
 
 import polars as pl
 
-from marketdata.store.bars import INTRADAY_FREQS, BarStore, instrument_bucket
+from marketdata.reconcile import ReconciliationIssue, reconcile_canonical
+from marketdata.store.bars import BarStore, instrument_bucket
 from marketdata.store.meta import MetaStore
 
 MigrationStatus = Literal[
@@ -33,21 +34,6 @@ class MigrationItem:
     instrument_ids: tuple[str, ...] = ()
     target: str | None = None
     detail: str | None = None
-
-
-@dataclass(frozen=True)
-class ReconciliationIssue:
-    instrument_id: str
-    dataset_key: str
-    issue: str
-    detail: str
-
-
-@dataclass(frozen=True)
-class ReconciliationReport:
-    counts: dict[str, int]
-    coverage: dict[tuple[str, str], tuple[date, date]]
-    issues: tuple[ReconciliationIssue, ...]
 
 
 @dataclass(frozen=True)
@@ -258,125 +244,6 @@ def migrate_v1_bars(
     report = MigrationReport(tuple(items), reconciliation.issues)
     _write_json_atomic(report.to_dict(), destination)
     return report
-
-
-def reconcile_canonical(bars: BarStore, meta: MetaStore) -> ReconciliationReport:
-    """Conservatively rebuild instrument coverage from canonical files."""
-    entries: dict[tuple[str, str], tuple[date, date]] = {}
-    issues: list[ReconciliationIssue] = []
-    dataset_keys = ("eod", *(f"intraday_{freq}" for freq in INTRADAY_FREQS))
-    counts = dict.fromkeys(dataset_keys, 0)
-    known_instruments = meta.instrument_ids()
-
-    eod_files = bars.canonical_eod_files()
-    if eod_files:
-        frame = (
-            pl.scan_parquet(eod_files, include_file_paths="_source_path")
-            .group_by("instrument_id", "_source_path")
-            .agg(pl.col("date").min().alias("lo"), pl.col("date").max().alias("hi"))
-            .collect()
-        )
-        for row in frame.iter_rows(named=True):
-            path = Path(row["_source_path"])
-            expected_bucket = path.parent.name.removeprefix("bucket=")
-            if row["instrument_id"] not in known_instruments:
-                issues.append(
-                    ReconciliationIssue(
-                        row["instrument_id"],
-                        "eod",
-                        "unknown_instrument",
-                        path.relative_to(bars.data_dir).as_posix(),
-                    )
-                )
-                continue
-            if instrument_bucket(row["instrument_id"]) != expected_bucket:
-                issues.append(
-                    ReconciliationIssue(
-                        row["instrument_id"],
-                        "eod",
-                        "wrong_bucket",
-                        path.relative_to(bars.data_dir).as_posix(),
-                    )
-                )
-                continue
-            entries[(row["instrument_id"], "eod")] = (row["lo"], row["hi"])
-            counts["eod"] += 1
-
-    cap = date.today() - timedelta(days=1)
-    for freq in INTRADAY_FREQS:
-        dataset_key = f"intraday_{freq}"
-        files = bars.canonical_intraday_files(freq)
-        by_instrument: dict[str, list[tuple[int, date, date]]] = {}
-        if files:
-            frame = (
-                pl.scan_parquet(files, include_file_paths="_source_path")
-                .group_by("instrument_id", "_source_path")
-                .agg(
-                    pl.col("ts").dt.date().min().alias("lo"),
-                    pl.col("ts").dt.date().max().alias("hi"),
-                )
-                .collect()
-            )
-        else:
-            frame = pl.DataFrame()
-        for row in frame.iter_rows(named=True):
-            path = Path(row["_source_path"])
-            year = int(path.parent.parent.name.removeprefix("year="))
-            if row["instrument_id"] not in known_instruments:
-                issues.append(
-                    ReconciliationIssue(
-                        row["instrument_id"],
-                        dataset_key,
-                        "unknown_instrument",
-                        path.relative_to(bars.data_dir).as_posix(),
-                    )
-                )
-                continue
-            if instrument_bucket(row["instrument_id"]) != path.parent.name.removeprefix(
-                "bucket="
-            ):
-                issues.append(
-                    ReconciliationIssue(
-                        row["instrument_id"],
-                        dataset_key,
-                        "wrong_bucket",
-                        path.relative_to(bars.data_dir).as_posix(),
-                    )
-                )
-                continue
-            by_instrument.setdefault(row["instrument_id"], []).append(
-                (year, row["lo"], row["hi"])
-            )
-        for instrument_id, partitions in sorted(by_instrument.items()):
-            years = sorted(year for year, _, _ in partitions)
-            expected = list(range(years[0], years[-1] + 1))
-            if years != expected:
-                issues.append(
-                    ReconciliationIssue(
-                        instrument_id,
-                        dataset_key,
-                        "disconnected_years",
-                        f"present={years}, expected={expected}",
-                    )
-                )
-                continue
-            lo = min(partition[1] for partition in partitions)
-            hi = min(max(partition[2] for partition in partitions), cap)
-            if lo <= hi:
-                entries[(instrument_id, dataset_key)] = (lo, hi)
-                counts[dataset_key] += 1
-            else:
-                issues.append(
-                    ReconciliationIssue(
-                        instrument_id,
-                        dataset_key,
-                        "current_day_only",
-                        f"earliest bar {lo} is after completed-day cap {cap}",
-                    )
-                )
-
-    meta.replace_coverage(entries)
-    return ReconciliationReport(counts, entries, tuple(issues))
 
 
 def _publish_group(

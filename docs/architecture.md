@@ -1,9 +1,9 @@
 # Architecture
 
 > **Status: first full draft (2026-08-26).** This describes the target system.
-> The ticker-keyed storage and metadata currently in the repository are the v1
-> substrate being migrated, not an alternate supported architecture. Milestone
-> scope and exit criteria live only in [plan.md](plan.md).
+> The ticker-keyed v1 substrate is quarantined migration input, not an alternate
+> supported architecture. Milestone scope and exit criteria live only in
+> [plan.md](plan.md).
 
 ## Goals and boundaries
 

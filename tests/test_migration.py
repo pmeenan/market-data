@@ -5,7 +5,8 @@ from datetime import date
 
 import polars as pl
 
-from marketdata.migration import migrate_v1_bars, reconcile_canonical
+from marketdata.migration import migrate_v1_bars
+from marketdata.reconcile import reconcile_canonical
 from marketdata.store import BarStore, MetaStore
 from marketdata.store.bars import eod_frame, instrument_bucket, intraday_frame
 

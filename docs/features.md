@@ -16,7 +16,7 @@ Status legend: `confirmed` · `proposed` · `rejected (D-NNN)`
 | --- | --- | --- |
 | Annual universes imported from owner's seed CSV (Year,Ticker,MedianDollarVolume) | confirmed | Built and tested |
 | Universe bootstrap from Tiingo supported-tickers + dollar-volume ranking | confirmed | Built; for years the seed CSV doesn't cover |
-| EOD daily backfill + nightly incremental update (resumable, idempotent) | confirmed | v1 built and tested; production ingestion is paused until the D-014 M1 identity migration |
+| EOD daily backfill + nightly incremental update (resumable, idempotent) | confirmed | Instrument-owned canonical primitives are built and tested; operator ingestion stays paused until M1 completes the D-014 validation flow |
 | Intraday ingestion: 1-hour **and 5-minute** bars | confirmed | Storage/query surface built; all production ingestion awaits the D-014 M1 identity migration/resolution, and historical intraday also needs client hardening for RE-002/RE-004. Measured history begins 2016-12-12; direct hourly omits the opening half-hour (intraday-spike.md, D-012) |
 | Phased backfill: seed EOD 20y + 1-hour from 2016-12-12, then all-ticker EOD 20y, then seed 5-minute newest-to-oldest from current to 2016-12-12; current all-ticker collection continues daily | confirmed | Scope and phase priority in D-011; D-013 makes 5-minute history global-date-band-first, caps it at 30 GB/month, and reserves the remaining 10 GB for current/ongoing work |
 | Point-in-time universe storage (per-year membership) | confirmed | Built; reframed by D-010 — a dataset seed filter and historical record, not backtest membership |

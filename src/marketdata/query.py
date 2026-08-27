@@ -1,104 +1,263 @@
-"""DuckDB query surface over the Parquet warehouse.
-
-This is the read path for research and backtesting: get a DuckDB
-connection with an `eod` view plus one `intraday_{freq}` view per
-frequency present on disk (and the SQLite metadata tables attached), or
-pull bars straight into a polars frame.
-"""
+"""Read-only DuckDB query surface over canonical instrument-owned bars."""
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import date
+from pathlib import Path
 
 import duckdb
 import polars as pl
 
 from marketdata.config import Config
-from marketdata.store.bars import BarStore
+from marketdata.store.bars import (
+    CANONICAL_EOD_SCHEMA,
+    CANONICAL_INTRADAY_SCHEMA,
+    INTRADAY_FREQS,
+    BarStore,
+    require_canonical_generation,
+    require_intraday_freq,
+)
 from marketdata.store.meta import MetaStore
 
 
-def connect(config: Config) -> duckdb.DuckDBPyConnection:
-    """DuckDB connection with views over the warehouse.
+def _sql_path(path: str | Path) -> str:
+    return str(path).replace("'", "''")
 
-    Views (when the underlying files exist):
-      eod              all daily bars, all tickers
-      intraday_{freq}  one view per intraday frequency present on disk
-                       (intraday_1hour or intraday_5min)
-      meta.*           the SQLite metadata tables (universe, coverage, ...)
-    """
+
+def connect(config: Config) -> duckdb.DuckDBPyConnection:
+    """Expose active v2 bars, alias display views, and read-only metadata."""
     bars = BarStore(config.data_dir)
-    if config.meta_path.exists():
-        with MetaStore(config.meta_path) as meta:
-            generation = meta.storage_generation()
-            bars.validate_generation(generation)
-            if generation == "v2":
-                raise RuntimeError(
-                    "query APIs are paused until their instrument_id migration lands"
-                )
+    if not config.meta_path.exists():
+        raise RuntimeError("canonical queries require meta.db")
+    with MetaStore(config.meta_path) as meta:
+        require_canonical_generation(bars, meta.storage_generation())
+
     con = duckdb.connect()
-    if any(config.eod_dir.glob("*.parquet")):
+    con.execute("SET TimeZone='UTC'")
+    con.execute(
+        f"ATTACH '{_sql_path(config.meta_path)}' AS meta (TYPE sqlite, READ_ONLY)"
+    )
+    if bars.canonical_eod_files():
         con.execute(
-            f"CREATE VIEW eod AS SELECT * FROM read_parquet('{bars.eod_glob()}')"
+            f"CREATE VIEW eod AS SELECT * FROM read_parquet("
+            f"'{_sql_path(bars.canonical_eod_glob())}')"
         )
-    intraday_root = config.data_dir / "intraday"
-    if intraday_root.exists():
-        for freq_dir in sorted(p for p in intraday_root.iterdir() if p.is_dir()):
-            if any(freq_dir.rglob("*.parquet")):
-                con.execute(
-                    f"CREATE VIEW intraday_{freq_dir.name} AS SELECT * FROM "
-                    f"read_parquet('{bars.intraday_glob(freq_dir.name)}')"
-                )
-    if config.meta_path.exists():
-        con.execute(f"ATTACH '{config.meta_path}' AS meta (TYPE sqlite, READ_ONLY)")
+        _create_alias_view(con, "eod")
+    for freq in INTRADAY_FREQS:
+        if bars.canonical_intraday_files(freq):
+            view = f"intraday_{freq}"
+            con.execute(
+                f"CREATE VIEW {view} AS SELECT * FROM read_parquet("
+                f"'{_sql_path(bars.canonical_intraday_glob(freq))}')"
+            )
+            _create_alias_view(con, view)
     return con
+
+
+def _create_alias_view(con: duckdb.DuckDBPyConnection, view: str) -> None:
+    """Derive a display ticker only where alias evidence is unambiguous."""
+    date_expr = _date_expression(view, "bars")
+    con.execute(
+        f"""CREATE VIEW {view}_with_alias AS
+            SELECT bars.*,
+                   (SELECT CASE WHEN count(DISTINCT aliases.ticker) = 1
+                                THEN min(aliases.ticker) END
+                    FROM meta.instrument_aliases AS aliases
+                    WHERE aliases.instrument_id = bars.instrument_id
+                      AND {date_expr}
+                          BETWEEN CAST(aliases.start_date AS DATE)
+                              AND CAST(aliases.end_date AS DATE)) AS ticker
+            FROM {view} AS bars
+            """
+    )
 
 
 def load_eod(
     config: Config,
-    tickers: list[str] | None = None,
+    *,
+    instrument_ids: Sequence[str] | None = None,
     start: date | str | None = None,
     end: date | str | None = None,
 ) -> pl.DataFrame:
-    """Daily bars as a polars frame, filtered by ticker and date range."""
-    con = connect(config)
-    clauses, params = [], []
-    if tickers:
-        placeholders = ",".join("?" for _ in tickers)
-        clauses.append(f"ticker IN ({placeholders})")
-        params.extend(t.upper() for t in tickers)
-    if start:
-        clauses.append("date >= ?")
-        params.append(str(start))
-    if end:
-        clauses.append("date <= ?")
-        params.append(str(end))
-    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-    return con.execute(f"SELECT * FROM eod {where} ORDER BY ticker, date", params).pl()
+    """Load daily bars filtered by stable instrument ids and date."""
+    return _load(config, "eod", instrument_ids, start, end)
 
 
 def load_intraday(
     config: Config,
-    tickers: list[str] | None = None,
+    *,
+    instrument_ids: Sequence[str] | None = None,
     start: date | str | None = None,
     end: date | str | None = None,
     freq: str = "1hour",
 ) -> pl.DataFrame:
-    """Intraday bars as a polars frame, filtered by ticker and date range.
-    Timestamps are UTC; date filters compare against the UTC date of `ts`."""
+    """Load UTC intraday bars filtered by stable ids and UTC date."""
+    require_intraday_freq(freq)
+    return _load(config, f"intraday_{freq}", instrument_ids, start, end)
+
+
+def load_eod_by_ticker(
+    config: Config,
+    tickers: Sequence[str],
+    *,
+    start: date | str,
+    end: date | str,
+) -> pl.DataFrame:
+    """Resolve ticker aliases over an explicit range, then load daily bars."""
+    return _load_by_ticker(config, "eod", tickers, start, end)
+
+
+def load_intraday_by_ticker(
+    config: Config,
+    tickers: Sequence[str],
+    *,
+    start: date | str,
+    end: date | str,
+    freq: str = "1hour",
+) -> pl.DataFrame:
+    """Resolve ticker aliases over an explicit range, then load intraday bars."""
+    require_intraday_freq(freq)
+    return _load_by_ticker(config, f"intraday_{freq}", tickers, start, end)
+
+
+def _load(
+    config: Config,
+    view: str,
+    instrument_ids: Sequence[str] | None,
+    start: date | str | None,
+    end: date | str | None,
+) -> pl.DataFrame:
     con = connect(config)
-    clauses, params = [], []
-    if tickers:
-        placeholders = ",".join("?" for _ in tickers)
-        clauses.append(f"ticker IN ({placeholders})")
-        params.extend(t.upper() for t in tickers)
-    if start:
-        clauses.append("CAST(ts AS DATE) >= ?")
+    selected_ids = _validated_instrument_ids(con, instrument_ids)
+    if selected_ids == () or not _view_exists(con, view):
+        return _empty_frame(view)
+
+    clauses: list[str] = []
+    params: list[str] = []
+    if selected_ids is not None:
+        placeholders = ",".join("?" for _ in selected_ids)
+        clauses.append(f"instrument_id IN ({placeholders})")
+        params.extend(selected_ids)
+    date_expr = _date_expression(view)
+    if start is not None:
+        clauses.append(f"{date_expr} >= ?")
         params.append(str(start))
-    if end:
-        clauses.append("CAST(ts AS DATE) <= ?")
+    if end is not None:
+        clauses.append(f"{date_expr} <= ?")
         params.append(str(end))
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     return con.execute(
-        f"SELECT * FROM intraday_{freq} {where} ORDER BY ticker, ts", params
+        f"SELECT * FROM {view} {where} ORDER BY instrument_id, {_time_column(view)}",
+        params,
     ).pl()
+
+
+def _load_by_ticker(
+    config: Config,
+    view: str,
+    tickers: Sequence[str],
+    start: date | str,
+    end: date | str,
+) -> pl.DataFrame:
+    stripped_tickers = [ticker.strip() for ticker in tickers]
+    if any(not ticker for ticker in stripped_tickers):
+        raise ValueError("tickers must not contain empty values")
+    normalized_tickers = tuple(
+        dict.fromkeys(ticker.upper() for ticker in stripped_tickers)
+    )
+    con = connect(config)
+    if not normalized_tickers:
+        return _empty_frame(view, include_ticker=True)
+    start_date = date.fromisoformat(str(start))
+    end_date = date.fromisoformat(str(end))
+    if start_date > end_date:
+        raise ValueError("start must not be after end")
+
+    segments: list[tuple[str, str, date, date]] = []
+    with MetaStore(config.meta_path) as meta:
+        for ticker in normalized_tickers:
+            report = meta.resolve_alias_range(ticker, start_date, end_date)
+            if not report.resolved:
+                detail = ", ".join(
+                    f"{segment.start}..{segment.end}={segment.status}"
+                    for segment in report.segments
+                    if segment.instrument_id is None
+                )
+                raise ValueError(f"ticker {report.ticker} is unresolved: {detail}")
+            segments.extend(
+                (report.ticker, segment.instrument_id, segment.start, segment.end)
+                for segment in report.segments
+                if segment.instrument_id is not None
+            )
+    if not _view_exists(con, view):
+        return _empty_frame(view, include_ticker=True)
+
+    values = ", ".join("(?, ?, CAST(? AS DATE), CAST(? AS DATE))" for _ in segments)
+    params = [str(value) for segment in segments for value in segment]
+    date_expr = _date_expression(view, "bars")
+    return con.execute(
+        f"""WITH segments(ticker, instrument_id, start_date, end_date) AS (
+                VALUES {values}
+            )
+            SELECT bars.*, segments.ticker
+            FROM {view} AS bars
+            JOIN segments
+              ON segments.instrument_id = bars.instrument_id
+             AND {date_expr} BETWEEN segments.start_date AND segments.end_date
+            ORDER BY bars.instrument_id, bars.{_time_column(view)}""",
+        params,
+    ).pl()
+
+
+def _validated_instrument_ids(
+    con: duckdb.DuckDBPyConnection, instrument_ids: Sequence[str] | None
+) -> tuple[str, ...] | None:
+    if instrument_ids is None:
+        return None
+    normalized = tuple(
+        dict.fromkeys(instrument_id.strip() for instrument_id in instrument_ids)
+    )
+    if any(not instrument_id for instrument_id in normalized):
+        raise ValueError("instrument_ids must not contain empty values")
+    if not normalized:
+        return ()
+    placeholders = ",".join("?" for _ in normalized)
+    known = {
+        row[0]
+        for row in con.execute(
+            f"SELECT instrument_id FROM meta.instruments "
+            f"WHERE instrument_id IN ({placeholders})",
+            list(normalized),
+        ).fetchall()
+    }
+    unknown = set(normalized) - known
+    if unknown:
+        raise ValueError(f"unknown instrument_ids: {sorted(unknown)}")
+    return normalized
+
+
+def _view_exists(con: duckdb.DuckDBPyConnection, view: str) -> bool:
+    return bool(
+        con.execute(
+            "SELECT count(*) FROM duckdb_views() WHERE view_name = ?", [view]
+        ).fetchone()[0]
+    )
+
+
+def _date_expression(view: str, table: str | None = None) -> str:
+    prefix = f"{table}." if table else ""
+    if view == "eod":
+        return f"{prefix}date"
+    return f"CAST({prefix}ts AT TIME ZONE 'UTC' AS DATE)"
+
+
+def _time_column(view: str) -> str:
+    return "date" if view == "eod" else "ts"
+
+
+def _empty_frame(view: str, *, include_ticker: bool = False) -> pl.DataFrame:
+    schema = CANONICAL_EOD_SCHEMA if view == "eod" else CANONICAL_INTRADAY_SCHEMA
+    if include_ticker:
+        schema = schema | {"ticker": pl.Utf8}
+    return pl.DataFrame(schema=schema)

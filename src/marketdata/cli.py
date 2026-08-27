@@ -2,44 +2,26 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import sqlite3
 import sys
 from pathlib import Path
 
 import click
+import duckdb
 import polars as pl
 
 from marketdata import universe as universe_mod
 from marketdata.config import Config, load_config
-from marketdata.ingest import (
-    DEFAULT_INTRADAY_FREQ,
-    INTRADAY_FREQS,
-    IngestResult,
-    backfill_eod,
-    backfill_intraday,
-    reconcile,
-    update_eod,
-)
+from marketdata.ingest import DEFAULT_INTRADAY_FREQ
 from marketdata.migration import (
     default_migration_report_path,
     migrate_v1_bars,
-    reconcile_canonical,
 )
+from marketdata.reconcile import reconcile_canonical, reconcile_legacy
 from marketdata.store import BarStore, MetaStore
+from marketdata.store.bars import INTRADAY_FREQS
 from marketdata.tiingo import TiingoClient
-
-
-def _finish_ingest(result: IngestResult, summary_json: str | None) -> None:
-    """Report an ingest result; nonzero exit if any ticker failed (so cron
-    notices partial failures)."""
-    click.echo(f"Done: {result.summary()}")
-    if summary_json:
-        Path(summary_json).write_text(json.dumps(result.to_dict(), indent=2) + "\n")
-    if result.failed:
-        click.echo("Failed tickers: " + ", ".join(sorted(result.failed)), err=True)
-        sys.exit(1)
 
 
 def _client(config: Config) -> TiingoClient:
@@ -50,48 +32,14 @@ def _client(config: Config) -> TiingoClient:
     return TiingoClient(config.tiingo_token)
 
 
-def _require_legacy_ingestion(meta: MetaStore) -> None:
-    """Fail clearly until M1 moves ingestion onto canonical instrument APIs."""
-    if meta.storage_generation() != "v1":
-        raise click.ClickException(
-            "ticker-keyed ingestion is disabled after the v2 storage migration; "
-            "production ingestion remains paused until the instrument_id APIs land"
-        )
-
-
-def _resolve_tickers(
-    meta: MetaStore,
-    tickers: tuple[str, ...],
-    tickers_file: str | None,
-    universe_year: int | None,
-    *,
-    default_scope: str = "all",
-) -> list[str]:
-    """Pick the working ticker set. With no explicit option, `default_scope`
-    decides: "all" = every ticker in any year's universe (backfills), or
-    "latest" = the most recent universe only (nightly updates — otherwise
-    thousands of delisted historical members consume requests forever)."""
-    if tickers:
-        return [t.upper() for t in tickers]
-    if tickers_file:
-        text = Path(tickers_file).read_text()
-        return [t.strip().upper() for t in text.split() if t.strip()]
-    if universe_year:
-        rows = meta.universe(universe_year)
-        if not rows:
-            raise click.ClickException(f"No universe stored for {universe_year}")
-        return [r["ticker"] for r in rows]
-    resolved = (
-        meta.latest_universe_tickers()
-        if default_scope == "latest"
-        else meta.all_universe_tickers()
-    )
-    if not resolved:
-        raise click.ClickException(
-            "No tickers specified and no universe exists yet. "
-            "Use --tickers/--tickers-file, or build a universe first."
-        )
-    return resolved
+def _require_ingestion_ready(meta: MetaStore) -> None:
+    """Keep operator writes paused until validated request orchestration lands."""
+    generation = meta.storage_generation()
+    if generation == "v1":
+        detail = "migrate the warehouse to v2 first"
+    else:
+        detail = "the per-segment identity-validation flow is the next M1 step"
+    raise click.ClickException(f"production ingestion remains paused: {detail}")
 
 
 @click.group()
@@ -168,7 +116,10 @@ def universe_rank(config: Config, year: int, top: int, min_days: int) -> None:
     """Rank stored tickers by avg daily dollar volume over YEAR and save
     the top N as that year's universe."""
     with MetaStore(config.meta_path) as meta:
-        _require_legacy_ingestion(meta)
+        if meta.storage_generation() != "v1":
+            raise click.ClickException(
+                "universe rank currently reads pre-migration ticker bars only"
+            )
         n = universe_mod.rank_by_dollar_volume(
             meta, BarStore(config.data_dir), year, top, min_days
         )
@@ -270,23 +221,10 @@ def backfill() -> None:
 def backfill_eod_cmd(
     config, tickers, tickers_file, universe_year, start, end, force, summary_json
 ):
-    """Backfill daily bars (fills missing leading and trailing history)."""
-    client = _client(config)
+    """Backfill daily bars (paused until M1 identity validation lands)."""
     config.ensure_dirs()
     with MetaStore(config.meta_path) as meta:
-        _require_legacy_ingestion(meta)
-        ticker_list = _resolve_tickers(meta, tickers, tickers_file, universe_year)
-        click.echo(f"Backfilling EOD for {len(ticker_list)} tickers...")
-        result = backfill_eod(
-            client,
-            BarStore(config.data_dir),
-            meta,
-            ticker_list,
-            start.date(),
-            end.date() if end else None,
-            force=force,
-        )
-    _finish_ingest(result, summary_json)
+        _require_ingestion_ready(meta)
 
 
 @backfill.command("intraday")
@@ -309,24 +247,10 @@ def backfill_eod_cmd(
 def backfill_intraday_cmd(
     config, tickers, tickers_file, universe_year, start, end, freq, summary_json
 ):
-    """Backfill intraday bars (IEX feed: recent years only, unadjusted,
-    IEX-only volume)."""
-    client = _client(config)
+    """Backfill intraday bars (paused until M1 identity validation lands)."""
     config.ensure_dirs()
     with MetaStore(config.meta_path) as meta:
-        _require_legacy_ingestion(meta)
-        ticker_list = _resolve_tickers(meta, tickers, tickers_file, universe_year)
-        click.echo(f"Backfilling {freq} bars for {len(ticker_list)} tickers...")
-        result = backfill_intraday(
-            client,
-            BarStore(config.data_dir),
-            meta,
-            ticker_list,
-            start.date(),
-            end.date() if end else None,
-            freq=freq,
-        )
-    _finish_ingest(result, summary_json)
+        _require_ingestion_ready(meta)
 
 
 @main.command()
@@ -344,36 +268,16 @@ def backfill_intraday_cmd(
 )
 @click.pass_obj
 def update(config, tickers, tickers_file, universe_year, all_universes, summary_json):
-    """Incremental EOD update (cron-friendly; exits nonzero on any failure).
-
-    Refetches a rolling overlap window to pick up corrections and restated
-    adjustments; a newly observed split/dividend triggers a full-history
-    refresh for that ticker. With no ticker options, updates the MAX(year)
-    universe (delisted historical members don't burn requests nightly);
-    pass --all-universes for every ticker ever in any universe. The
-    MAX(year) default is a pragmatic ingestion scope (D-010) until ongoing
-    all-ticker collection (D-011) supersedes universe-scoped updates.
-    """
-    client = _client(config)
+    """Incremental EOD update (paused until M1 identity validation lands)."""
     config.ensure_dirs()
     with MetaStore(config.meta_path) as meta:
-        _require_legacy_ingestion(meta)
-        ticker_list = _resolve_tickers(
-            meta,
-            tickers,
-            tickers_file,
-            universe_year,
-            default_scope="all" if all_universes else "latest",
-        )
-        click.echo(f"Updating EOD for {len(ticker_list)} tickers...")
-        result = update_eod(client, BarStore(config.data_dir), meta, ticker_list)
-    _finish_ingest(result, summary_json)
+        _require_ingestion_ready(meta)
 
 
 @main.command("reconcile")
 @click.pass_obj
 def reconcile_cmd(config):
-    """Rebuild coverage metadata from the canonical Parquet files."""
+    """Rebuild coverage metadata from the active generation's Parquet files."""
     bars = BarStore(config.data_dir)
     owner_label = "tickers"
     report = None
@@ -392,7 +296,7 @@ def reconcile_cmd(config):
                         err=True,
                     )
             else:
-                counts = reconcile(bars, meta)
+                counts = reconcile_legacy(bars, meta)
     except (OSError, RuntimeError, sqlite3.Error, pl.exceptions.PolarsError) as exc:
         raise click.ClickException(str(exc)) from exc
     for dataset, n in counts.items():
@@ -450,8 +354,6 @@ def migrate_v2_bars_cmd(config: Config, report_path: Path | None) -> None:
 @click.pass_obj
 def status(config: Config) -> None:
     """Warehouse coverage summary."""
-    from marketdata.query import connect
-
     bars = BarStore(config.data_dir)
     click.echo(f"Warehouse: {config.data_dir}")
     with MetaStore(config.meta_path) as meta:
@@ -486,11 +388,20 @@ def status(config: Config) -> None:
             tickers = bars.eod_tickers()
             click.echo(f"EOD tickers: {len(tickers)}")
             if tickers:
-                con = connect(config)
-                n, lo, hi = con.execute(
-                    "SELECT count(*), min(date), max(date) FROM eod"
-                ).fetchone()
-                click.echo(f"EOD bars: {n:,} rows, {lo} .. {hi}")
+                summary = (
+                    pl.scan_parquet([bars.eod_path(ticker) for ticker in tickers])
+                    .select(
+                        pl.len().alias("rows"),
+                        pl.col("date").min().alias("lo"),
+                        pl.col("date").max().alias("hi"),
+                    )
+                    .collect()
+                    .row(0, named=True)
+                )
+                click.echo(
+                    f"EOD bars: {summary['rows']:,} rows, "
+                    f"{summary['lo']} .. {summary['hi']}"
+                )
         years = meta.universe_years()
         if years:
             counts = ", ".join(f"{y}: {len(meta.universe(y))}" for y in years)
@@ -514,14 +425,12 @@ def sql(config: Config, query: str) -> None:
     meta.*)."""
     from marketdata.query import connect
 
-    with MetaStore(config.meta_path) as meta:
-        if meta.storage_generation() == "v2":
-            raise click.ClickException(
-                "the SQL query surface is paused until its instrument_id migration lands"
-            )
-    con = connect(config)
-    con.execute(query)
-    click.echo(con.pl())
+    try:
+        con = connect(config)
+        con.execute(query)
+        click.echo(con.pl())
+    except (RuntimeError, duckdb.Error) as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 if __name__ == "__main__":

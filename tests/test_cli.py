@@ -1,6 +1,5 @@
 """CLI behavior tests (offline; the Tiingo client is faked)."""
 
-import json
 from datetime import date
 
 from click.testing import CliRunner
@@ -15,13 +14,11 @@ def _fake_client(history, fail=frozenset()):
     return lambda config: client
 
 
-def test_backfill_partial_failure_exits_nonzero(tmp_path, monkeypatch):
+def test_backfill_cli_remains_paused_until_identity_flow_lands(tmp_path, monkeypatch):
     history = {
         "AAPL": [eod_row(d) for d in weekdays(date(2024, 1, 1), date(2024, 6, 28))]
     }
     monkeypatch.setattr(cli_mod, "_client", _fake_client(history, fail={"BADCO"}))
-    summary = tmp_path / "summary.json"
-
     runner = CliRunner()
     result = runner.invoke(
         main,
@@ -38,18 +35,13 @@ def test_backfill_partial_failure_exits_nonzero(tmp_path, monkeypatch):
             "2024-01-01",
             "--end",
             "2024-06-28",
-            "--summary-json",
-            str(summary),
         ],
     )
     assert result.exit_code == 1
-    payload = json.loads(summary.read_text())
-    assert payload["fetched"] == ["AAPL"]
-    assert "BADCO" in payload["failed"]
-    assert payload["ok"] is False
+    assert "production ingestion remains paused" in result.output
 
 
-def test_backfill_success_exits_zero(tmp_path, monkeypatch):
+def test_v1_backfill_requires_migration_first(tmp_path, monkeypatch):
     history = {
         "AAPL": [eod_row(d) for d in weekdays(date(2024, 1, 1), date(2024, 6, 28))]
     }
@@ -71,7 +63,8 @@ def test_backfill_success_exits_zero(tmp_path, monkeypatch):
             "2024-06-28",
         ],
     )
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 1
+    assert "migrate the warehouse to v2 first" in result.output
 
 
 def test_intraday_rejects_unsupported_freq(tmp_path, monkeypatch):
@@ -111,47 +104,107 @@ def test_update_defaults_to_latest_universe(tmp_path, monkeypatch):
         meta.set_universe(2026, [{"ticker": "NEW", "rank": 1}])
 
     runner = CliRunner()
-    assert runner.invoke(main, ["--data-dir", str(data_dir), "update"]).exit_code == 0
-    assert {c[0] for c in client.eod_calls} == {"NEW"}
-
-    client.eod_calls.clear()
-    assert (
-        runner.invoke(
-            main, ["--data-dir", str(data_dir), "update", "--all-universes"]
-        ).exit_code
-        == 0
-    )
-    assert {c[0] for c in client.eod_calls} == {"OLD", "NEW"}
+    result = runner.invoke(main, ["--data-dir", str(data_dir), "update"])
+    assert result.exit_code == 1
+    assert "production ingestion remains paused" in result.output
+    assert client.eod_calls == []
 
 
 def test_reconcile_command(tmp_path, monkeypatch):
-    history = {
-        "AAPL": [eod_row(d) for d in weekdays(date(2024, 1, 1), date(2024, 3, 29))]
-    }
-    monkeypatch.setattr(cli_mod, "_client", _fake_client(history))
+    from marketdata.store import BarStore, MetaStore
+    from marketdata.store.bars import eod_frame
+
     runner = CliRunner()
-    data_dir = str(tmp_path / "data")
-    assert (
-        runner.invoke(
-            main,
-            [
-                "--data-dir",
-                data_dir,
-                "backfill",
-                "eod",
-                "-t",
+    data_dir = tmp_path / "data"
+    with MetaStore(data_dir / "meta.db") as meta:
+        meta.upsert_instrument("AAPL")
+        meta.activate_canonical_generation()
+    BarStore(data_dir).publish_eod(
+        {
+            "AAPL": eod_frame(
                 "AAPL",
-                "--start",
-                "2024-01-01",
-                "--end",
-                "2024-03-29",
-            ],
-        ).exit_code
-        == 0
+                [eod_row(d) for d in weekdays(date(2024, 1, 1), date(2024, 3, 29))],
+            )
+        }
     )
-    result = runner.invoke(main, ["--data-dir", data_dir, "reconcile"])
+    result = runner.invoke(main, ["--data-dir", str(data_dir), "reconcile"])
     assert result.exit_code == 0
+    assert "eod: coverage rebuilt for 1 instruments" in result.output
+
+
+def test_reconcile_restores_v1_coverage_without_migrating(tmp_path):
+    from marketdata.store import BarStore, MetaStore
+    from marketdata.store.bars import eod_frame
+
+    data_dir = tmp_path / "data"
+    bars = BarStore(data_dir)
+    bars.write_eod("AAPL", eod_frame("AAPL", [eod_row(date(2024, 1, 2))]))
+    with MetaStore(data_dir / "meta.db") as meta:
+        assert meta.storage_generation() == "v1"
+        meta.set_ticker_coverage_v1("GHOST", "eod", date(2020, 1, 1), date(2020, 1, 2))
+
+    result = CliRunner().invoke(main, ["--data-dir", str(data_dir), "reconcile"])
+
+    assert result.exit_code == 0, result.output
     assert "eod: coverage rebuilt for 1 tickers" in result.output
+    with MetaStore(data_dir / "meta.db") as meta:
+        assert meta.storage_generation() == "v1"
+        assert meta.get_ticker_coverage_v1("AAPL", "eod") is not None
+        assert meta.get_ticker_coverage_v1("GHOST", "eod") is None
+
+
+def test_universe_rank_remains_available_on_v1(tmp_path):
+    from test_universe import _synthetic_eod
+
+    from marketdata.store import BarStore
+
+    data_dir = tmp_path / "data"
+    BarStore(data_dir).write_eod(
+        "BIG", _synthetic_eod("BIG", close=100.0, volume=1_000_000)
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "--data-dir",
+            str(data_dir),
+            "universe",
+            "rank",
+            "--year",
+            "2024",
+            "--top",
+            "1",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Universe 2024: 1 tickers stored" in result.output
+
+
+def test_sql_reads_canonical_instrument_view(tmp_path):
+    from marketdata.store import BarStore, MetaStore
+    from marketdata.store.bars import eod_frame
+
+    data_dir = tmp_path / "data"
+    with MetaStore(data_dir / "meta.db") as meta:
+        meta.upsert_instrument("apple-id")
+        meta.activate_canonical_generation()
+    BarStore(data_dir).publish_eod(
+        {"apple-id": eod_frame("AAPL", [eod_row(date(2024, 1, 2))])}
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "--data-dir",
+            str(data_dir),
+            "sql",
+            "SELECT instrument_id, count(*) AS rows FROM eod GROUP BY instrument_id",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "apple-id" in result.output
 
 
 def test_migrate_v2_bars_command_writes_default_report(tmp_path):
@@ -197,7 +250,7 @@ def test_legacy_ingestion_is_blocked_after_v2_boundary(tmp_path, monkeypatch):
     )
 
     assert result.exit_code == 1
-    assert "ticker-keyed ingestion is disabled" in result.output
+    assert "production ingestion remains paused" in result.output
     assert not (data_dir / "eod").exists()
 
 

@@ -2,7 +2,7 @@
 
 Correctness model:
 
-- Coverage is a per-(ticker, dataset) *interval* [first, last]. A backfill
+- Coverage is a per-(instrument_id, dataset_key) *interval* [first, last]. A backfill
   fetches the missing leading segment (before `first`) and/or trailing
   segment (after `last`) of the requested range, so "rank on 2025, then
   backfill from 1995" works.
@@ -13,7 +13,7 @@ Correctness model:
   late-evening corrections and restated adjusted values are picked up
   (Parquet writes are merge-upserts keyed on date).
 - A new split or dividend observed past the old coverage edge triggers a
-  full-history refresh for that ticker, so one file never mixes adjustment
+  full-history refresh for that instrument, so one slice never mixes adjustment
   vintages.
 - Coverage is reconcilable from the canonical Parquet files (`reconcile`).
 
@@ -24,13 +24,20 @@ and it converges to the same dataset.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 
 import polars as pl
 
 from marketdata.store import BarStore, MetaStore
-from marketdata.store.bars import INTRADAY_FREQS, eod_frame, intraday_frame
+from marketdata.store.bars import (
+    eod_frame,
+    instrument_bucket,
+    intraday_frame,
+    require_canonical_generation,
+    require_intraday_freq,
+)
 from marketdata.tiingo import TiingoClient, TiingoError
 
 log = logging.getLogger(__name__)
@@ -50,6 +57,25 @@ PUBLICATION_LAG_DAYS = 5
 INTRADAY_PUBLICATION_LAG_DAYS = 1
 
 DEFAULT_INTRADAY_FREQ = "1hour"
+
+
+@dataclass(frozen=True)
+class IngestTarget:
+    """One stable bar owner plus the Tiingo identifier used for transport.
+
+    The identifier is deliberately separate from ``instrument_id``.  Callers
+    must obtain it from exact-dataset identity evidence; the next M1 step owns
+    that request segmentation and response-validation orchestration.
+    """
+
+    instrument_id: str
+    identifier: str
+
+    def __post_init__(self) -> None:
+        if not self.instrument_id.strip():
+            raise ValueError("instrument_id must not be empty")
+        if not self.identifier.strip():
+            raise ValueError("Tiingo identifier must not be empty")
 
 
 @dataclass
@@ -81,6 +107,17 @@ class IngestResult:
             "failed": dict(sorted(self.failed.items())),
             "ok": self.ok,
         }
+
+
+def _require_registered_targets(meta: MetaStore, targets: list[IngestTarget]) -> None:
+    instrument_ids = [target.instrument_id for target in targets]
+    if len(instrument_ids) != len(set(instrument_ids)):
+        raise ValueError("ingestion targets must have unique instrument_ids")
+    unknown = set(instrument_ids) - meta.instrument_ids()
+    if unknown:
+        raise ValueError(
+            f"ingestion targets contain unknown instruments: {sorted(unknown)}"
+        )
 
 
 def _missing_segments(
@@ -125,18 +162,17 @@ def _has_new_corp_action(df: pl.DataFrame, after: date) -> bool:
     )
 
 
-def _full_refresh_eod(
+def _prepare_full_refresh_eod(
     client: TiingoClient,
     bars: BarStore,
-    meta: MetaStore,
-    ticker: str,
+    target: IngestTarget,
     first: date,
     prev_last: date,
     end: date,
     today: date,
     trigger: pl.DataFrame | None = None,
-) -> None:
-    """Refetch a ticker's entire history so adjusted columns are one
+) -> tuple[pl.DataFrame, tuple[date, date]]:
+    """Refetch an instrument's entire history so adjusted columns are one
     consistent vintage, validate the snapshot, and atomically replace the
     file (merge-upsert cannot remove stale dates a new snapshot omits).
 
@@ -150,18 +186,19 @@ def _full_refresh_eod(
     values that disagree with the trigger — so callers report the ticker as
     failed rather than refreshed and the existing file is kept.
     """
-    rows = client.eod(ticker, first, end)
+    rows = client.eod(target.identifier, first, end)
     if not rows:
         raise TiingoError(
-            f"full refresh of {ticker} returned no rows for {first}..{end}"
+            f"full refresh of {target.instrument_id} returned no rows for "
+            f"{first}..{end}"
         )
-    df = eod_frame(ticker, rows)
+    df = eod_frame(target.identifier, rows)
     if df["date"].max() < prev_last:
         raise TiingoError(
-            f"full refresh of {ticker} incomplete: snapshot ends {df['date'].max()}, "
-            f"previous coverage reached {prev_last}"
+            f"full refresh of {target.instrument_id} incomplete: snapshot ends "
+            f"{df['date'].max()}, previous coverage reached {prev_last}"
         )
-    existing = bars.read_eod(ticker)
+    existing = bars.read_canonical_eod(target.instrument_id)
     if existing is not None:
         # Every date already stored through prev_last must survive the
         # replacement; a vendor deleting history is an explicit manual
@@ -171,8 +208,9 @@ def _full_refresh_eod(
         )
         if missing.height:
             raise TiingoError(
-                f"full refresh of {ticker} would drop {missing.height} previously "
-                f"stored dates (e.g. {missing['date'].min()}); keeping existing file"
+                f"full refresh of {target.instrument_id} would drop "
+                f"{missing.height} previously stored dates "
+                f"(e.g. {missing['date'].min()}); keeping existing slice"
             )
     if trigger is not None:
         missing_trigger = trigger.select("date").join(
@@ -180,8 +218,9 @@ def _full_refresh_eod(
         )
         if missing_trigger.height:
             raise TiingoError(
-                f"full refresh of {ticker} omits {missing_trigger.height} dates from "
-                f"the triggering fetch (e.g. {missing_trigger['date'].min()})"
+                f"full refresh of {target.instrument_id} omits "
+                f"{missing_trigger.height} dates from the triggering fetch "
+                f"(e.g. {missing_trigger['date'].min()})"
             )
         actions = trigger.filter(
             (pl.col("split_factor") != 1.0) | (pl.col("div_cash") != 0.0)
@@ -198,93 +237,133 @@ def _full_refresh_eod(
         )
         if mismatched.height:
             raise TiingoError(
-                f"full refresh of {ticker} disagrees with the triggering fetch on "
-                f"corporate-action values for {mismatched.height} dates "
-                f"(e.g. {mismatched['date'].min()})"
+                f"full refresh of {target.instrument_id} disagrees with the "
+                f"triggering fetch on corporate-action values for "
+                f"{mismatched.height} dates (e.g. {mismatched['date'].min()})"
             )
-    bars.replace_eod(ticker, df)
     covered = _covered_through(df["date"].max(), end, today, PUBLICATION_LAG_DAYS)
-    meta.set_ticker_coverage_v1(
-        ticker, "eod", min(first, df["date"].min()), covered or df["date"].max()
+    return df, (
+        min(first, df["date"].min()),
+        covered or df["date"].max(),
     )
+
+
+def _bucket_groups(targets: list[IngestTarget]) -> Iterator[list[IngestTarget]]:
+    grouped: dict[str, list[IngestTarget]] = {}
+    for target in targets:
+        grouped.setdefault(instrument_bucket(target.instrument_id), []).append(target)
+    yield from (grouped[bucket] for bucket in sorted(grouped))
 
 
 def backfill_eod(
     client: TiingoClient,
     bars: BarStore,
     meta: MetaStore,
-    tickers: list[str],
+    targets: list[IngestTarget],
     start: date,
     end: date | None = None,
     *,
     force: bool = False,
 ) -> IngestResult:
-    """Fetch daily history to cover [start, end] for each ticker — including
+    """Fetch daily history for stable instruments, including
     missing leading history before existing coverage."""
+    require_canonical_generation(bars, meta.storage_generation())
+    _require_registered_targets(meta, targets)
     today = date.today()
     end = end or today
     result = IngestResult()
-    for i, ticker in enumerate(tickers, 1):
-        try:
-            covered = None if force else meta.get_ticker_coverage_v1(ticker, "eod")
-            segments = _missing_segments((start, end), covered)
-            if not segments:
-                result.skipped.append(ticker)
-                continue
-            got_rows = False
-            new_first = covered[0] if covered else None
-            new_last = covered[1] if covered else None
-            pending_frames: list[pl.DataFrame] = []
-            trigger_frames: list[pl.DataFrame] = []
-            for seg_start, seg_end in segments:
-                rows = client.eod(ticker, seg_start, seg_end)
-                max_received = None
-                if rows:
-                    df = eod_frame(ticker, rows)
-                    # Stage segment writes until corporate-action detection is
-                    # complete. If a validated full refresh is required, it
-                    # must succeed before canonical Parquet changes at all.
-                    pending_frames.append(df)
-                    got_rows = True
-                    max_received = df["date"].max()
-                    if covered is not None and _has_new_corp_action(df, covered[1]):
-                        trigger_frames.append(df)
-                covered_to = _covered_through(
-                    max_received, seg_end, today, PUBLICATION_LAG_DAYS
-                )
-                if covered_to is not None and covered_to >= seg_start:
-                    new_first = (
-                        seg_start if new_first is None else min(new_first, seg_start)
+    processed = 0
+    for group in _bucket_groups(targets):
+        frames: dict[str, pl.DataFrame] = {}
+        replacements: set[str] = set()
+        ready: dict[str, tuple[date, date, str]] = {}
+        for target in group:
+            instrument_id = target.instrument_id
+            try:
+                covered = None if force else meta.get_coverage(instrument_id, "eod")
+                segments = _missing_segments((start, end), covered)
+                if not segments:
+                    result.skipped.append(instrument_id)
+                    continue
+                got_rows = False
+                new_first = covered[0] if covered else None
+                new_last = covered[1] if covered else None
+                pending_frames: list[pl.DataFrame] = []
+                trigger_frames: list[pl.DataFrame] = []
+                for seg_start, seg_end in segments:
+                    rows = client.eod(target.identifier, seg_start, seg_end)
+                    max_received = None
+                    if rows:
+                        frame = eod_frame(target.identifier, rows)
+                        pending_frames.append(frame)
+                        got_rows = True
+                        max_received = frame["date"].max()
+                        if covered is not None and _has_new_corp_action(
+                            frame, covered[1]
+                        ):
+                            trigger_frames.append(frame)
+                    covered_to = _covered_through(
+                        max_received, seg_end, today, PUBLICATION_LAG_DAYS
                     )
-                    new_last = (
-                        covered_to if new_last is None else max(new_last, covered_to)
+                    if covered_to is not None and covered_to >= seg_start:
+                        new_first = (
+                            seg_start
+                            if new_first is None
+                            else min(new_first, seg_start)
+                        )
+                        new_last = (
+                            covered_to
+                            if new_last is None
+                            else max(new_last, covered_to)
+                        )
+                if trigger_frames:
+                    snapshot, coverage = _prepare_full_refresh_eod(
+                        client,
+                        bars,
+                        target,
+                        min(new_first, start),
+                        covered[1],
+                        end,
+                        today,
+                        trigger=pl.concat(trigger_frames),
                     )
-            if trigger_frames:
-                trigger_df = pl.concat(trigger_frames)
-                _full_refresh_eod(
-                    client,
-                    bars,
-                    meta,
-                    ticker,
-                    min(new_first, start),
-                    covered[1],
-                    end,
-                    today,
-                    trigger=trigger_df,
-                )
-                result.refreshed.append(ticker)
-            elif new_first is not None and new_last is not None:
-                for df in pending_frames:
-                    bars.write_eod(ticker, df)
-                meta.set_ticker_coverage_v1(ticker, "eod", new_first, new_last)
-                (result.fetched if got_rows else result.skipped).append(ticker)
-            else:
-                result.skipped.append(ticker)
-            if i % 25 == 0 or i == len(tickers):
-                log.info("eod backfill: %d/%d (%s)", i, len(tickers), result.summary())
-        except TiingoError as e:
-            log.warning("eod backfill failed for %s: %s", ticker, e)
-            result.failed[ticker] = str(e)
+                    frames[instrument_id] = bars.canonicalize_eod(
+                        instrument_id, snapshot
+                    )
+                    replacements.add(instrument_id)
+                    ready[instrument_id] = (*coverage, "refreshed")
+                elif new_first is not None and new_last is not None:
+                    if pending_frames:
+                        frames[instrument_id] = bars.canonicalize_eod(
+                            instrument_id, pl.concat(pending_frames)
+                        )
+                    ready[instrument_id] = (
+                        new_first,
+                        new_last,
+                        "fetched" if got_rows else "skipped",
+                    )
+                else:
+                    result.skipped.append(instrument_id)
+            except (TiingoError, ValueError, pl.exceptions.PolarsError) as exc:
+                log.warning("eod backfill failed for %s: %s", instrument_id, exc)
+                result.failed[instrument_id] = str(exc)
+
+        if frames:
+            try:
+                bars.publish_eod(frames, replace_instruments=frozenset(replacements))
+            except ValueError as exc:
+                for instrument_id in frames:
+                    result.failed[instrument_id] = str(exc)
+                    ready.pop(instrument_id, None)
+        for instrument_id, (new_first, new_last, outcome) in ready.items():
+            meta.set_coverage(instrument_id, "eod", new_first, new_last)
+            getattr(result, outcome).append(instrument_id)
+
+        processed += len(group)
+        if processed % 25 < len(group) or processed == len(targets):
+            log.info(
+                "eod backfill: %d/%d (%s)", processed, len(targets), result.summary()
+            )
     return result
 
 
@@ -292,7 +371,7 @@ def update_eod(
     client: TiingoClient,
     bars: BarStore,
     meta: MetaStore,
-    tickers: list[str],
+    targets: list[IngestTarget],
     *,
     default_start: date = date(2000, 1, 3),
 ) -> IngestResult:
@@ -300,52 +379,82 @@ def update_eod(
 
     Refetches a REFRESH_WINDOW_DAYS overlap before each coverage edge (to
     absorb corrections/restatements), and falls back to a full backfill for
-    tickers with no coverage yet. A newly observed split/dividend triggers a
-    full-history refresh for that ticker.
+    instruments with no coverage yet. A newly observed split/dividend triggers
+    a full-history refresh for that instrument.
     """
+    require_canonical_generation(bars, meta.storage_generation())
+    _require_registered_targets(meta, targets)
     today = date.today()
     result = IngestResult()
-    for i, ticker in enumerate(tickers, 1):
-        try:
-            covered = meta.get_ticker_coverage_v1(ticker, "eod")
-            if covered is None:
-                sub = backfill_eod(client, bars, meta, [ticker], default_start)
-                result.fetched += sub.fetched
-                result.skipped += sub.skipped
-                result.refreshed += sub.refreshed
-                result.failed.update(sub.failed)
-                continue
-            first, last = covered
-            fetch_start = max(first, last - timedelta(days=REFRESH_WINDOW_DAYS))
-            rows = client.eod(ticker, fetch_start, today)
-            if rows:
-                df = eod_frame(ticker, rows)
-                if _has_new_corp_action(df, last):
-                    _full_refresh_eod(
+    processed = 0
+    for group in _bucket_groups(targets):
+        frames: dict[str, pl.DataFrame] = {}
+        replacements: set[str] = set()
+        ready: dict[str, tuple[date, date, str]] = {}
+        uncovered: list[IngestTarget] = []
+        for target in group:
+            instrument_id = target.instrument_id
+            try:
+                covered = meta.get_coverage(instrument_id, "eod")
+                if covered is None:
+                    uncovered.append(target)
+                    continue
+                first, last = covered
+                fetch_start = max(first, last - timedelta(days=REFRESH_WINDOW_DAYS))
+                rows = client.eod(target.identifier, fetch_start, today)
+                if not rows:
+                    result.skipped.append(instrument_id)
+                    continue
+                frame = eod_frame(target.identifier, rows)
+                if _has_new_corp_action(frame, last):
+                    snapshot, coverage = _prepare_full_refresh_eod(
                         client,
                         bars,
-                        meta,
-                        ticker,
+                        target,
                         first,
                         last,
                         today,
                         today,
-                        trigger=df,
+                        trigger=frame,
                     )
-                    result.refreshed.append(ticker)
+                    frames[instrument_id] = bars.canonicalize_eod(
+                        instrument_id, snapshot
+                    )
+                    replacements.add(instrument_id)
+                    ready[instrument_id] = (*coverage, "refreshed")
                 else:
-                    bars.write_eod(ticker, df)
-                    meta.set_ticker_coverage_v1(
-                        ticker, "eod", first, max(last, df["date"].max())
+                    frames[instrument_id] = bars.canonicalize_eod(instrument_id, frame)
+                    ready[instrument_id] = (
+                        first,
+                        max(last, frame["date"].max()),
+                        "fetched",
                     )
-                    result.fetched.append(ticker)
-            else:
-                result.skipped.append(ticker)
-            if i % 25 == 0 or i == len(tickers):
-                log.info("eod update: %d/%d (%s)", i, len(tickers), result.summary())
-        except TiingoError as e:
-            log.warning("eod update failed for %s: %s", ticker, e)
-            result.failed[ticker] = str(e)
+            except (TiingoError, ValueError, pl.exceptions.PolarsError) as exc:
+                log.warning("eod update failed for %s: %s", instrument_id, exc)
+                result.failed[instrument_id] = str(exc)
+
+        if frames:
+            try:
+                bars.publish_eod(frames, replace_instruments=frozenset(replacements))
+            except ValueError as exc:
+                for instrument_id in frames:
+                    result.failed[instrument_id] = str(exc)
+                    ready.pop(instrument_id, None)
+        for instrument_id, (first, last, outcome) in ready.items():
+            meta.set_coverage(instrument_id, "eod", first, last)
+            getattr(result, outcome).append(instrument_id)
+        if uncovered:
+            sub = backfill_eod(client, bars, meta, uncovered, default_start)
+            result.fetched += sub.fetched
+            result.skipped += sub.skipped
+            result.refreshed += sub.refreshed
+            result.failed.update(sub.failed)
+
+        processed += len(group)
+        if processed % 25 < len(group) or processed == len(targets):
+            log.info(
+                "eod update: %d/%d (%s)", processed, len(targets), result.summary()
+            )
     return result
 
 
@@ -353,7 +462,7 @@ def backfill_intraday(
     client: TiingoClient,
     bars: BarStore,
     meta: MetaStore,
-    tickers: list[str],
+    targets: list[IngestTarget],
     start: date,
     end: date | None = None,
     *,
@@ -362,57 +471,97 @@ def backfill_intraday(
     """Fetch intraday bars in chunks to cover [start, end], leading segments
     included. Note: Tiingo's IEX feed reaches back a bounded number of years,
     is unadjusted, and reports IEX-only volume."""
-    if freq not in INTRADAY_FREQS:
-        raise ValueError(f"freq must be one of {INTRADAY_FREQS}, got {freq!r}")
+    require_intraday_freq(freq)
+    require_canonical_generation(bars, meta.storage_generation())
+    _require_registered_targets(meta, targets)
     today = date.today()
     end = end or today
     dataset = f"intraday_{freq}"
     result = IngestResult()
-    for i, ticker in enumerate(tickers, 1):
-        try:
-            covered = meta.get_ticker_coverage_v1(ticker, dataset)
+    processed = 0
+    for group in _bucket_groups(targets):
+        plans: dict[str, list[tuple[date, date]]] = {}
+        targets_by_id = {target.instrument_id: target for target in group}
+        wrote_any = dict.fromkeys(targets_by_id, False)
+        failed: set[str] = set()
+        planned: set[str] = set()
+        for target in group:
+            covered = meta.get_coverage(target.instrument_id, dataset)
             segments = _missing_segments((start, end), covered)
-            if not segments:
-                result.skipped.append(ticker)
-                continue
-            wrote_any = False
+            plan: list[tuple[date, date]] = []
             for seg_start, seg_end in segments:
-                # Leading segments are fetched newest-chunk-first so the
-                # coverage interval stays contiguous if interrupted.
                 leading = covered is not None and seg_end < covered[0]
-                for chunk_start, chunk_end in _chunks(
-                    seg_start, seg_end, reverse=leading
-                ):
-                    rows = client.intraday(ticker, chunk_start, chunk_end, freq=freq)
+                plan.extend(_chunks(seg_start, seg_end, reverse=leading))
+            plans[target.instrument_id] = plan
+            if plan:
+                planned.add(target.instrument_id)
+            else:
+                result.skipped.append(target.instrument_id)
+
+        while any(plans.values()):
+            frames: dict[str, pl.DataFrame] = {}
+            coverage_ready: dict[str, tuple[date, date]] = {}
+            for instrument_id, plan in plans.items():
+                if not plan or instrument_id in failed:
+                    continue
+                chunk_start, chunk_end = plan.pop(0)
+                target = targets_by_id[instrument_id]
+                try:
+                    rows = client.intraday(
+                        target.identifier, chunk_start, chunk_end, freq=freq
+                    )
                     max_received = None
                     if rows:
-                        df = intraday_frame(ticker, rows)
-                        bars.write_intraday(ticker, df, freq=freq)
-                        wrote_any = True
-                        max_received = df["ts"].dt.date().max()
+                        frame = intraday_frame(target.identifier, rows)
+                        frames[instrument_id] = bars.canonicalize_intraday(
+                            instrument_id, frame
+                        )
+                        max_received = frame["ts"].dt.date().max()
                     covered_to = _covered_through(
-                        max_received, chunk_end, today, INTRADAY_PUBLICATION_LAG_DAYS
+                        max_received,
+                        chunk_end,
+                        today,
+                        INTRADAY_PUBLICATION_LAG_DAYS,
                     )
                     if covered_to is not None:
-                        # Today's partial session is written but never marked
-                        # covered — it stays refreshable until the day ends.
                         covered_to = min(covered_to, today - timedelta(days=1))
                     if covered_to is not None and covered_to >= chunk_start:
-                        meta.extend_ticker_coverage_v1(
-                            ticker, dataset, chunk_start, covered_to
-                        )
-            (result.fetched if wrote_any else result.skipped).append(ticker)
-            if i % 10 == 0 or i == len(tickers):
-                log.info(
-                    "%s backfill: %d/%d (%s)",
-                    dataset,
-                    i,
-                    len(tickers),
-                    result.summary(),
-                )
-        except TiingoError as e:
-            log.warning("%s backfill failed for %s: %s", dataset, ticker, e)
-            result.failed[ticker] = str(e)
+                        coverage_ready[instrument_id] = (chunk_start, covered_to)
+                except (TiingoError, ValueError, pl.exceptions.PolarsError) as exc:
+                    log.warning(
+                        "%s backfill failed for %s: %s", dataset, instrument_id, exc
+                    )
+                    result.failed[instrument_id] = str(exc)
+                    failed.add(instrument_id)
+                    plan.clear()
+
+            if frames:
+                try:
+                    bars.publish_intraday(frames, freq=freq)
+                    for instrument_id in frames:
+                        wrote_any[instrument_id] = True
+                except ValueError as exc:
+                    for instrument_id in frames:
+                        result.failed[instrument_id] = str(exc)
+                        failed.add(instrument_id)
+                        plans[instrument_id].clear()
+                        coverage_ready.pop(instrument_id, None)
+            for instrument_id, (chunk_start, covered_to) in coverage_ready.items():
+                meta.extend_coverage(instrument_id, dataset, chunk_start, covered_to)
+
+        for instrument_id in sorted(planned - failed):
+            (result.fetched if wrote_any[instrument_id] else result.skipped).append(
+                instrument_id
+            )
+        processed += len(group)
+        if processed % 10 < len(group) or processed == len(targets):
+            log.info(
+                "%s backfill: %d/%d (%s)",
+                dataset,
+                processed,
+                len(targets),
+                result.summary(),
+            )
     return result
 
 
@@ -429,45 +578,8 @@ def _chunks(
 
 
 def reconcile(bars: BarStore, meta: MetaStore) -> dict[str, int]:
-    """Rebuild coverage metadata from the canonical Parquet files.
+    """Rebuild canonical instrument coverage from active v2 Parquet only."""
+    require_canonical_generation(bars, meta.storage_generation())
+    from marketdata.reconcile import reconcile_canonical
 
-    The complete replacement map is built first and swapped in atomically,
-    so stale entries for files that no longer exist do not survive.
-    """
-    entries: dict[tuple[str, str], tuple[date, date]] = {}
-    counts = {"eod": 0}
-    for ticker in bars.eod_tickers():
-        df = (
-            pl.scan_parquet(bars.eod_path(ticker))
-            .select(pl.col("date").min().alias("lo"), pl.col("date").max().alias("hi"))
-            .collect()
-        )
-        lo, hi = df["lo"][0], df["hi"][0]
-        if lo is not None:
-            entries[(ticker, "eod")] = (lo, hi)
-            counts["eod"] += 1
-    intraday_root = bars.data_dir / "intraday"
-    if intraday_root.exists():
-        # Same rule as ingestion: today's partial session is never covered.
-        cap = date.today() - timedelta(days=1)
-        for freq_dir in sorted(p for p in intraday_root.iterdir() if p.is_dir()):
-            dataset = f"intraday_{freq_dir.name}"
-            counts[dataset] = 0
-            for ticker_dir in sorted(p for p in freq_dir.iterdir() if p.is_dir()):
-                files = sorted(ticker_dir.glob("*.parquet"))
-                if not files:
-                    continue
-                df = (
-                    pl.scan_parquet(files)
-                    .select(
-                        pl.col("ts").dt.date().min().alias("lo"),
-                        pl.col("ts").dt.date().max().alias("hi"),
-                    )
-                    .collect()
-                )
-                lo, hi = df["lo"][0], df["hi"][0]
-                if lo is not None and lo <= cap:
-                    entries[(ticker_dir.name, dataset)] = (lo, min(hi, cap))
-                    counts[dataset] += 1
-    meta.replace_ticker_coverage_v1(entries)
-    return counts
+    return reconcile_canonical(bars, meta).counts

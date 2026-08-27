@@ -253,6 +253,16 @@ class BarStore:
 
     # ---- canonical v2 publication ---------------------------------------
 
+    def canonicalize_eod(self, instrument_id: str, frame: pl.DataFrame) -> pl.DataFrame:
+        """Validate and normalize one instrument's EOD publication frame."""
+        return _canonical_frame(instrument_id, frame, CANONICAL_EOD_SCHEMA, "date")
+
+    def canonicalize_intraday(
+        self, instrument_id: str, frame: pl.DataFrame
+    ) -> pl.DataFrame:
+        """Validate and normalize one instrument's intraday publication frame."""
+        return _canonical_frame(instrument_id, frame, CANONICAL_INTRADAY_SCHEMA, "ts")
+
     def publish_eod(
         self,
         frames: Mapping[str, pl.DataFrame],
@@ -277,9 +287,7 @@ class BarStore:
                 raise ValueError(
                     f"replacement snapshot for {instrument_id!r} must not be empty"
                 )
-            canonical = _canonical_frame(
-                instrument_id, frame, CANONICAL_EOD_SCHEMA, "date"
-            )
+            canonical = self.canonicalize_eod(instrument_id, frame)
             grouped.setdefault(instrument_bucket(instrument_id), []).append(canonical)
 
         result: dict[str, int] = {}
@@ -306,12 +314,10 @@ class BarStore:
         self, frames: Mapping[str, pl.DataFrame], *, freq: str = "1hour"
     ) -> dict[tuple[str, int], int]:
         """Publish validated intraday frames, split by year and bucket."""
-        _require_freq(freq)
+        require_intraday_freq(freq)
         grouped: dict[tuple[int, str], list[pl.DataFrame]] = {}
         for instrument_id, frame in frames.items():
-            canonical = _canonical_frame(
-                instrument_id, frame, CANONICAL_INTRADAY_SCHEMA, "ts"
-            )
+            canonical = self.canonicalize_intraday(instrument_id, frame)
             for (year,), part in canonical.group_by(
                 pl.col("ts").dt.year(), maintain_order=True
             ):
@@ -372,7 +378,7 @@ def canonical_dataset_root(data_dir: Path, dataset_key: str) -> Path:
         return Path(data_dir) / "bars" / "eod"
     if dataset_key.startswith("intraday_"):
         freq = dataset_key.removeprefix("intraday_")
-        _require_freq(freq)
+        require_intraday_freq(freq)
         return Path(data_dir) / "bars" / "intraday" / freq
     raise ValueError(f"unsupported canonical dataset_key {dataset_key!r}")
 
@@ -471,9 +477,16 @@ def _merge_canonical(
     return combined.unique(subset=key, keep="last").sort(key)
 
 
-def _require_freq(freq: str) -> None:
+def require_intraday_freq(freq: str) -> None:
     if freq not in INTRADAY_FREQS:
         raise ValueError(f"freq must be one of {INTRADAY_FREQS}, got {freq!r}")
+
+
+def require_canonical_generation(bars: BarStore, generation: str) -> None:
+    """Validate the durable boundary and require active canonical storage."""
+    bars.validate_generation(generation)
+    if generation != "v2":
+        raise RuntimeError("instrument-owned APIs require the v2 storage generation")
 
 
 def _atomic_write(df: pl.DataFrame, path: Path) -> None:

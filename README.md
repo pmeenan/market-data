@@ -24,8 +24,8 @@ cp .env.example .env   # then add your TIINGO_API_TOKEN
 
 The universe is rebuilt annually, ranked by dollar volume, and stored
 per-year as the record of how the dataset was seeded. It scopes ingestion,
-not backtests: studies select tickers from the stored data directly, and
-survivorship-bias protection comes from backfilling all tickers including
+not backtests: studies select stable instruments from the stored data directly,
+and survivorship-bias protection comes from backfilling all listings including
 delisted ones (D-010, D-011).
 
 If you already have per-year ticker lists, drop them in `seeds/`
@@ -40,58 +40,32 @@ market-data init
 market-data universe import seeds/universe_by_dollar_volume.csv
 market-data universe list --year 2011
 
-# Then backfill: with no ticker options this covers every ticker that
-# appears in any year's universe (20-year scope per D-011)
-market-data backfill eod --start 2006-01-01
-```
-
-Or bootstrap universes from scratch via Tiingo:
-
-```bash
-# 1. Create the warehouse (default ./data, override with MARKET_DATA_DIR)
-market-data init
-
-# 2. Seed candidate tickers from Tiingo's supported list (US stocks active in the year)
-market-data universe candidates --year 2025 --out candidates.txt
-
-# 3. Backfill the ranking year's EOD data for the candidates (resumable — rerun if interrupted)
-market-data backfill eod --tickers-file candidates.txt --start 2025-01-01 --end 2025-12-31
-
-# 4. Rank by average daily dollar volume, keep the top N as the 2025 universe
-market-data universe rank --year 2025 --top 1000
-market-data universe list
-
-# 5. Backfill history for the universe (20-year scope per D-011)
-market-data backfill eod --universe 2025 --start 2006-01-01
-
-# Optional: intraday bars (Tiingo IEX — recent years only, unadjusted)
-market-data backfill intraday --universe 2025 --start 2024-01-01
-
-# Keep current (cron this nightly after market close). Defaults to the
-# MAX(year) universe as a pragmatic ingestion scope (D-010);
-# --all-universes updates every historical member too.
-market-data update
-
 # Inspect
 market-data status
-market-data sql "SELECT ticker, max(date), count(*) FROM eod GROUP BY ticker ORDER BY 2 DESC LIMIT 10"
+market-data sql "SELECT instrument_id, max(date), count(*) FROM eod GROUP BY instrument_id ORDER BY 2 DESC LIMIT 10"
 ```
 
-All ingestion is idempotent and resumable: each (ticker, dataset) pair tracks
+During M1, `backfill` and `update` intentionally exit with a production-pause
+message. They are re-enabled only after request segments are identity-validated
+for their exact dataset key and the real-Tiingo canary passes.
+
+The ingestion primitives are idempotent and resumable: each
+(`instrument_id`, exact dataset key) pair tracks
 a coverage interval (so backfills fill missing leading history too), Parquet
 writes are merge-upserts keyed on date/timestamp, nightly updates refetch a
 rolling overlap to pick up corrections and restated adjustments, and a newly
-observed split/dividend triggers a full-history refresh for that ticker.
-Partial failures exit nonzero (cron-friendly; add `--summary-json out.json`
-for a machine-readable result). If coverage rows are lost or in doubt,
-`market-data reconcile` rebuilds them from Parquet. This does not recreate a
-lost `meta.db`: identity evidence cannot be reconstructed from bar files, so
-restore the metadata database from backup first.
+observed split/dividend triggers a full-history refresh for that instrument.
+The operator backfill/update commands remain paused until M1 finishes the
+validated request-segment flow. If coverage rows are lost or in doubt,
+`market-data reconcile` rebuilds them from active v2 files or an unmigrated v1
+warehouse. This does not recreate a lost `meta.db`: identity evidence cannot be
+reconstructed from bar files, so restore the metadata database from backup
+first.
 
 ### M1 bar migration
 
-Production ingestion remains paused while its APIs are converted to stable
-identities. The completed storage migration can be exercised with:
+Production ingestion remains paused while validated request orchestration is
+completed. The storage migration can be exercised with:
 
 ```bash
 market-data migrate-v2-bars
@@ -106,16 +80,13 @@ rerun the same command safely; canonical writes are merge-upserts and coverage
 is rebuilt conservatively after every run. The command exits nonzero while any
 source or canonical coverage slice remains unsafe. Establishing the v2 boundary
 records a durable generation marker, clears derived v1 ticker coverage, and
-disables the legacy ingestion/query commands until their `instrument_id` APIs
-land; they fail clearly instead of recreating or reading ticker-keyed files.
+disables legacy ticker-owned paths. Instrument-keyed queries are active; the
+operator ingestion commands fail clearly until the next M1 step validates and
+reports every request segment before calling the canonical primitives.
 Schema v3 names the canonical SQL table `meta.coverage` and retains the old
 shape explicitly as `meta.ticker_coverage_v1` during the transition.
 
-## Using the library (transitional v1 surface)
-
-The calls below describe the pre-migration query API. They intentionally fail
-closed after the v2 boundary until the next M1 step converts filters and views
-to `instrument_id`.
+## Using the library
 
 ```python
 from marketdata import load_config
@@ -123,18 +94,28 @@ from marketdata.query import connect, load_eod
 
 config = load_config()
 
-# Polars frame of daily bars
-df = load_eod(config, ["AAPL", "MSFT"], start="2020-01-01")
+# Polars frame of daily bars selected by stable ids. The keyword-only selector
+# prevents an old positional ticker list from silently changing meaning.
+df = load_eod(
+    config,
+    instrument_ids=["apple-id", "microsoft-id"],
+    start="2020-01-01",
+)
 
 # Or raw DuckDB for arbitrary SQL (views: eod, intraday_<freq> per frequency
 # present on disk, e.g. intraday_1hour; metadata at meta.*)
 con = connect(config)
 con.execute("""
-    SELECT ticker, avg(adj_close * adj_volume) AS adv
+    SELECT instrument_id, avg(adj_close * adj_volume) AS adv
     FROM eod WHERE date >= '2025-01-01'
-    GROUP BY ticker ORDER BY adv DESC LIMIT 20
+    GROUP BY instrument_id ORDER BY adv DESC LIMIT 20
 """).pl()
 ```
+
+`load_eod_by_ticker` and `load_intraday_by_ticker` are display conveniences;
+they require both range endpoints and fail if any alias segment has zero or
+multiple matches. Raw canonical views and frames never use ticker as an owner
+or join key. Companion `*_with_alias` views derive a nullable as-of ticker.
 
 Use `adj_*` columns for strategy math (they are split- and dividend-adjusted);
 raw columns reflect prices as traded.
@@ -156,6 +137,7 @@ src/marketdata/
   universe.py               candidate seeding + dollar-volume ranking
   ingest.py                 resumable backfill / incremental update
   query.py                  DuckDB views + polars loaders
+  reconcile.py              v1/v2 coverage recovery from Parquet
   cli.py                    the market-data CLI
 ```
 
@@ -165,10 +147,11 @@ Milestone **M1 (identity-safe canonical warehouse)** is in progress after the
 owner approved and closed M0 on 2026-08-27. The identity registry and explicit
 resolution reports plus the v2 hash-bucket storage migration, atomic bar
 publication, conservative reconciliation, and operator report are implemented.
-Moving ingestion and query APIs to `instrument_id` is next. Production ingestion
-remains paused until M1 is complete. The first planned study asks whether stocks
-that open significantly down tend to recover over the next few hours; the
-research/backtesting layer begins in M3.
+Instrument-owned ingestion primitives and canonical query APIs are also
+implemented. Validated per-segment ingestion orchestration and CSV transport
+are next; production ingestion remains paused until M1 is complete. The first
+planned study asks whether stocks that open significantly down tend to recover
+over the next few hours; the research/backtesting layer begins in M3.
 
 ## Start here
 

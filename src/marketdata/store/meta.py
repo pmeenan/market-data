@@ -825,6 +825,20 @@ class MetaStore:
                 ),
             )
 
+    def extend_coverage(
+        self,
+        instrument_id: str,
+        dataset_key: str,
+        first: date,
+        last: date,
+    ) -> None:
+        """Widen one canonical coverage interval without ever shrinking it."""
+        existing = self.get_coverage(instrument_id, dataset_key)
+        if existing is not None:
+            first = min(first, existing[0])
+            last = max(last, existing[1])
+        self.set_coverage(instrument_id, dataset_key, first, last)
+
     def replace_coverage(
         self, entries: dict[tuple[str, str], tuple[date, date]]
     ) -> None:

@@ -111,8 +111,9 @@ Milestone **M1 (identity-safe canonical warehouse)** is in progress after the
 owner approved the plan and closed M0 on 2026-08-27. The schema-v2 identity
 registry and explicit alias/vendor/universe resolution reports are implemented;
 the v2 hash-bucket bar migration, atomic publication, reconciliation, and
-operator report are implemented; instrument-keyed ingestion/query paths and
-CSV transport remain. Production ingestion stays paused until M1 is complete;
-the backtest layer does not exist yet. See
+operator report plus instrument-keyed ingestion/query APIs are implemented;
+validated per-segment ingestion orchestration and CSV transport remain.
+Production ingestion stays paused until M1 is complete; the backtest layer does
+not exist yet. See
 [docs/plan.md](docs/plan.md). Keep this paragraph short and current when plan.md
 milestone status changes (rule 4).

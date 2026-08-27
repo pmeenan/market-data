@@ -149,9 +149,13 @@ Scope:
   v1 quarantine, deterministic fail-closed migration reporting, schema-v3
   instrument coverage, an explicit guarded storage-generation boundary, and
   conservative per-instrument reconciliation.
-- [ ] Move ingestion and query APIs to `instrument_id`. Ticker conveniences
+- [x] Move ingestion and query APIs to `instrument_id`. Ticker conveniences
       require an as-of range and resolve through aliases; active DuckDB views
-      never union quarantined v1 files.
+      never union quarantined v1 files. Completed 2026-08-27: canonical-only
+      ingestion primitives and coverage, v2-only DuckDB views/loaders,
+      unambiguous alias display views, and explicit-range ticker loaders that
+      fail on evidence gaps/conflicts. Operator ingestion stays paused until
+      the next item supplies validated request segments.
 - [ ] Implement the architecture's identity/ingestion flow for all three exact
   dataset keys. Each independently validated segment may make progress while
   an unresolved or conflicting segment remains fail-closed and reported.
