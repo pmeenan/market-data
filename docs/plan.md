@@ -297,9 +297,21 @@ Scope:
 
 Exit criteria:
 
-- [ ] Offline boundary fixtures prove chunk planning neither loses nor duplicates
+- [x] Offline boundary fixtures prove chunk planning neither loses nor duplicates
   rows at the row cap, year, alias, DST, holiday, and half-day boundaries; a
   controlled Tiingo run confirms the planner against both intraday frequencies.
+  Completed 2026-08-28: one parameterized end-to-end fixture now drives both
+  frequencies through adjacent old/new aliases, year rollover, DST, holidays,
+  early closes, lookahead discard, and multi-chunk publication at the largest
+  safe weekday-grid envelopes (9,996 hourly rows and 9,984 five-minute rows),
+  proving exact raw-row preservation, unique timestamps, contiguous coverage,
+  and calendar-filtered research rows. A metered AAPL canary over
+  2025-11-26..2025-12-01 fetched through the next XNYS session on 2025-12-02:
+  the 30 hourly and 390 five-minute response rows exactly matched their planner
+  envelopes; discard left 24/312 raw target rows and XNYS filtering left the
+  expected 15/198 research rows. All three diagnostic/canary requests settled
+  to 27,963 observed encoded bytes in the durable ledger, including the first
+  hourly probe that exposed the already-documented RE-004 closed-session rows.
 - [x] Scheduler tests prove current work wins; quota stops resume the unvisited
   remainder of the same deterministic sweep; no instrument reaches request
   depth N+1 before every eligible peer receives a depth-N turn; failed or

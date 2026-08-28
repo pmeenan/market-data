@@ -1,12 +1,19 @@
 """Ingestion semantics tests against a fake Tiingo client (fully offline)."""
 
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, time, timedelta
+from zoneinfo import ZoneInfo
 
 import polars as pl
 import pytest
 import responses
 
-from marketdata.calendar import IntradayRequestChunk
+from marketdata.calendar import (
+    IEX_ROW_CAP,
+    IntradayRequestChunk,
+    label_intraday_sessions,
+    plan_intraday_requests,
+    session_schedule,
+)
 from marketdata.errors import BudgetExhausted
 from marketdata.ingest import (
     REFRESH_WINDOW_DAYS,
@@ -59,6 +66,57 @@ def weekdays(start: date, end: date) -> list[date]:
             out.append(d)
         d += timedelta(days=1)
     return out
+
+
+def session_intraday_rows(ticker: str, start: date, end: date, freq: str) -> list[dict]:
+    """Build every regular-session label using the production XNYS calendar."""
+    interval = timedelta(hours=1) if freq == "1hour" else timedelta(minutes=5)
+    rows = []
+    for session in session_schedule(start, end).iter_rows(named=True):
+        cursor = session["session_open"]
+        if freq == "1hour":
+            cursor += timedelta(minutes=30)
+        while cursor + interval <= session["session_close"]:
+            rows.append(
+                {
+                    "date": cursor.isoformat().replace("+00:00", "Z"),
+                    "ticker": ticker,
+                    "open": 10.0,
+                    "high": 10.5,
+                    "low": 9.5,
+                    "close": 10.2,
+                    "volume": 100,
+                }
+            )
+            cursor += interval
+    return rows
+
+
+def vendor_intraday_rows(ticker: str, start: date, end: date, freq: str) -> list[dict]:
+    """Mirror Tiingo's measured full weekday grid, including closed periods."""
+    interval = timedelta(hours=1) if freq == "1hour" else timedelta(minutes=5)
+    eastern = ZoneInfo("America/New_York")
+    rows = []
+    for day in weekdays(start, end):
+        session_open = datetime.combine(day, time(9, 30), eastern).astimezone(UTC)
+        cursor = session_open + (
+            timedelta(minutes=30) if freq == "1hour" else timedelta()
+        )
+        full_day_close = session_open + timedelta(minutes=390)
+        while cursor + interval <= full_day_close:
+            rows.append(
+                {
+                    "date": cursor.isoformat().replace("+00:00", "Z"),
+                    "ticker": ticker,
+                    "open": 10.0,
+                    "high": 10.5,
+                    "low": 9.5,
+                    "close": 10.2,
+                    "volume": 100,
+                }
+            )
+            cursor += interval
+    return rows
 
 
 class FakeTiingo:
@@ -1034,6 +1092,119 @@ def test_intraday_multichunk_lookahead_neither_loses_nor_duplicates_target_rows(
     assert stored["ts"].n_unique() == stored.height
     assert stored["ts"].dt.date().min() == start
     assert stored["ts"].dt.date().max() == end
+
+
+@pytest.mark.parametrize(
+    ("freq", "start", "rename_on", "maximum_rows"),
+    [
+        ("1hour", date(2016, 12, 12), date(2017, 1, 1), 9_996),
+        ("5min", date(2024, 11, 25), date(2025, 1, 1), 9_984),
+    ],
+)
+def test_intraday_boundaries_preserve_every_target_row_across_aliases(
+    tmp_path, freq, start, rename_on, maximum_rows
+):
+    """Exercise cap, year, alias, DST, holiday, and half-day boundaries."""
+
+    class CalendarTiingo(FakeTiingo):
+        def __init__(self):
+            super().__init__({})
+            self.response_sizes: list[int] = []
+
+        def intraday(self, ticker, request_start, end=None, freq="1hour"):
+            request_start = date.fromisoformat(str(request_start))
+            request_end = date.fromisoformat(str(end))
+            self.intraday_calls.append(
+                (ticker.upper(), request_start, request_end, freq)
+            )
+            rows = vendor_intraday_rows(
+                ticker.upper(), request_start, request_end, freq
+            )
+            self.response_sizes.append(len(rows))
+            return rows
+
+    end = date(2025, 8, 29)
+    old_end = rename_on - timedelta(days=1)
+    bars, meta = stores(tmp_path)
+    _identity_target(meta, "stable-id", "OLD", f"intraday_{freq}", start, old_end)
+    _identity_target(meta, "stable-id", "NEW", f"intraday_{freq}", rename_on, end)
+    client = CalendarTiingo()
+
+    # Ingestion begins at the newest identity edge, then safely extends the
+    # same instrument's coverage backward through the adjacent prior alias.
+    new_result = backfill_intraday_validated(
+        client, bars, meta, ["NEW"], rename_on, end, freq=freq
+    )
+    old_result = backfill_intraday_validated(
+        client, bars, meta, ["OLD"], start, old_end, freq=freq
+    )
+
+    chunks = [
+        ("NEW", chunk) for chunk in plan_intraday_requests(rename_on, end, freq=freq)
+    ] + [("OLD", chunk) for chunk in plan_intraday_requests(start, old_end, freq=freq)]
+    assert new_result.ok and old_result.ok
+    assert max(chunk.max_response_rows for _, chunk in chunks) == maximum_rows
+    assert maximum_rows < IEX_ROW_CAP
+    assert client.intraday_calls == [
+        (ticker, chunk.start, chunk.fetch_end, freq) for ticker, chunk in chunks
+    ]
+    assert all(
+        response_size <= chunk.max_response_rows < IEX_ROW_CAP
+        for response_size, (_, chunk) in zip(client.response_sizes, chunks, strict=True)
+    )
+    assert any(
+        response_size == chunk.max_response_rows == maximum_rows
+        for response_size, (_, chunk) in zip(client.response_sizes, chunks, strict=True)
+    )
+
+    stored = bars.read_canonical_intraday("stable-id", freq=freq)
+    assert stored is not None
+    expected = vendor_intraday_rows("IGNORED", start, end, freq)
+    expected_timestamps = {row["date"].replace("Z", "+00:00") for row in expected}
+    actual_timestamps = {value.isoformat() for value in stored["ts"].to_list()}
+    assert actual_timestamps == expected_timestamps
+    assert stored["ts"].n_unique() == stored.height
+    assert meta.get_coverage("stable-id", f"intraday_{freq}") == (start, end)
+
+    raw_counts = (
+        stored.with_columns(stored["ts"].dt.date().alias("session_date"))
+        .group_by("session_date")
+        .len()
+    )
+    full_weekday_rows = 6 if freq == "1hour" else 78
+    assert (
+        raw_counts.filter(pl.col("session_date") == date(2024, 11, 29))["len"].item()
+        == full_weekday_rows
+    )
+    assert (
+        raw_counts.filter(pl.col("session_date") == date(2024, 12, 25))["len"].item()
+        == full_weekday_rows
+    )
+
+    labelled = label_intraday_sessions(stored, freq=freq)
+    expected_session_rows = session_intraday_rows("IGNORED", start, end, freq)
+    assert {value.isoformat() for value in labelled["ts"].to_list()} == {
+        row["date"].replace("Z", "+00:00") for row in expected_session_rows
+    }
+    labelled_counts = labelled.group_by("session_date").len()
+    assert labelled_counts.filter(pl.col("session_date") == date(2024, 11, 29))[
+        "len"
+    ].item() == (3 if freq == "1hour" else 42)
+    assert not labelled_counts.filter(
+        pl.col("session_date").is_in([date(2024, 12, 25), date(2025, 1, 1)])
+    ).height
+
+    first_labels = (
+        labelled.filter(
+            pl.col("session_date").is_in([date(2025, 3, 7), date(2025, 3, 10)])
+        )
+        .group_by("session_date")
+        .agg(pl.col("ts").min())
+        .sort("session_date")
+    )
+    assert [value.hour for value in first_labels["ts"]] == (
+        [15, 14] if freq == "1hour" else [14, 13]
+    )
 
 
 def test_intraday_rejects_a_silent_cap_response_before_publication(tmp_path):
