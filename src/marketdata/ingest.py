@@ -979,7 +979,7 @@ def backfill_intraday(
                     rows = client.intraday(
                         target.identifier, chunk.start, chunk.fetch_end, freq=freq
                     )
-                    rows = _intraday_target_rows(rows, chunk)
+                    rows = intraday_target_rows(rows, chunk)
                     max_received = None
                     if rows:
                         frame = intraday_frame(target.identifier, rows)
@@ -1053,9 +1053,10 @@ def backfill_intraday(
     return result
 
 
-def _intraday_target_rows(
+def intraday_target_rows(
     rows: list[dict[str, Any]], chunk: IntradayRequestChunk
 ) -> list[dict[str, Any]]:
+    """Validate one IEX response envelope and return only target rows."""
     if len(rows) >= IEX_ROW_CAP:
         raise ValueError(
             f"IEX response has {len(rows):,} rows and may be silently truncated"

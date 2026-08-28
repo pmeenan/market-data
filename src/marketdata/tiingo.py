@@ -272,6 +272,8 @@ class TiingoClient:
         path: str,
         params: dict[str, Any],
         required_fields: frozenset[str],
+        *,
+        allow_header_only_missing_date: bool = False,
     ) -> list[dict[str, Any]]:
         resp = self._request(path, params)
         try:
@@ -294,12 +296,22 @@ class TiingoClient:
             fieldnames = set(ordered_fieldnames)
             if len(fieldnames) != len(ordered_fieldnames):
                 raise TiingoError(f"Tiingo CSV for {path} has duplicate columns")
+            raw_rows = list(reader)
             missing = required_fields - fieldnames
             if missing:
+                # IEX omits its implicit date column from a header-only empty
+                # response even though populated responses include it. Accept
+                # only that exact no-row shape; a populated response missing
+                # date remains malformed and fail-closed.
+                if (
+                    allow_header_only_missing_date
+                    and not raw_rows
+                    and missing == {"date"}
+                ):
+                    return []
                 raise TiingoError(
                     f"Tiingo CSV for {path} is missing columns: {sorted(missing)}"
                 )
-            raw_rows = list(reader)
         except (UnicodeDecodeError, csv.Error) as exc:
             raise TiingoError(f"Tiingo returned invalid CSV for {path}") from exc
         if any(
@@ -345,7 +357,10 @@ class TiingoClient:
         if end:
             params["endDate"] = str(end)
         return self._get_csv(
-            f"/iex/{ticker.lower()}/prices", params, _INTRADAY_CSV_FIELDS
+            f"/iex/{ticker.lower()}/prices",
+            params,
+            _INTRADAY_CSV_FIELDS,
+            allow_header_only_missing_date=True,
         )
 
     def ticker_metadata(self, ticker: str) -> dict[str, Any]:

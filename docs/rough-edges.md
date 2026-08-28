@@ -22,6 +22,33 @@ Newest first. RE-numbers are never reused.
 
 ---
 
+## RE-008: Empty IEX CSV omits the implicit date column  (2026-08-28, status: worked-around)
+
+**Environment:** Authenticated Tiingo historical IEX REST endpoint with
+`format=csv` and explicit OHLCV columns; measured during the phase-1 hourly
+identity bootstrap.
+
+**Repro/measurement:** All 376 initially failed probes returned a successful,
+header-only CSV containing the requested `open,high,low,close,volume` columns
+but no `date` column. Repeating the same bounded requests after recognizing
+that shape produced 376 empty results and no transport failures. Populated IEX
+responses include `date` even though the request's explicit `columns` parameter
+does not name it.
+
+**Observed:** Tiingo's implicit timestamp column is absent from the header when
+the IEX result has zero rows.
+
+**Expected:** An empty CSV retains the same schema as a populated response, as
+the EOD endpoint does.
+
+**Impact:** The CSV parser accepts a missing `date` only when the body has a
+valid header, every other required field is present, and there are zero data
+rows. A populated response missing `date`, or any other missing field, still
+fails closed. This distinction lets an identity probe persist honest empty
+evidence instead of misclassifying it as a retryable transport/schema failure.
+
+---
+
 ## RE-007: Tiingo can conflate unrelated listings inside one archive record  (2026-08-28, status: worked-around)
 
 **Environment:** Then-current 2006-08-28 through 2026-08-27 seed EOD warehouse,

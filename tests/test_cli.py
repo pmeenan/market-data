@@ -188,6 +188,101 @@ def test_identity_bootstrap_command_validates_safe_universe_record(
         )
 
 
+def test_intraday_identity_bootstrap_command_records_exact_frequency(
+    tmp_path, monkeypatch
+):
+    from marketdata.store import MetaStore
+
+    data_dir = tmp_path / "data"
+    start, end = date(2024, 1, 2), date(2024, 1, 31)
+    with MetaStore(data_dir / "meta.db") as meta:
+        meta.activate_canonical_generation()
+        meta.upsert_instrument("apple-id")
+        meta.add_instrument_alias("apple-id", "AAPL", start, end)
+        meta.add_vendor_identifier(
+            "apple-id",
+            "eod",
+            "ticker",
+            "AAPL",
+            start,
+            end,
+            validation_state="validated",
+        )
+    client = FakeTiingo({})
+    monkeypatch.setattr(cli_mod, "_client", lambda config: client)
+    summary = tmp_path / "intraday-identity.json"
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "--data-dir",
+            str(data_dir),
+            "identity",
+            "bootstrap-intraday",
+            "-t",
+            "AAPL",
+            "--start",
+            str(start),
+            "--end",
+            str(end),
+            "--freq",
+            "1hour",
+            "--summary-json",
+            str(summary),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(summary.read_text())
+    assert payload["dataset_key"] == "intraday_1hour"
+    assert payload["probe_attempts"] == 1
+    assert len(payload["validated"]) == 1
+    with MetaStore(data_dir / "meta.db") as meta:
+        assert (
+            meta.resolve_vendor_identifier(
+                "apple-id", "intraday_1hour", start, end
+            ).status
+            == "resolved"
+        )
+        assert (
+            meta.resolve_vendor_identifier(
+                "apple-id", "intraday_5min", start, end
+            ).status
+            == "zero_matches"
+        )
+
+
+def test_intraday_identity_bootstrap_rejects_oversized_probe_before_work(tmp_path):
+    summary = tmp_path / "intraday-identity.json"
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "--data-dir",
+            str(tmp_path / "missing-data"),
+            "identity",
+            "bootstrap-intraday",
+            "-t",
+            "AAPL",
+            "--start",
+            "2020-01-02",
+            "--end",
+            "2026-08-27",
+            "--freq",
+            "5min",
+            "--probe-sessions",
+            "130",
+            "--summary-json",
+            str(summary),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "must not exceed 127" in result.output
+    assert "does not exist" not in result.output
+    assert "must not exceed 127" in json.loads(summary.read_text())["error"]
+
+
 def test_identity_bootstrap_fails_before_mutation_when_data_lock_is_held(
     tmp_path, monkeypatch
 ):

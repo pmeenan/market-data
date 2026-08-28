@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -22,6 +22,7 @@ from uuid import uuid4
 from marketdata.identity import (
     ACTIVE_ALIAS_END,
     AliasResolutionReport,
+    IdentifierEvidenceSegment,
     IdentifierResolution,
     ResolutionSegment,
     UniverseResolution,
@@ -536,6 +537,24 @@ class MetaStore:
             (instrument_id,),
         ).fetchall()
 
+    def identity_aliases(self, tickers: Collection[str]) -> list[sqlite3.Row]:
+        """Return stable alias envelopes for a normalized ticker cohort."""
+        normalized = sorted(
+            {ticker.strip().upper() for ticker in tickers if ticker.strip()}
+        )
+        if not normalized:
+            return []
+        placeholders = ",".join("?" for _ in normalized)
+        return self._con.execute(
+            f"""SELECT a.instrument_id, a.ticker, a.exchange, a.asset_type,
+                       a.start_date, a.end_date, a.evidence AS alias_evidence
+                  FROM instrument_aliases AS a
+                 WHERE a.ticker IN ({placeholders})
+                 ORDER BY a.ticker, a.start_date, a.end_date, a.instrument_id,
+                          a.alias_id""",
+            normalized,
+        ).fetchall()
+
     def record_identity_episode(
         self,
         instrument_id: str,
@@ -837,8 +856,9 @@ class MetaStore:
         validation_state = require_validation_state(validation_state)
         if valid_from > valid_to:
             raise ValueError("identifier valid_from must not be after valid_to")
-        if not identifier_type.strip() or not identifier_value.strip():
-            raise ValueError("identifier type and value must not be empty")
+        identifier_type, identifier_value = _normalize_identifier(
+            identifier_type, identifier_value
+        )
         now = _now()
         with self._con:
             cursor = self._con.execute(
@@ -858,8 +878,8 @@ class MetaStore:
                 (
                     instrument_id,
                     dataset_key,
-                    identifier_type.strip(),
-                    identifier_value.strip(),
+                    identifier_type,
+                    identifier_value,
                     valid_from.isoformat(),
                     valid_to.isoformat(),
                     validation_state,
@@ -869,6 +889,98 @@ class MetaStore:
                 ),
             )
             return int(cursor.fetchone()[0])
+
+    def vendor_identifier_evidence_segments(
+        self,
+        instrument_id: str,
+        dataset_key: str,
+        identifier_type: str,
+        identifier_value: str,
+        start: date,
+        end: date,
+    ) -> tuple[IdentifierEvidenceSegment, ...]:
+        """Partition a span by reusable evidence for one identifier candidate."""
+        dataset_key = require_dataset_key(dataset_key)
+        if start > end:
+            raise ValueError("evidence start must not be after end")
+        identifier_type, identifier_value = _normalize_identifier(
+            identifier_type, identifier_value
+        )
+        if identifier_type == "ticker":
+            identifier_clause = (
+                "lower(identifier_type) = 'ticker' AND upper(identifier_value) = ?"
+            )
+            identifier_parameters = (identifier_value,)
+        else:
+            identifier_clause = "identifier_type = ? AND identifier_value = ?"
+            identifier_parameters = (identifier_type, identifier_value)
+        rows = self._con.execute(
+            f"""SELECT vendor_identifier_id, validation_state,
+                       valid_from, valid_to
+                FROM vendor_identifiers
+                WHERE instrument_id = ? AND dataset_key = ?
+                  AND {identifier_clause}
+                  AND valid_from <= ? AND valid_to >= ?
+                ORDER BY valid_from, valid_to, validation_state,
+                         vendor_identifier_id""",
+            (
+                instrument_id,
+                dataset_key,
+                *identifier_parameters,
+                end.isoformat(),
+                start.isoformat(),
+            ),
+        ).fetchall()
+
+        boundaries = {start.toordinal(), end.toordinal() + 1}
+        intervals: list[tuple[int, str, int, int]] = []
+        for row in rows:
+            row_start = max(start, date.fromisoformat(row["valid_from"]))
+            row_end = min(end, date.fromisoformat(row["valid_to"]))
+            intervals.append(
+                (
+                    int(row["vendor_identifier_id"]),
+                    str(row["validation_state"]),
+                    row_start.toordinal(),
+                    row_end.toordinal(),
+                )
+            )
+            boundaries.add(row_start.toordinal())
+            boundaries.add(row_end.toordinal() + 1)
+
+        ordered = sorted(boundaries)
+        segments: list[IdentifierEvidenceSegment] = []
+        for segment_start, next_start in zip(ordered, ordered[1:], strict=False):
+            segment_end = next_start - 1
+            active = [
+                (identifier_id, validation_state)
+                for identifier_id, validation_state, row_start, row_end in intervals
+                if row_start <= segment_start and row_end >= segment_end
+            ]
+            terminal_states = {state for _, state in active if state != "unvalidated"}
+            if len(terminal_states) > 1:
+                validation_state = "conflict"
+            elif terminal_states:
+                validation_state = next(iter(terminal_states))
+            elif active:
+                validation_state = "unvalidated"
+            else:
+                validation_state = None
+            segments.append(
+                IdentifierEvidenceSegment(
+                    start=date.fromordinal(segment_start),
+                    end=date.fromordinal(segment_end),
+                    validation_state=(
+                        require_validation_state(validation_state)
+                        if validation_state is not None
+                        else None
+                    ),
+                    vendor_identifier_ids=tuple(
+                        sorted(identifier_id for identifier_id, _ in active)
+                    ),
+                )
+            )
+        return tuple(segments)
 
     def resolve_alias_range(
         self, ticker: str, start: date, end: date
@@ -1949,6 +2061,18 @@ def _evidence_json(evidence: Mapping[str, Any] | str | None) -> str:
     if isinstance(evidence, str):
         return json.dumps({"note": evidence}, sort_keys=True, separators=(",", ":"))
     return json.dumps(evidence, sort_keys=True, separators=(",", ":"))
+
+
+def _normalize_identifier(
+    identifier_type: str, identifier_value: str
+) -> tuple[str, str]:
+    normalized_type = identifier_type.strip()
+    normalized_value = identifier_value.strip()
+    if not normalized_type or not normalized_value:
+        raise ValueError("identifier type and value must not be empty")
+    if normalized_type.casefold() == "ticker":
+        return "ticker", normalized_value.upper()
+    return normalized_type, normalized_value
 
 
 def _rows_cover(rows: list[sqlite3.Row], start: date, end: date) -> bool:

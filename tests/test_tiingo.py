@@ -222,6 +222,34 @@ def test_empty_csv_variants_return_no_rows(body):
 
 
 @responses.activate
+def test_header_only_intraday_csv_without_implicit_date_is_empty():
+    url = f"{BASE_URL}/iex/aapl/prices"
+    body = b"open,high,low,close,volume\n"
+    responses.add(responses.GET, url, body=body, status=200)
+
+    client = TiingoClient("test-token", min_request_interval=0.0)
+
+    assert client.intraday("AAPL", "2024-01-01", "2024-01-02") == []
+    assert client.response_bytes == len(body)
+
+
+@responses.activate
+def test_header_only_eod_csv_without_date_fails_closed():
+    url = f"{BASE_URL}/tiingo/daily/aapl/prices"
+    body = (
+        b"close,high,low,open,volume,adjClose,adjHigh,adjLow,adjOpen,"
+        b"adjVolume,divCash,splitFactor\n"
+    )
+    responses.add(responses.GET, url, body=body, status=200)
+
+    client = TiingoClient("test-token", min_request_interval=0.0)
+
+    with pytest.raises(TiingoError, match="missing columns.*date"):
+        client.eod("AAPL", "2024-01-01", "2024-01-02")
+    assert client.response_bytes == len(body)
+
+
+@responses.activate
 def test_csv_empty_fields_normalize_to_null():
     eod_url = f"{BASE_URL}/tiingo/daily/aapl/prices"
     eod_body = (

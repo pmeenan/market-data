@@ -83,6 +83,20 @@ market-data identity bootstrap-eod \
   --summary-json data/operations/identity-bootstrap-eod.json
 ```
 
+Intraday identifiers are established independently for each exact frequency;
+EOD evidence is never copied into IEX. The bootstrap partitions stable alias
+envelopes around known overlaps, probes the latest 20 XNYS sessions plus the
+one-session finalization context, and validates only segments with target-range
+rows. Empty or contradictory responses are persisted as fail-closed evidence
+so reruns skip them unless `--retry-blocked` is explicit. Probes use the same
+durable current-work ledger as other authenticated requests:
+
+```bash
+market-data identity bootstrap-intraday --freq 1hour \
+  --start 2016-12-12 --end 2026-08-27 \
+  --summary-json data/operations/identity-bootstrap-hourly-phase1.json
+```
+
 After an EOD history job reaches `complete` (never merely `blocked` or
 cancelled), the command automatically runs the idempotent D-023 episode audit.
 It conservatively splits a broad vendor history only at a gap of at least 252
@@ -104,15 +118,16 @@ market-data identity repair-eod-episodes --apply \
 ```
 
 The target server resumes the frozen, post-repair phase-1 seed EOD job every 15
-minutes with the user-systemd templates in `deploy/systemd/`. Each invocation
-runs the unfinished breadth-first sweep and exits cleanly at a quota boundary;
-its atomic status is written to
-`data/operations/phase1-eod-episodes-v3-status.json`. Exit 1 is accepted by the
-service because unresolved identity ranges remain visible while validated peers
-make progress; the JSON retains blocked and failed details. Coordinator
-failures receive up to three two-minute retries. For this personal deployment
-that bounded status plus the nonzero service result is the required failure
-signal; wiring email later is optional.
+minutes and the independently validated seed hourly job every 30 minutes with
+the user-systemd templates in `deploy/systemd/`. Each invocation runs one
+unfinished breadth-first sweep and exits cleanly at a quota boundary. Atomic
+status is written to `data/operations/phase1-eod-episodes-v3-status.json` and
+`data/operations/phase1-hourly-v1-status.json`. Exit 1 is accepted because
+unresolved identity ranges remain visible while validated peers make progress;
+the JSON retains blocked and failed details. Coordinator failures receive up
+to three two-minute retries. For this personal deployment that bounded status
+plus the nonzero service result is the required failure signal; wiring email
+later is optional.
 
 The nightly current-EOD timer runs at 23:30 UTC Monday through Friday. Its
 single locked command first refreshes exact EOD identity evidence for the latest
@@ -134,9 +149,11 @@ enabled so it continues after logout. Reinstall changed templates with:
 ```bash
 install -Dm0644 -t ~/.config/systemd/user \
   deploy/systemd/market-data-phase1-eod.* \
+  deploy/systemd/market-data-phase1-hourly.* \
   deploy/systemd/market-data-current-eod.*
 systemctl --user daemon-reload
 systemctl --user enable --now market-data-phase1-eod.timer
+systemctl --user enable --now market-data-phase1-hourly.timer
 systemctl --user enable --now market-data-current-eod.timer
 loginctl enable-linger "$USER"
 ```
@@ -304,10 +321,12 @@ structured quality/gating layer are implemented, as are durable request-budget
 accounting, current-first breadth-first history scheduling, and shared process
 locking. The phase-1 seed EOD pass fetched 282 additional histories, and the
 live D-023 repair now represents 62 reused symbols as 125 inferred episodes;
-an aligned EOD job remains scheduled for honest blockers, and a bounded-status
-nightly current-EOD timer is installed. Two actual post-market timer runs and
-phase-1 hourly identity/backfill remain; external failure notification is
-optional for this personal deployment.
+an aligned EOD job remains scheduled for honest blockers. Exact-frequency IEX
+probes validated 4,316 hourly segments while retaining empty, overlapping, and
+missing-alias exclusions, and the phase-1 hourly backfill is now scheduled. A
+bounded-status nightly current-EOD timer is installed; two actual post-market
+timer runs remain. External failure notification is optional for this personal
+deployment.
 M1 closed on
 2026-08-27 after its controlled EOD/IEX canary passed. Production ingestion is
 permitted only for validated segments; unresolved work remains fail-closed and

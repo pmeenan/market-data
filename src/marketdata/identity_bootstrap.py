@@ -1,14 +1,17 @@
-"""Conservative operator bootstrap for Tiingo EOD identity evidence.
+"""Conservative operator bootstrap for Tiingo dataset identity evidence.
 
 The public supported-tickers archive is useful alias evidence, but it is not a
 stable security master. Unique listing anchors require matching authenticated
 EOD metadata. Reused tickers receive separate archive-bounded episodes;
 overlapping spans remain explicit downstream blockers rather than being
-silently assigned to either instrument.
+silently assigned to either instrument. IEX identifiers are established
+separately for each exact frequency by a bounded response probe inside one
+conflict-free stable alias envelope.
 """
 
 from __future__ import annotations
 
+from bisect import bisect_left, bisect_right
 from collections import defaultdict
 from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -17,14 +20,25 @@ from datetime import date, datetime
 from typing import Any, Protocol
 from uuid import NAMESPACE_URL, uuid5
 
+from marketdata.calendar import (
+    IntradayRequestChunk,
+    max_intraday_probe_sessions,
+    next_session_after,
+    plan_intraday_requests,
+    session_schedule,
+)
 from marketdata.errors import QUOTA_STOP_REASONS, BudgetExhausted
+from marketdata.identity import merge_closed_date_ranges, require_dataset_key
+from marketdata.ingest import intraday_target_rows
 from marketdata.locking import data_directory_locked
 from marketdata.scheduler import (
     DEFAULT_BUDGET_POLICY,
     BudgetPolicy,
     PersistentAttemptObserver,
+    observed_client,
 )
 from marketdata.store import MetaStore
+from marketdata.store.bars import require_intraday_freq
 from marketdata.tiingo import TiingoClient, TiingoError
 
 US_EXCHANGES = frozenset({"NYSE", "NASDAQ", "NYSE ARCA", "AMEX", "BATS"})
@@ -37,6 +51,16 @@ class IdentityBootstrapClient(Protocol):
     ) -> list[dict[str, str]]: ...
 
     def ticker_metadata(self, ticker: str) -> dict[str, Any]: ...
+
+
+class IntradayIdentityBootstrapClient(Protocol):
+    def intraday(
+        self,
+        ticker: str,
+        start: date,
+        end: date,
+        freq: str = "1hour",
+    ) -> list[dict[str, Any]]: ...
 
 
 @dataclass
@@ -75,6 +99,60 @@ class IdentityBootstrapResult:
             "overlaps": dict(sorted(self.overlaps.items())),
             "failed": dict(sorted(self.failed.items())),
             "registered_episodes": self.registered_episodes,
+            "stop_reason": self.stop_reason,
+            "quota_stopped": self.quota_stopped,
+            "partial": self.partial,
+            "operational_failure": self.operational_failure,
+            "ok": self.ok,
+        }
+
+
+@dataclass
+class IntradayIdentityBootstrapResult:
+    requested: int
+    dataset_key: str
+    start: date
+    end: date
+    candidate_segments: int = 0
+    probe_attempts: int = 0
+    probe_rows: int = 0
+    validated: list[str] = field(default_factory=list)
+    skipped: list[str] = field(default_factory=list)
+    out_of_range: list[str] = field(default_factory=list)
+    blocked: dict[str, str] = field(default_factory=dict)
+    failed: dict[str, str] = field(default_factory=dict)
+    stop_reason: str | None = None
+
+    @property
+    def quota_stopped(self) -> bool:
+        return self.stop_reason in QUOTA_STOP_REASONS
+
+    @property
+    def partial(self) -> bool:
+        return bool(self.blocked or self.failed)
+
+    @property
+    def operational_failure(self) -> bool:
+        return self.stop_reason is not None and not self.quota_stopped
+
+    @property
+    def ok(self) -> bool:
+        return not self.partial and not self.operational_failure
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "requested": self.requested,
+            "dataset_key": self.dataset_key,
+            "start": self.start.isoformat(),
+            "end": self.end.isoformat(),
+            "candidate_segments": self.candidate_segments,
+            "probe_attempts": self.probe_attempts,
+            "probe_rows": self.probe_rows,
+            "validated": sorted(self.validated),
+            "skipped": sorted(self.skipped),
+            "out_of_range": sorted(self.out_of_range),
+            "blocked": dict(sorted(self.blocked.items())),
+            "failed": dict(sorted(self.failed.items())),
             "stop_reason": self.stop_reason,
             "quota_stopped": self.quota_stopped,
             "partial": self.partial,
@@ -261,6 +339,341 @@ def bootstrap_eod_identities(
         for year in meta.universe_years():
             meta.resolve_universe(year)
     return result
+
+
+@dataclass(frozen=True)
+class _IntradayIdentityCandidate:
+    instrument_id: str
+    ticker: str
+    start: date
+    end: date
+    evidence_state: str | None = None
+
+    @property
+    def key(self) -> str:
+        return f"{self.ticker}:{self.start}..{self.end}:{self.instrument_id}"
+
+
+class _ProbeRejected(ValueError):
+    """A bounded response supplied no affirmative identity evidence."""
+
+
+class _ProbeConflict(ValueError):
+    """A bounded response contradicted the requested identity envelope."""
+
+
+@data_directory_locked("identity:bootstrap-intraday")
+def bootstrap_intraday_identities(
+    client: IntradayIdentityBootstrapClient,
+    meta: MetaStore,
+    tickers: Sequence[str],
+    *,
+    start: date,
+    end: date,
+    freq: str = "1hour",
+    probe_sessions: int = 20,
+    retry_blocked: bool = False,
+    policy: BudgetPolicy = DEFAULT_BUDGET_POLICY,
+    clock: Callable[[], datetime] | None = None,
+    progress: Callable[[int, int], None] | None = None,
+) -> IntradayIdentityBootstrapResult:
+    """Establish exact-frequency IEX ticker evidence with bounded probes.
+
+    The stable alias registry is used only to enumerate candidates. Each
+    conflict-free alias segment receives its own IEX request, and only a
+    non-empty response inside the requested target envelope validates that
+    ticker for the exact intraday frequency. Empty and contradictory probes
+    are persisted as terminal fail-closed evidence so restarts can advance.
+    """
+    require_intraday_freq(freq)
+    if start > end:
+        raise ValueError("intraday identity start must not be after end")
+    if probe_sessions <= 0:
+        raise ValueError("probe_sessions must be positive")
+    max_probe_sessions = max_intraday_probe_sessions(freq)
+    if probe_sessions > max_probe_sessions:
+        raise ValueError(
+            f"probe_sessions must not exceed {max_probe_sessions} for {freq}"
+        )
+    dataset_key = require_dataset_key(f"intraday_{freq}")
+    normalized = sorted({ticker.strip().upper() for ticker in tickers})
+    if any(not ticker for ticker in normalized):
+        raise ValueError("identity bootstrap ticker must not be blank")
+    result = IntradayIdentityBootstrapResult(
+        requested=len(normalized),
+        dataset_key=dataset_key,
+        start=start,
+        end=end,
+    )
+    requested = set(normalized)
+    sources_by_ticker: dict[str, list[Any]] = defaultdict(list)
+    for source in meta.identity_aliases(requested):
+        ticker = str(source["ticker"]).upper()
+        if ticker in requested:
+            sources_by_ticker[ticker].append(source)
+
+    candidate_ranges: dict[tuple[str, str], list[tuple[date, date]]] = defaultdict(list)
+    for ticker in normalized:
+        sources = sources_by_ticker.get(ticker, [])
+        if not sources:
+            result.blocked[f"{ticker}:{start}..{end}"] = (
+                "no stable identity alias envelope is available to probe"
+            )
+            continue
+        intersects = False
+        for source in sources:
+            source_start = date.fromisoformat(str(source["start_date"]))
+            source_end = date.fromisoformat(str(source["end_date"]))
+            candidate_start = max(start, source_start)
+            candidate_end = min(end, source_end)
+            if candidate_start > candidate_end:
+                continue
+            intersects = True
+            instrument_id = str(source["instrument_id"])
+            report = meta.resolve_alias_range(ticker, candidate_start, candidate_end)
+            for segment in report.segments:
+                segment_key = f"{ticker}:{segment.start}..{segment.end}"
+                if segment.status != "resolved":
+                    result.blocked[segment_key] = (
+                        "stable alias evidence does not uniquely resolve this "
+                        f"IEX probe segment ({segment.status})"
+                    )
+                    continue
+                if segment.instrument_id != instrument_id:
+                    continue
+                candidate_ranges[(instrument_id, ticker)].append(
+                    (segment.start, segment.end)
+                )
+        if not intersects:
+            result.out_of_range.append(ticker)
+
+    base_candidates: list[_IntradayIdentityCandidate] = []
+    for (instrument_id, ticker), ranges in candidate_ranges.items():
+        base_candidates.extend(
+            _IntradayIdentityCandidate(instrument_id, ticker, range_start, range_end)
+            for range_start, range_end in merge_closed_date_ranges(ranges)
+        )
+    candidates = [
+        _IntradayIdentityCandidate(
+            candidate.instrument_id,
+            candidate.ticker,
+            evidence.start,
+            evidence.end,
+            evidence.validation_state,
+        )
+        for candidate in base_candidates
+        for evidence in meta.vendor_identifier_evidence_segments(
+            candidate.instrument_id,
+            dataset_key,
+            "ticker",
+            candidate.ticker,
+            candidate.start,
+            candidate.end,
+        )
+    ]
+    ordered = sorted(
+        candidates,
+        key=lambda item: (item.ticker, item.start, item.end, item.instrument_id),
+    )
+    result.candidate_segments = len(ordered)
+
+    overall_sessions = session_schedule(start, end)["session_date"].to_list()
+    probe_chunks: dict[_IntradayIdentityCandidate, IntradayRequestChunk | None] = {}
+    for candidate in ordered:
+        if candidate.evidence_state == "validated" or (
+            candidate.evidence_state in {"rejected", "conflict"} and not retry_blocked
+        ):
+            continue
+        first = bisect_left(overall_sessions, candidate.start)
+        last = bisect_right(overall_sessions, candidate.end)
+        sessions = overall_sessions[first:last]
+        if not sessions:
+            probe_chunks[candidate] = None
+            continue
+        probe_dates = sessions[-probe_sessions:]
+        probe_start = probe_dates[0]
+        probe_end = probe_dates[-1]
+        chunks = plan_intraday_requests(probe_start, probe_end, freq=freq)
+        fetch_end = next_session_after(probe_end)
+        if (
+            len(chunks) != 1
+            or chunks[0].end != probe_end
+            or chunks[0].fetch_end != fetch_end
+        ):
+            raise ValueError(
+                f"{probe_sessions} probe sessions do not fit one safe {freq} "
+                f"chunk for {candidate.key}"
+            )
+        probe_chunks[candidate] = chunks[0]
+
+    observer_kwargs: dict[str, Any] = {
+        "work_kind": "current",
+        "operation": f"identity-bootstrap:{dataset_key}",
+        "policy": policy,
+    }
+    if clock is not None:
+        observer_kwargs["clock"] = clock
+    observer = PersistentAttemptObserver(meta, **observer_kwargs)
+
+    with observed_client(client, observer) as metered:
+        for position, candidate in enumerate(ordered, start=1):
+            probe_evidence: dict[str, Any] = {}
+            try:
+                if candidate.evidence_state == "validated":
+                    resolution = meta.resolve_vendor_identifier(
+                        candidate.instrument_id,
+                        dataset_key,
+                        candidate.start,
+                        candidate.end,
+                    )
+                    if (
+                        resolution.status != "resolved"
+                        or (resolution.identifier_type or "").casefold() != "ticker"
+                        or (resolution.identifier_value or "").upper()
+                        != candidate.ticker
+                    ):
+                        result.blocked[candidate.key] = (
+                            "recorded IEX evidence conflicts with another stable "
+                            "instrument"
+                        )
+                    else:
+                        result.skipped.append(candidate.key)
+                    continue
+                if (
+                    candidate.evidence_state in {"rejected", "conflict"}
+                    and not retry_blocked
+                ):
+                    result.blocked[candidate.key] = (
+                        "previous IEX probe recorded "
+                        f"{candidate.evidence_state} evidence; "
+                        "retry explicitly after reviewing the report"
+                    )
+                    continue
+
+                chunk = probe_chunks[candidate]
+                if chunk is None:
+                    detail = "identity envelope contains no XNYS session to probe"
+                    _record_intraday_probe_evidence(
+                        meta,
+                        candidate,
+                        dataset_key,
+                        validation_state="rejected",
+                        detail=detail,
+                    )
+                    result.blocked[candidate.key] = detail
+                    continue
+                probe_evidence = {
+                    "probe_start": chunk.start.isoformat(),
+                    "probe_end": chunk.end.isoformat(),
+                    "fetch_end": chunk.fetch_end.isoformat(),
+                }
+
+                rows = metered.intraday(
+                    candidate.ticker,
+                    chunk.start,
+                    chunk.fetch_end,
+                    freq=freq,
+                )
+                result.probe_attempts += 1
+                result.probe_rows += len(rows)
+                probe_evidence["response_rows"] = len(rows)
+                try:
+                    target_rows = intraday_target_rows(rows, chunk)
+                except ValueError as exc:
+                    raise _ProbeConflict(str(exc)) from exc
+                if not target_rows:
+                    raise _ProbeRejected(
+                        "IEX probe returned no rows inside the stable target envelope"
+                    )
+                target_dates = [
+                    date.fromisoformat(str(row["date"])[:10]) for row in target_rows
+                ]
+                probe_evidence.update(
+                    {
+                        "target_rows": len(target_dates),
+                        "observed_first_date": min(target_dates).isoformat(),
+                        "observed_last_date": max(target_dates).isoformat(),
+                        "boundary_policy": (
+                            "the identity registry supplies only the stable alias "
+                            "envelope; "
+                            "this exact-frequency IEX response supplies identifier "
+                            "validation; every later response remains range-validated"
+                        ),
+                    }
+                )
+                _record_intraday_probe_evidence(
+                    meta,
+                    candidate,
+                    dataset_key,
+                    validation_state="validated",
+                    detail="IEX probe returned target rows inside the stable envelope",
+                    probe_evidence=probe_evidence,
+                )
+                result.validated.append(candidate.key)
+            except BudgetExhausted as exc:
+                result.stop_reason = exc.reason
+                break
+            except _ProbeRejected as exc:
+                detail = str(exc)
+                _record_intraday_probe_evidence(
+                    meta,
+                    candidate,
+                    dataset_key,
+                    validation_state="rejected",
+                    detail=detail,
+                    probe_evidence=probe_evidence,
+                )
+                result.blocked[candidate.key] = detail
+            except _ProbeConflict as exc:
+                detail = str(exc)
+                _record_intraday_probe_evidence(
+                    meta,
+                    candidate,
+                    dataset_key,
+                    validation_state="conflict",
+                    detail=detail,
+                    probe_evidence=probe_evidence,
+                )
+                result.blocked[candidate.key] = detail
+            except TiingoError as exc:
+                result.probe_attempts += 1
+                result.failed[candidate.key] = str(exc)
+            finally:
+                if progress is not None:
+                    progress(position, len(ordered))
+    return result
+
+
+def _record_intraday_probe_evidence(
+    meta: MetaStore,
+    candidate: _IntradayIdentityCandidate,
+    dataset_key: str,
+    *,
+    validation_state: str,
+    detail: str,
+    probe_evidence: Mapping[str, Any] | None = None,
+) -> None:
+    evidence = {
+        "source": "tiingo-iex-probe+stable-alias-envelope",
+        "dataset_key": dataset_key,
+        "instrument_id": candidate.instrument_id,
+        "ticker": candidate.ticker,
+        "valid_from": candidate.start.isoformat(),
+        "valid_to": candidate.end.isoformat(),
+        "outcome": validation_state,
+        "detail": detail,
+    }
+    evidence.update(probe_evidence or {})
+    meta.add_vendor_identifier(
+        candidate.instrument_id,
+        dataset_key,
+        "ticker",
+        candidate.ticker,
+        candidate.start,
+        candidate.end,
+        validation_state=validation_state,
+        evidence=evidence,
+    )
 
 
 class _ObservedMetadataClient:

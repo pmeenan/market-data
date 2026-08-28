@@ -25,6 +25,58 @@ Decision / Context / Consequences / Reopen if
 
 ---
 
+## D-024: IEX ticker evidence comes from exact-frequency bounded probes  (2026-08-28, status: accepted, amends D-014)
+
+**Decision:** A stable alias envelope is only a candidate for IEX identity; EOD
+validation is never copied into an intraday dataset. For each conflict-free
+alias segment intersecting the requested IEX range, the operator bootstrap
+makes a bounded request over the segment's latest 20 XNYS sessions plus D-021's
+one-session finalization context. A non-empty target-envelope response whose
+timestamps all fit the safe request envelope validates the bare ticker only for
+that exact frequency and candidate segment. Every later ingestion response is
+still independently request-, alias-, and identifier-envelope validated before
+publication.
+
+An empty target response is rejected evidence, and an invalid, out-of-request,
+or cap-sized response is conflicting evidence. Those terminal outcomes are
+persisted so an automatic rerun does not repeatedly spend quota or starve later
+segments; an operator may explicitly retry them after reviewing the report.
+When a requested range or alias envelope changes, the bootstrap partitions the
+candidate at stored evidence boundaries, reuses covered validated or terminal
+spans, and probes only newly uncovered dates. Stored envelopes therefore remain
+useful without being silently stretched beyond what the response established.
+Known alias overlaps remain unresolved without transport. A successful hourly
+probe supplies no five-minute evidence, or vice versa. All authenticated probes
+use the durable current-work request/byte ledger and the shared mutation lock.
+
+**Context:** Tiingo exposes no complete IEX security master or response
+metadata, and RE-005 proved that an EOD-valid permanent identifier can resolve
+incorrectly on IEX. The bounded probe is the strongest available independent
+endpoint evidence while D-014's date envelope prevents a bare symbol from
+crossing a known reuse boundary. On the 2026-08-28 phase-1 seed range,
+2016-12-12 through 2026-08-27, 4,715 conflict-free candidate segments were
+probed: 4,316 validated with target rows and 399 returned no target rows. An
+additional 111 overlap spans remained multiple matches, 666 tickers had no
+stable alias envelope, and 274 tickers were wholly before the measured IEX
+history range. The initial pass plus the 376 empty-shape confirmations
+transferred 31,202,799 encoded bytes.
+
+**Consequences:** `identity bootstrap-intraday` is the operator gate before a
+new exact-frequency historical cohort starts. It records the probe range,
+lookahead, row counts, observed dates, and outcome in `vendor_identifiers`.
+Safe segments can enter the breadth-first scheduler while every missing,
+overlapping, empty, or contradictory segment stays visible and fail-closed.
+The approach deliberately does not claim that one sample proves vendor history
+semantics forever; universal validation of every fetched response remains the
+publication boundary.
+
+**Reopen if:** Tiingo supplies a complete versioned IEX security master or
+per-row stable identifier, measured range-dependent identity invalidates the
+probe-envelope assumption, or a material class of valid listings is empty over
+20 sessions and needs a separately evidenced probe policy.
+
+---
+
 ## D-023: EOD history is partitioned into evidence-bounded listing episodes  (2026-08-28, status: accepted, amends D-014 and D-022)
 
 **Decision:** One internal instrument represents one continuous listing episode,

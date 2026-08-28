@@ -273,11 +273,11 @@ Scope:
   reconcile exit nonzero, preserves bounded JSON failure summaries, and does
   not create a contended history job. M3's library study runner will acquire
   this same lock through input selection and result publication.
-- [ ] Install the owner's scheduled Linux job for current updates with a bounded
+- [x] Install the owner's scheduled Linux job for current updates with a bounded
   nonzero status record. An external notification channel is optional for this
   personal deployment and is not an M2 gate. Start phase 1 (seed EOD plus
   hourly) as the first resumable background backfill.
-  Partial 2026-08-28: initialized the target-server v2 warehouse, imported the
+  Completed 2026-08-28: initialized the target-server v2 warehouse, imported the
   2011--2026 seed universes, registered 574 archive-backed EOD episodes, and
   retained 648 missing-archive cases, 112 overlap groups, and 18 metadata/404
   failures as explicit fail-closed work. The safe EOD pass fetched 282
@@ -288,9 +288,12 @@ Scope:
   enabled; it refreshes latest-universe EOD identity evidence and writes a
   bounded atomic status before returning exit 1 for per-symbol identity/vendor
   exclusions, exit 0 for quota stops, or retryable exit 2 for coordinator,
-  configuration, lock, and report-publication failure. Both scheduled services
-  retry exit 2 up to three times at two-minute intervals. Independently
-  validated hourly identities/backfill remain.
+  configuration, lock, and report-publication failure. D-024's independently
+  metered hourly bootstrap then validated 4,316 exact-frequency IEX segments;
+  399 empty probes, 111 alias-overlap spans, 666 missing-alias tickers, and 274
+  pre-IEX tickers remain explicit exclusions. A 30-minute user-systemd hourly
+  job now resumes the frozen phase-1 cohort. All three scheduled services retry
+  exit 2 up to three times at two-minute intervals.
 
 Exit criteria:
 
@@ -323,13 +326,19 @@ Exit criteria:
   runs on 2026-08-28, and induced lock contention produced systemd exit 2 plus
   a 506-byte diagnostic status before a healthy rerun restored the standing
   4.9 KB status. The first two actual timer-triggered post-market runs remain,
-  so this criterion stays unchecked. `make check` passes with 188 tests.
-- [ ] Phase 1 is running through the persisted scheduler, its coverage and budget
+  so this criterion stays unchecked. The scheduler/status checkpoint passed
+  `make check` with 188 tests before the phase-1 bootstrap work landed.
+- [x] Phase 1 is running through the persisted scheduler, its coverage and budget
   state survive restart, and `make check` passes.
   Seed EOD made its safe persisted pass on 2026-08-28 (282 fetched, zero
   failed), survived cancellation/restart during review, and now resumes an
-  aligned post-repair cohort for explicit blockers. Hourly is not yet
-  activated, so this phase-level criterion remains unchecked.
+  aligned post-repair cohort for explicit blockers. The hourly service's live
+  first sweep published 37 instruments before an induced SIGTERM at durable
+  cursor 41; the interrupted request retained its conservative reservation and
+  claimed no coverage. Restarting the same job resumed past cursor 59 and 52
+  covered instruments, proving persisted cohort, coverage, and budget state
+  survive the process boundary. The timer remains enabled and the full
+  `make check` passes.
 
 ## M3 — First persisted study, end to end  `pending`
 

@@ -15,11 +15,14 @@ import duckdb
 import polars as pl
 
 from marketdata import universe as universe_mod
+from marketdata.calendar import max_intraday_probe_sessions
 from marketdata.config import Config, load_config
 from marketdata.identity import DATASET_KEYS
 from marketdata.identity_bootstrap import (
     IdentityBootstrapResult,
+    IntradayIdentityBootstrapResult,
     bootstrap_eod_identities,
+    bootstrap_intraday_identities,
 )
 from marketdata.identity_episodes import (
     DEFAULT_EPISODE_GAP_SESSIONS,
@@ -65,6 +68,7 @@ _DATA_OPERATION_ERRORS = (
     sqlite3.Error,
     duckdb.Error,
     pl.exceptions.PolarsError,
+    TiingoError,
 )
 _STATUS_DETAIL_LIMIT = 100
 
@@ -273,6 +277,20 @@ def _echo_identity_bootstrap(result: IdentityBootstrapResult) -> None:
         f"{result.registered_episodes} episodes registered, "
         f"{len(result.overlaps)} overlap-blocked, "
         f"{len(result.blocked)} blocked, {len(result.failed)} failed"
+    )
+    if result.stop_reason:
+        click.echo(f"Identity bootstrap stopped: {result.stop_reason}", err=True)
+
+
+def _echo_intraday_identity_bootstrap(
+    result: IntradayIdentityBootstrapResult,
+) -> None:
+    click.echo(
+        f"{result.dataset_key} identity bootstrap: "
+        f"{len(result.validated)} validated, {len(result.skipped)} already valid, "
+        f"{len(result.out_of_range)} outside the requested range, "
+        f"{len(result.blocked)} blocked, {len(result.failed)} failed; "
+        f"{result.probe_attempts} probes, {result.probe_rows} rows"
     )
     if result.stop_reason:
         click.echo(f"Identity bootstrap stopped: {result.stop_reason}", err=True)
@@ -543,6 +561,96 @@ def identity_bootstrap_eod_cmd(
     _echo_identity_bootstrap(result)
     if result.operational_failure:
         raise _IngestOperationalError("identity bootstrap failed")
+    if result.partial:
+        raise click.exceptions.Exit(1)
+
+
+@identity.command("bootstrap-intraday")
+@_with_ticker_opts
+@click.option("--start", type=click.DateTime(["%Y-%m-%d"]), required=True)
+@click.option("--end", type=click.DateTime(["%Y-%m-%d"]), required=True)
+@click.option(
+    "--freq",
+    type=click.Choice(INTRADAY_FREQS),
+    default=DEFAULT_INTRADAY_FREQ,
+    show_default=True,
+)
+@click.option(
+    "--probe-sessions",
+    type=click.IntRange(min=1),
+    default=20,
+    show_default=True,
+    help="Recent XNYS sessions sampled inside each stable alias segment",
+)
+@click.option(
+    "--retry-blocked",
+    is_flag=True,
+    help="Retry segments with a recorded empty or contradictory IEX probe",
+)
+@click.option(
+    "--summary-json",
+    type=click.Path(),
+    default=None,
+    help="Write the complete structured bootstrap report to this file",
+)
+@click.pass_obj
+def identity_bootstrap_intraday_cmd(
+    config: Config,
+    tickers: tuple[str, ...],
+    tickers_file: str | None,
+    universe_year: int | None,
+    start: datetime,
+    end: datetime,
+    freq: str,
+    probe_sessions: int,
+    retry_blocked: bool,
+    summary_json: str | None,
+) -> None:
+    """Probe and record independently validated IEX identity evidence."""
+    _validate_cli_range(start, end, summary_json)
+    maximum = max_intraday_probe_sessions(freq)
+    if probe_sessions > maximum:
+        _raise_ingest_error(
+            ValueError(f"--probe-sessions must not exceed {maximum} for --freq {freq}"),
+            summary_json,
+        )
+    _require_initialized_warehouse(config)
+    with MetaStore(config.meta_path) as meta:
+        _require_ingestion_ready(meta)
+        ticker_list = _resolve_tickers(
+            meta,
+            tickers,
+            tickers_file,
+            universe_year,
+            summary_json=summary_json,
+        )
+        last_reported = 0
+
+        def progress(position: int, total: int) -> None:
+            nonlocal last_reported
+            if position == total or position - last_reported >= 250:
+                click.echo(f"IEX identity probes: {position}/{total}")
+                last_reported = position
+
+        try:
+            result = bootstrap_intraday_identities(
+                _operational_client(config),
+                meta,
+                ticker_list,
+                start=start.date(),
+                end=end.date(),
+                freq=freq,
+                probe_sessions=probe_sessions,
+                retry_blocked=retry_blocked,
+                progress=progress,
+            )
+        except _DATA_OPERATION_ERRORS as exc:
+            _raise_ingest_error(exc, summary_json, operational=True)
+    if summary_json:
+        _write_ingest_json(result.to_dict(), summary_json)
+    _echo_intraday_identity_bootstrap(result)
+    if result.operational_failure:
+        raise _IngestOperationalError("intraday identity bootstrap failed")
     if result.partial:
         raise click.exceptions.Exit(1)
 

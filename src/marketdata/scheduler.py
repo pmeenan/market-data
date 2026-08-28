@@ -19,7 +19,7 @@ from uuid import uuid4
 
 from marketdata.calendar import plan_intraday_requests, weekend_only
 from marketdata.errors import QUOTA_STOP_REASONS, BudgetExhausted
-from marketdata.identity import DATASET_KEYS
+from marketdata.identity import DATASET_KEYS, merge_closed_date_ranges
 from marketdata.ingest import (
     IngestResult,
     ValidatedRequestSegment,
@@ -1157,18 +1157,14 @@ def _add_static_blockers(meta: MetaStore, job_id: str, result: IngestResult) -> 
 
 
 def _merge_alias_ranges(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    merged: list[dict[str, Any]] = []
-    for item in sorted(
-        items, key=lambda value: (value["ticker"], value["start"], value["end"])
-    ):
-        if (
-            merged
-            and merged[-1]["ticker"] == item["ticker"]
-            and item["start"] <= merged[-1]["end"] + timedelta(days=1)
-        ):
-            merged[-1]["end"] = max(merged[-1]["end"], item["end"])
-        else:
-            merged.append(dict(item))
+    by_ticker: dict[str, list[tuple[date, date]]] = {}
+    for item in items:
+        by_ticker.setdefault(item["ticker"], []).append((item["start"], item["end"]))
+    merged = [
+        {"ticker": ticker, "start": start, "end": end}
+        for ticker, ranges in sorted(by_ticker.items())
+        for start, end in merge_closed_date_ranges(ranges)
+    ]
     return sorted(
         merged, key=lambda value: (value["end"], value["start"]), reverse=True
     )

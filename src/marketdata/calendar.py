@@ -189,6 +189,18 @@ def plan_intraday_requests(
     return list(reversed(chunks)) if reverse else list(chunks)
 
 
+def max_intraday_probe_sessions(freq: str) -> int:
+    """Return the absolute session-count ceiling for one lookahead-safe chunk.
+
+    Exchange holidays can make the realizable limit smaller for a particular
+    date span, so callers must still confirm that their concrete span produces
+    exactly one planner chunk before issuing any requests.
+    """
+    require_intraday_freq(freq)
+    max_weekdays = (IEX_ROW_CAP - 1) // _ROWS_PER_WEEKDAY[freq]
+    return max_weekdays - 1
+
+
 @lru_cache(maxsize=1024)
 def _plan_intraday_requests(
     start: date, end: date, freq: str

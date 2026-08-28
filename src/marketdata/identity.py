@@ -7,6 +7,7 @@ and conflicts instead of receiving a guessed instrument or identifier.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date
 from typing import Literal
@@ -99,6 +100,16 @@ class IdentifierResolution:
 
 
 @dataclass(frozen=True)
+class IdentifierEvidenceSegment:
+    """One span with a constant state for one exact identifier candidate."""
+
+    start: date
+    end: date
+    validation_state: ValidationState | None
+    vendor_identifier_ids: tuple[int, ...]
+
+
+@dataclass(frozen=True)
 class UniverseResolution:
     year: int
     ticker: str
@@ -108,3 +119,18 @@ class UniverseResolution:
     @property
     def instrument_id(self) -> str | None:
         return self.instrument_ids[0] if self.status == "resolved" else None
+
+
+def merge_closed_date_ranges(
+    ranges: Iterable[tuple[date, date]],
+) -> list[tuple[date, date]]:
+    """Merge overlapping or calendar-adjacent closed date ranges."""
+    merged: list[list[date]] = []
+    for start, end in sorted(ranges):
+        if start > end:
+            raise ValueError("date range start must not be after end")
+        if merged and start.toordinal() <= merged[-1][1].toordinal() + 1:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    return [(item[0], item[1]) for item in merged]

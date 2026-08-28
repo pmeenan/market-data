@@ -281,6 +281,15 @@ read-only SQLite.
 
 Identity validation precedes every production write:
 
+For IEX, the stable alias registry supplies candidate envelopes but never
+cross-dataset validation. D-024's operator bootstrap independently probes each
+exact frequency inside conflict-free candidate segments, meters the request,
+and records validated, empty/rejected, or conflicting evidence before
+historical scheduling. A probe does not weaken the universal response checks
+below; missing aliases, known overlaps, and empty probes remain fail-closed.
+Range changes are partitioned at prior probe-evidence boundaries so covered
+spans are reused and only uncovered dates need another bounded probe.
+
 1. Resolve the requested ticker and date span into one or more non-overlapping
    request segments, each owned by exactly one instrument and bounded by
    validated alias evidence.

@@ -446,6 +446,36 @@ def test_vendor_identifier_resolution_accepts_abutting_evidence(tmp_path):
         assert resolved.identifier_value == "US0000001"
 
 
+def test_ticker_identifier_writes_are_case_normalized(tmp_path):
+    with MetaStore(tmp_path / "meta.db") as meta:
+        instrument_id = meta.upsert_instrument("instrument-1")
+        first_id = meta.add_vendor_identifier(
+            instrument_id,
+            "intraday_1hour",
+            "Ticker",
+            "aapl",
+            date(2024, 1, 2),
+            date(2024, 1, 31),
+            validation_state="rejected",
+        )
+        second_id = meta.add_vendor_identifier(
+            instrument_id,
+            "intraday_1hour",
+            "ticker",
+            "AAPL",
+            date(2024, 1, 2),
+            date(2024, 1, 31),
+            validation_state="validated",
+        )
+
+        assert second_id == first_id
+        row = meta._con.execute(
+            """SELECT identifier_type, identifier_value, validation_state
+               FROM vendor_identifiers"""
+        ).fetchone()
+        assert tuple(row) == ("ticker", "AAPL", "validated")
+
+
 def test_universe_resolution_is_recorded_without_guessing(tmp_path):
     with MetaStore(tmp_path / "meta.db") as meta:
         meta.set_universe(
