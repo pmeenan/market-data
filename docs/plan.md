@@ -276,6 +276,13 @@ Scope:
 - [ ] Install the owner's scheduled Linux job for current updates with a bounded
   status record and an actually observed notification path for failure. Start
   phase 1 (seed EOD plus hourly) as the first resumable background backfill.
+  Partial 2026-08-28: initialized the target-server v2 warehouse, imported the
+  2011--2026 seed universes, authenticated 4,454 unambiguous seed EOD listings
+  against Tiingo archive + EOD metadata evidence (930 missing/reused records
+  remain blocked and 19 metadata mismatches/404s failed closed), and installed
+  a 15-minute user-systemd timer for the frozen 2006-08-28..2026-08-27 phase-1
+  EOD job. Nightly current updates, email notification, and independently
+  validated hourly identities/backfill remain.
 
 Exit criteria:
 
@@ -306,6 +313,8 @@ Exit criteria:
   the owner's notification channel.
 - [ ] Phase 1 is running through the persisted scheduler, its coverage and budget
   state survive restart, and `make check` passes.
+  Seed EOD is live through the persisted scheduler as of 2026-08-28; hourly is
+  not yet activated, so this phase-level criterion remains unchecked.
 
 ## M3 — First persisted study, end to end  `pending`
 

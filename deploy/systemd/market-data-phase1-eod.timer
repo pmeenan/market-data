@@ -1,0 +1,11 @@
+[Unit]
+Description=Resume market-data phase 1 seed EOD backfill
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=15min
+AccuracySec=1min
+Unit=market-data-phase1-eod.service
+
+[Install]
+WantedBy=timers.target

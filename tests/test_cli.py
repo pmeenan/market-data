@@ -121,6 +121,113 @@ def test_invalid_range_is_click_error_and_writes_summary_atomically(tmp_path):
     assert not summary.with_suffix(".json.tmp").exists()
 
 
+def test_identity_bootstrap_command_validates_safe_universe_record(
+    tmp_path, monkeypatch
+):
+    from marketdata.store import MetaStore
+
+    data_dir = tmp_path / "data"
+    archive = {
+        "ticker": "SAFE",
+        "exchange": "NASDAQ",
+        "assetType": "Stock",
+        "priceCurrency": "USD",
+        "startDate": "2020-01-02",
+        "endDate": "2026-08-27",
+    }
+
+    class IdentityClient:
+        response_bytes = 0
+
+        def supported_tickers(self):
+            holder = json.loads((data_dir / ".market-data.lock").read_text())
+            assert holder["operation"] == "identity:bootstrap-eod"
+            return [archive]
+
+        def ticker_metadata(self, ticker):
+            assert ticker == "SAFE"
+            return {
+                "ticker": "SAFE",
+                "exchangeCode": "NASDAQ",
+                "startDate": "2020-01-02",
+                "endDate": "2026-08-27",
+                "name": "Safe Incorporated",
+                "description": "fixture",
+            }
+
+    with MetaStore(data_dir / "meta.db") as meta:
+        meta.activate_canonical_generation()
+        meta.set_universe(2024, [{"ticker": "SAFE", "rank": 1}])
+    monkeypatch.setattr(cli_mod, "_client", lambda config: IdentityClient())
+    summary = tmp_path / "identity.json"
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "--data-dir",
+            str(data_dir),
+            "identity",
+            "bootstrap-eod",
+            "--universe",
+            "2024",
+            "--summary-json",
+            str(summary),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "1 validated" in result.output
+    assert json.loads(summary.read_text())["validated"] == ["SAFE"]
+    with MetaStore(data_dir / "meta.db") as meta:
+        assert len(meta.instrument_ids()) == 1
+        assert (
+            meta._con.execute(
+                "SELECT status FROM universe_resolutions WHERE year = 2024"
+            ).fetchone()["status"]
+            == "resolved"
+        )
+
+
+def test_identity_bootstrap_fails_before_mutation_when_data_lock_is_held(
+    tmp_path, monkeypatch
+):
+    from marketdata.store import MetaStore
+
+    data_dir = tmp_path / "data"
+    with MetaStore(data_dir / "meta.db") as meta:
+        meta.activate_canonical_generation()
+        meta.set_universe(2024, [{"ticker": "SAFE", "rank": 1}])
+
+    class IdentityClient:
+        def supported_tickers(self):
+            raise AssertionError("bootstrap transport started under contention")
+
+    monkeypatch.setattr(cli_mod, "_client", lambda config: IdentityClient())
+    summary = tmp_path / "identity-contended.json"
+
+    with _external_lock(data_dir):
+        result = CliRunner().invoke(
+            main,
+            [
+                "--data-dir",
+                str(data_dir),
+                "identity",
+                "bootstrap-eod",
+                "--universe",
+                "2024",
+                "--summary-json",
+                str(summary),
+            ],
+        )
+
+    assert result.exit_code == 1
+    assert "data directory is busy" in result.output
+    assert json.loads(summary.read_text())["ok"] is False
+    with MetaStore(data_dir / "meta.db") as meta:
+        assert meta.instrument_ids() == set()
+        assert meta.request_attempts() == []
+
+
 def test_blank_ticker_is_click_error_before_client_or_write(tmp_path, monkeypatch):
     from marketdata.store import MetaStore
 

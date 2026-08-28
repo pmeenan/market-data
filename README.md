@@ -69,6 +69,38 @@ market-data backfill intraday --phase 1 --freq 1hour \
   --start 2016-12-12 --max-units 500
 ```
 
+Before a new warehouse can ingest EOD, bootstrap conservative identity
+evidence from Tiingo's public supported-tickers archive plus its authenticated
+EOD metadata endpoint. Only an in-scope ticker with exactly one archive record
+whose ticker, exchange, and date envelope all agree is admitted; reused,
+missing, mismatching, and 404 records remain reported and fail closed. The
+authenticated metadata calls use the durable current-work request/byte ledger.
+
+```bash
+market-data identity bootstrap-eod \
+  --summary-json data/operations/identity-bootstrap-eod.json
+```
+
+The target server currently resumes the frozen phase-1 seed EOD job every 15
+minutes with the user-systemd templates in `deploy/systemd/`. Each invocation
+runs the unfinished breadth-first sweep and exits cleanly at a quota boundary;
+its atomic status is written to `data/operations/phase1-eod-status.json`. Exit
+1 is accepted by the service because unresolved identity ranges remain visible
+while validated peers make progress; the JSON retains blocked and failed
+details.
+
+On this server the templates were installed under
+`~/.config/systemd/user/`, the timer was enabled, and user lingering was
+enabled so it continues after logout. Reinstall changed templates with:
+
+```bash
+install -Dm0644 -t ~/.config/systemd/user \
+  deploy/systemd/market-data-phase1-eod.*
+systemctl --user daemon-reload
+systemctl --user enable --now market-data-phase1-eod.timer
+loginctl enable-linger "$USER"
+```
+
 Cancellation is also available while a sweep is running. Any already-started
 request turn finishes and checkpoints safely, then the sweep stops before the
 next instrument turn.
@@ -229,8 +261,10 @@ src/marketdata/
 Milestone **M2 (trustworthy scheduled ingestion)** is in progress. Its
 cap-safe intraday request planner, XNYS calendar/session-label surface, and
 structured quality/gating layer are implemented, as are durable request-budget
-accounting and current-first breadth-first history scheduling. Shared process
-locking and scheduled operations remain. M1 closed on
+accounting, current-first breadth-first history scheduling, and shared process
+locking. The phase-1 seed EOD backfill is running through a user-systemd timer;
+nightly current updates, failure email, and phase-1 hourly activation remain.
+M1 closed on
 2026-08-27 after its controlled EOD/IEX canary passed. Production ingestion is
 permitted only for validated segments; unresolved work remains fail-closed and
 visible. The research/backtesting layer begins in M3.

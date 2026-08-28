@@ -15,6 +15,7 @@ import polars as pl
 from marketdata import universe as universe_mod
 from marketdata.config import Config, load_config
 from marketdata.identity import DATASET_KEYS
+from marketdata.identity_bootstrap import bootstrap_eod_identities
 from marketdata.ingest import (
     DEFAULT_INTRADAY_FREQ,
     IngestResult,
@@ -333,6 +334,68 @@ def _resolve_tickers(
             "Use --tickers/--tickers-file, or build a universe first."
         )
     return resolved
+
+
+# ---- identity ------------------------------------------------------------
+
+
+@main.group()
+def identity() -> None:
+    """Build and inspect stable instrument identity evidence."""
+
+
+@identity.command("bootstrap-eod")
+@_with_ticker_opts
+@click.option(
+    "--summary-json",
+    type=click.Path(),
+    default=None,
+    help="Write the complete structured bootstrap report to this file",
+)
+@click.pass_obj
+def identity_bootstrap_eod_cmd(
+    config: Config,
+    tickers: tuple[str, ...],
+    tickers_file: str | None,
+    universe_year: int | None,
+    summary_json: str | None,
+) -> None:
+    """Validate unambiguous Tiingo archive records for EOD ingestion."""
+    _require_initialized_warehouse(config)
+    with MetaStore(config.meta_path) as meta:
+        _require_ingestion_ready(meta)
+        ticker_list = _resolve_tickers(
+            meta,
+            tickers,
+            tickers_file,
+            universe_year,
+            summary_json=summary_json,
+        )
+        last_reported = 0
+
+        def progress(position: int, total: int) -> None:
+            nonlocal last_reported
+            if position == total or position - last_reported >= 500:
+                click.echo(f"Identity metadata: {position}/{total}")
+                last_reported = position
+
+        try:
+            result = bootstrap_eod_identities(
+                _client(config), meta, ticker_list, progress=progress
+            )
+        except (OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
+            _raise_ingest_error(exc, summary_json)
+    if summary_json:
+        _write_json_atomic(result.to_dict(), Path(summary_json))
+    click.echo(
+        "Identity bootstrap: "
+        f"{len(result.validated)} validated, {len(result.skipped)} already valid, "
+        f"{len(result.blocked)} blocked, {len(result.failed)} failed"
+    )
+    if result.stop_reason:
+        click.echo(f"Identity bootstrap stopped: {result.stop_reason}", err=True)
+    if not result.ok:
+        raise click.exceptions.Exit(1)
 
 
 @main.group()

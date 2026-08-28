@@ -121,7 +121,9 @@ Milestone **M2 (trustworthy scheduled ingestion)** is in progress. Cap-safe
 next-session IEX planning and the XNYS session-label surface are implemented;
 structured quality findings, consumer-declared gates, durable request budgets,
 current-first breadth-first scheduling, and shared data-directory mutation
-locking are also implemented. Scheduled operations remain.
+locking are also implemented. The phase-1 seed EOD backfill is running through
+a user-systemd timer; nightly current updates, failure email, and phase-1 hourly
+activation remain.
 M1 closed on 2026-08-27. Production ingestion is permitted only for validated
 request segments; unresolved work remains fail-closed. The backtest layer does
 not exist yet. See [docs/plan.md](docs/plan.md). Keep this paragraph short and
