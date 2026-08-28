@@ -274,15 +274,18 @@ Scope:
   not create a contended history job. M3's library study runner will acquire
   this same lock through input selection and result publication.
 - [ ] Install the owner's scheduled Linux job for current updates with a bounded
-  status record and an actually observed notification path for failure. Start
-  phase 1 (seed EOD plus hourly) as the first resumable background backfill.
+  nonzero status record. An external notification channel is optional for this
+  personal deployment and is not an M2 gate. Start phase 1 (seed EOD plus
+  hourly) as the first resumable background backfill.
   Partial 2026-08-28: initialized the target-server v2 warehouse, imported the
-  2011--2026 seed universes, authenticated 4,454 unambiguous seed EOD listings
-  against Tiingo archive + EOD metadata evidence (930 missing/reused records
-  remain blocked and 19 metadata mismatches/404s failed closed), and installed
-  a 15-minute user-systemd timer for the frozen 2006-08-28..2026-08-27 phase-1
-  EOD job. Nightly current updates, email notification, and independently
-  validated hourly identities/backfill remain.
+  2011--2026 seed universes, registered 574 archive-backed EOD episodes, and
+  retained 648 missing-archive cases, 112 overlap groups, and 18 metadata/404
+  failures as explicit fail-closed work. The safe EOD pass fetched 282
+  additional histories with no failures. D-023 then repaired 62 covered broad
+  histories into 125 inferred episodes; the final scan has zero structural or
+  OHLC errors. An aligned 15-minute user-systemd EOD job retains the unresolved
+  ranges. Nightly current updates and independently validated hourly
+  identities/backfill remain.
 
 Exit criteria:
 
@@ -309,12 +312,14 @@ Exit criteria:
   and separated operational CLI failures from gate failures. `make check`
   passes with 134 tests.
 - [ ] Two consecutive scheduled current-update runs complete on the target server;
-  an induced failure returns nonzero, records a bounded diagnostic, and reaches
-  the owner's notification channel.
+  an induced failure returns nonzero and records a bounded diagnostic visible
+  through the user-systemd result and status JSON.
 - [ ] Phase 1 is running through the persisted scheduler, its coverage and budget
   state survive restart, and `make check` passes.
-  Seed EOD is live through the persisted scheduler as of 2026-08-28; hourly is
-  not yet activated, so this phase-level criterion remains unchecked.
+  Seed EOD made its safe persisted pass on 2026-08-28 (282 fetched, zero
+  failed), survived cancellation/restart during review, and now resumes an
+  aligned post-repair cohort for explicit blockers. Hourly is not yet
+  activated, so this phase-level criterion remains unchecked.
 
 ## M3 — First persisted study, end to end  `pending`
 

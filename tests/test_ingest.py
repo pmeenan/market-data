@@ -2,6 +2,7 @@
 
 from datetime import date, timedelta
 
+import polars as pl
 import pytest
 import responses
 
@@ -428,6 +429,30 @@ def test_response_identity_metadata_conflict_rejects_entire_response(tmp_path):
     assert "conflicts with validated identity" in next(iter(result.failed.values()))
     assert bars.read_canonical_eod("stable-id") is None
     assert meta.get_coverage("stable-id", "eod") is None
+
+
+def test_response_invalid_eod_ohlc_is_quarantined_without_blocking_valid_rows(tmp_path):
+    bars, meta = stores(tmp_path)
+    start, end = date(2024, 1, 1), date(2024, 1, 5)
+    _identity_target(meta, "stable-id", "SAFE", "eod", start, end)
+    invalid = {**eod_row(date(2024, 1, 2)), "low": 101.0, "open": 100.0}
+    valid = eod_row(date(2024, 1, 3))
+
+    result = backfill_eod_validated(
+        FakeTiingo({"SAFE": [invalid, valid]}), bars, meta, ["SAFE"], start, end
+    )
+
+    assert result.ok
+    assert result.fetched == ["stable-id"]
+    assert bars.read_canonical_eod("stable-id")["date"].to_list() == [date(2024, 1, 3)]
+    assert meta.get_coverage("stable-id", "eod") == (start, end)
+    quarantine_files = sorted(
+        (tmp_path / "quarantine" / "eod-response").glob("*.parquet")
+    )
+    assert len(quarantine_files) == 1
+    quarantined = pl.read_parquet(quarantine_files[0])
+    assert quarantined["instrument_id"].to_list() == ["stable-id"]
+    assert "ordering violation" in quarantined["reason"][0]
 
 
 def test_intraday_identity_evidence_is_exact_frequency(tmp_path):

@@ -29,7 +29,7 @@ from marketdata.identity import (
     require_validation_state,
 )
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 _SCHEMA_V1 = """
 CREATE TABLE IF NOT EXISTS tickers (
@@ -257,6 +257,82 @@ CREATE TABLE IF NOT EXISTS history_blocked_ranges (
 );
 """
 
+_SCHEMA_V5 = """
+CREATE TABLE IF NOT EXISTS identity_episodes (
+    instrument_id       TEXT PRIMARY KEY REFERENCES instruments(instrument_id),
+    source_instrument_id TEXT REFERENCES instruments(instrument_id),
+    dataset_key         TEXT NOT NULL,
+    ticker              TEXT NOT NULL,
+    display_label       TEXT NOT NULL,
+    episode_ordinal     INTEGER NOT NULL,
+    basis               TEXT NOT NULL,
+    confidence          TEXT NOT NULL,
+    observed_first_date TEXT,
+    observed_last_date  TEXT,
+    evidence            TEXT NOT NULL,
+    created_at          TEXT NOT NULL,
+    updated_at          TEXT NOT NULL,
+    CHECK (dataset_key IN ('eod', 'intraday_1hour', 'intraday_5min')),
+    CHECK (length(trim(ticker)) > 0),
+    CHECK (length(trim(display_label)) > 0),
+    CHECK (episode_ordinal >= 1),
+    CHECK (basis IN ('archive_record', 'observed_gap')),
+    CHECK (confidence IN ('metadata_validated', 'archive_bound', 'inferred')),
+    CHECK (
+        (observed_first_date IS NULL AND observed_last_date IS NULL)
+        OR (
+            observed_first_date IS NOT NULL
+            AND observed_last_date IS NOT NULL
+            AND observed_first_date <= observed_last_date
+        )
+    )
+);
+CREATE INDEX IF NOT EXISTS identity_episodes_source
+    ON identity_episodes (source_instrument_id, dataset_key);
+CREATE INDEX IF NOT EXISTS identity_episodes_ticker
+    ON identity_episodes (ticker, dataset_key);
+"""
+
+
+def _apply_v4_compatibility(con: sqlite3.Connection) -> None:
+    """Fold pre-commit v4 working-tree variants into the numbered v5 migration."""
+    attempt_columns = {
+        row[1]
+        for row in con.execute("PRAGMA table_info('api_request_attempts')").fetchall()
+    }
+    if "bytes_known" not in attempt_columns:
+        con.execute(
+            """ALTER TABLE api_request_attempts
+               ADD COLUMN bytes_known INTEGER NOT NULL DEFAULT 0
+               CHECK (bytes_known IN (0, 1))"""
+        )
+        con.execute(
+            """UPDATE api_request_attempts SET bytes_known = 1
+               WHERE complete = 1"""
+        )
+    job_columns = {
+        row[1] for row in con.execute("PRAGMA table_info('history_jobs')").fetchall()
+    }
+    if "cancelled" not in job_columns:
+        con.execute(
+            """ALTER TABLE history_jobs
+               ADD COLUMN cancelled INTEGER NOT NULL DEFAULT 0
+               CHECK (cancelled IN (0, 1))"""
+        )
+    range_columns = {
+        row[1] for row in con.execute("PRAGMA table_info('history_ranges')").fetchall()
+    }
+    if "terminal_blocked" not in range_columns:
+        con.execute(
+            """ALTER TABLE history_ranges
+               ADD COLUMN terminal_blocked INTEGER NOT NULL DEFAULT 0
+               CHECK (terminal_blocked IN (0, 1))"""
+        )
+    con.execute(
+        """CREATE INDEX IF NOT EXISTS history_ranges_job_status
+           ON history_ranges (job_id, status)"""
+    )
+
 
 def _migrate(con: sqlite3.Connection) -> None:
     version = con.execute("PRAGMA user_version").fetchone()[0]
@@ -289,56 +365,17 @@ def _migrate(con: sqlite3.Connection) -> None:
             con.executescript(_SCHEMA_V4)
             con.execute("PRAGMA user_version = 4")
         version = 4
+    if version < 5:
+        with con:
+            _apply_v4_compatibility(con)
+            con.executescript(_SCHEMA_V5)
+            con.execute("PRAGMA user_version = 5")
+        version = 5
     if version > SCHEMA_VERSION:
         raise RuntimeError(
             f"meta.db schema version {version} is newer than this code "
             f"supports ({SCHEMA_VERSION}) — update the tool"
         )
-    if version == 4:
-        # Schema v4 was exercised from the working tree before it was
-        # committed. Preserve those local ledgers with narrowly additive
-        # compatibility columns instead of rerunning every v3/v4 DDL script.
-        with con:
-            attempt_columns = {
-                row[1]
-                for row in con.execute(
-                    "PRAGMA table_info('api_request_attempts')"
-                ).fetchall()
-            }
-            if "bytes_known" not in attempt_columns:
-                con.execute(
-                    """ALTER TABLE api_request_attempts
-                       ADD COLUMN bytes_known INTEGER NOT NULL DEFAULT 0
-                       CHECK (bytes_known IN (0, 1))"""
-                )
-                con.execute(
-                    """UPDATE api_request_attempts SET bytes_known = 1
-                       WHERE complete = 1"""
-                )
-            job_columns = {
-                row[1]
-                for row in con.execute("PRAGMA table_info('history_jobs')").fetchall()
-            }
-            if "cancelled" not in job_columns:
-                con.execute(
-                    """ALTER TABLE history_jobs
-                       ADD COLUMN cancelled INTEGER NOT NULL DEFAULT 0
-                       CHECK (cancelled IN (0, 1))"""
-                )
-            range_columns = {
-                row[1]
-                for row in con.execute("PRAGMA table_info('history_ranges')").fetchall()
-            }
-            if "terminal_blocked" not in range_columns:
-                con.execute(
-                    """ALTER TABLE history_ranges
-                       ADD COLUMN terminal_blocked INTEGER NOT NULL DEFAULT 0
-                       CHECK (terminal_blocked IN (0, 1))"""
-                )
-            con.execute(
-                """CREATE INDEX IF NOT EXISTS history_ranges_job_status
-                   ON history_ranges (job_id, status)"""
-            )
 
 
 class MetaStore:
@@ -459,6 +496,287 @@ class MetaStore:
                ORDER BY instrument_id"""
         ).fetchall()
         return {str(row["instrument_id"]): str(row["lifecycle_status"]) for row in rows}
+
+    def eod_identity_sources(self) -> list[sqlite3.Row]:
+        """Return exact single-alias EOD identities eligible for episode auditing."""
+        return self._con.execute(
+            """SELECT DISTINCT
+                      i.instrument_id, i.lifecycle_status, i.description,
+                      a.ticker, a.exchange, a.asset_type,
+                      a.start_date, a.end_date, a.evidence AS alias_evidence
+                 FROM instruments AS i
+                 JOIN instrument_aliases AS a USING (instrument_id)
+                 JOIN vendor_identifiers AS v
+                   ON v.instrument_id = i.instrument_id
+                  AND v.dataset_key = 'eod'
+                  AND v.validation_state = 'validated'
+                  AND lower(v.identifier_type) = 'ticker'
+                  AND upper(v.identifier_value) = a.ticker
+                  AND v.valid_from = a.start_date
+                  AND v.valid_to = a.end_date
+                WHERE 1 = (
+                    SELECT count(*) FROM instrument_aliases AS own_alias
+                    WHERE own_alias.instrument_id = i.instrument_id
+                  )
+                ORDER BY i.instrument_id"""
+        ).fetchall()
+
+    def identity_episodes(self) -> list[sqlite3.Row]:
+        """Return recorded listing-episode provenance in deterministic order."""
+        return self._con.execute(
+            """SELECT * FROM identity_episodes
+               ORDER BY dataset_key, ticker, episode_ordinal, instrument_id"""
+        ).fetchall()
+
+    def instrument_alias_records(self, instrument_id: str) -> list[sqlite3.Row]:
+        """Return one instrument's alias evidence in effective-date order."""
+        return self._con.execute(
+            """SELECT * FROM instrument_aliases WHERE instrument_id = ?
+               ORDER BY start_date, end_date, alias_id""",
+            (instrument_id,),
+        ).fetchall()
+
+    def record_identity_episode(
+        self,
+        instrument_id: str,
+        *,
+        source_instrument_id: str | None,
+        dataset_key: str,
+        ticker: str,
+        display_label: str,
+        episode_ordinal: int,
+        basis: str,
+        confidence: str,
+        observed_first: date | None,
+        observed_last: date | None,
+        evidence: Mapping[str, Any] | str | None = None,
+    ) -> None:
+        """Record why one internal instrument represents one listing episode."""
+        dataset_key = require_dataset_key(dataset_key)
+        if episode_ordinal < 1:
+            raise ValueError("episode_ordinal must be positive")
+        if basis not in {"archive_record", "observed_gap"}:
+            raise ValueError(f"invalid identity episode basis {basis!r}")
+        if confidence not in {"metadata_validated", "archive_bound", "inferred"}:
+            raise ValueError(f"invalid identity episode confidence {confidence!r}")
+        if (observed_first is None) != (observed_last is None):
+            raise ValueError("observed episode bounds must both be set or both omitted")
+        if observed_first is not None and observed_first > observed_last:
+            raise ValueError("observed episode start must not be after its end")
+        normalized_ticker = ticker.strip().upper()
+        normalized_label = display_label.strip()
+        if not normalized_ticker or not normalized_label:
+            raise ValueError("episode ticker and display label must not be blank")
+        now = _now()
+        with self._con:
+            self._con.execute(
+                """INSERT INTO identity_episodes
+                       (instrument_id, source_instrument_id, dataset_key, ticker,
+                        display_label, episode_ordinal, basis, confidence,
+                        observed_first_date, observed_last_date, evidence,
+                        created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(instrument_id) DO UPDATE SET
+                     source_instrument_id=excluded.source_instrument_id,
+                     dataset_key=excluded.dataset_key,
+                     ticker=excluded.ticker,
+                     display_label=excluded.display_label,
+                     episode_ordinal=excluded.episode_ordinal,
+                     basis=excluded.basis,
+                     confidence=excluded.confidence,
+                     observed_first_date=excluded.observed_first_date,
+                     observed_last_date=excluded.observed_last_date,
+                     evidence=excluded.evidence,
+                     updated_at=excluded.updated_at""",
+                (
+                    instrument_id,
+                    source_instrument_id,
+                    dataset_key,
+                    normalized_ticker,
+                    normalized_label,
+                    episode_ordinal,
+                    basis,
+                    confidence,
+                    observed_first.isoformat() if observed_first else None,
+                    observed_last.isoformat() if observed_last else None,
+                    _evidence_json(evidence),
+                    now,
+                    now,
+                ),
+            )
+
+    def retire_eod_identity_source(self, instrument_id: str) -> None:
+        """Remove superseded EOD evidence after its bars move to episode owners."""
+        other_datasets = self._con.execute(
+            """SELECT DISTINCT dataset_key FROM vendor_identifiers
+               WHERE instrument_id = ? AND dataset_key != 'eod'""",
+            (instrument_id,),
+        ).fetchall()
+        if other_datasets:
+            keys = sorted(str(row["dataset_key"]) for row in other_datasets)
+            raise ValueError(
+                f"cannot retire {instrument_id!r}; it has non-EOD evidence {keys}"
+            )
+        replacement_count = self._con.execute(
+            """SELECT count(*) FROM identity_episodes
+               WHERE source_instrument_id = ? AND dataset_key = 'eod'""",
+            (instrument_id,),
+        ).fetchone()[0]
+        if not replacement_count:
+            raise ValueError(
+                f"cannot retire {instrument_id!r} without recorded EOD episodes"
+            )
+        with self._con:
+            self._con.execute(
+                "DELETE FROM coverage WHERE instrument_id = ? AND dataset_key = 'eod'",
+                (instrument_id,),
+            )
+            self._con.execute(
+                "DELETE FROM vendor_identifiers WHERE instrument_id = ? AND dataset_key = 'eod'",
+                (instrument_id,),
+            )
+            self._con.execute(
+                "DELETE FROM instrument_aliases WHERE instrument_id = ?",
+                (instrument_id,),
+            )
+
+    def rollback_unpublished_eod_episodes(self, source_instrument_id: str) -> None:
+        """Remove replacement evidence when a staged EOD root was never swapped."""
+        replacements = self._con.execute(
+            """SELECT instrument_id FROM identity_episodes
+               WHERE source_instrument_id = ? AND dataset_key = 'eod'""",
+            (source_instrument_id,),
+        ).fetchall()
+        if not replacements:
+            raise ValueError(
+                f"no unpublished EOD episodes found for {source_instrument_id!r}"
+            )
+        instrument_ids = [str(row["instrument_id"]) for row in replacements]
+        placeholders = ",".join("?" for _ in instrument_ids)
+        covered = self._con.execute(
+            f"SELECT instrument_id FROM coverage WHERE instrument_id IN ({placeholders})",
+            instrument_ids,
+        ).fetchall()
+        if covered:
+            raise ValueError(
+                "cannot roll back replacement episodes with coverage: "
+                f"{sorted(str(row['instrument_id']) for row in covered)}"
+            )
+        with self._con:
+            self._con.execute(
+                f"DELETE FROM identity_episodes WHERE instrument_id IN ({placeholders})",
+                instrument_ids,
+            )
+            self._con.execute(
+                f"DELETE FROM vendor_identifiers WHERE instrument_id IN ({placeholders})",
+                instrument_ids,
+            )
+            self._con.execute(
+                f"DELETE FROM instrument_aliases WHERE instrument_id IN ({placeholders})",
+                instrument_ids,
+            )
+
+    def backup_to(self, destination: Path | str) -> None:
+        """Create a consistent SQLite backup without closing the live connection."""
+        target = Path(destination)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists():
+            raise FileExistsError(f"metadata backup already exists: {target}")
+        backup = sqlite3.connect(target)
+        try:
+            self._con.backup(backup)
+        finally:
+            backup.close()
+
+    def prune_archive_episode_envelope(
+        self,
+        instrument_id: str,
+        ticker: str,
+        start: date,
+        end: date,
+    ) -> None:
+        """Drop stale duplicate archive snapshots for one effective episode."""
+        if not self.has_exact_identity_evidence(
+            instrument_id, "eod", ticker, start, end
+        ):
+            raise ValueError(
+                f"cannot prune {instrument_id!r} without its retained EOD envelope"
+            )
+        normalized_ticker = ticker.strip().upper()
+        with self._con:
+            self._con.execute(
+                """DELETE FROM instrument_aliases
+                   WHERE instrument_id = ? AND ticker = ?
+                     AND NOT (start_date = ? AND end_date = ?)""",
+                (
+                    instrument_id,
+                    normalized_ticker,
+                    start.isoformat(),
+                    end.isoformat(),
+                ),
+            )
+            self._con.execute(
+                """DELETE FROM vendor_identifiers
+                   WHERE instrument_id = ? AND dataset_key = 'eod'
+                     AND lower(identifier_type) = 'ticker'
+                     AND upper(identifier_value) = ?
+                     AND NOT (valid_from = ? AND valid_to = ?)""",
+                (
+                    instrument_id,
+                    normalized_ticker,
+                    start.isoformat(),
+                    end.isoformat(),
+                ),
+            )
+
+    def remove_uncovered_archive_episode(self, instrument_id: str) -> None:
+        """Fail closed when a formerly archive-bound singleton needs validation."""
+        episode = self._con.execute(
+            """SELECT source_instrument_id, basis FROM identity_episodes
+               WHERE instrument_id = ? AND dataset_key = 'eod'""",
+            (instrument_id,),
+        ).fetchone()
+        if (
+            episode is None
+            or episode["source_instrument_id"] is not None
+            or episode["basis"] != "archive_record"
+        ):
+            raise ValueError(f"{instrument_id!r} is not an archive episode")
+        covered = self._con.execute(
+            "SELECT 1 FROM coverage WHERE instrument_id = ? LIMIT 1",
+            (instrument_id,),
+        ).fetchone()
+        if covered is not None:
+            raise ValueError(f"cannot remove covered archive episode {instrument_id!r}")
+        with self._con:
+            self._con.execute(
+                "DELETE FROM identity_episodes WHERE instrument_id = ?",
+                (instrument_id,),
+            )
+            self._con.execute(
+                "DELETE FROM vendor_identifiers WHERE instrument_id = ?",
+                (instrument_id,),
+            )
+            self._con.execute(
+                "DELETE FROM instrument_aliases WHERE instrument_id = ?",
+                (instrument_id,),
+            )
+
+    def set_identity_episode_ordinal(
+        self, instrument_id: str, episode_ordinal: int
+    ) -> None:
+        """Normalize display ordering after duplicate archive snapshots collapse."""
+        if episode_ordinal < 1:
+            raise ValueError("episode_ordinal must be positive")
+        with self._con:
+            cursor = self._con.execute(
+                """UPDATE identity_episodes
+                   SET episode_ordinal = ?, updated_at = ?
+                   WHERE instrument_id = ?""",
+                (episode_ordinal, _now(), instrument_id),
+            )
+        if cursor.rowcount != 1:
+            raise ValueError(f"identity episode not found: {instrument_id!r}")
 
     def add_instrument_alias(
         self,
@@ -640,6 +958,46 @@ class MetaStore:
             (instrument_id, end.isoformat(), start.isoformat()),
         ).fetchall()
         return _rows_cover(rows, start, end)
+
+    def has_exact_identity_evidence(
+        self,
+        instrument_id: str,
+        dataset_key: str,
+        ticker: str,
+        start: date,
+        end: date,
+    ) -> bool:
+        """Whether one exact alias and validated ticker identifier are recorded."""
+        dataset_key = require_dataset_key(dataset_key)
+        normalized_ticker = ticker.strip().upper()
+        row = self._con.execute(
+            """SELECT
+                   EXISTS(
+                       SELECT 1 FROM instrument_aliases
+                       WHERE instrument_id = ? AND ticker = ?
+                         AND start_date = ? AND end_date = ?
+                   ) AS has_alias,
+                   EXISTS(
+                       SELECT 1 FROM vendor_identifiers
+                       WHERE instrument_id = ? AND dataset_key = ?
+                         AND validation_state = 'validated'
+                         AND lower(identifier_type) = 'ticker'
+                         AND upper(identifier_value) = ?
+                         AND valid_from = ? AND valid_to = ?
+                   ) AS has_identifier""",
+            (
+                instrument_id,
+                normalized_ticker,
+                start.isoformat(),
+                end.isoformat(),
+                instrument_id,
+                dataset_key,
+                normalized_ticker,
+                start.isoformat(),
+                end.isoformat(),
+            ),
+        ).fetchone()
+        return bool(row["has_alias"] and row["has_identifier"])
 
     def resolve_vendor_identifier(
         self, instrument_id: str, dataset_key: str, start: date, end: date

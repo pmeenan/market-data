@@ -122,7 +122,7 @@ def test_canonical_bucket_is_stable_and_eod_publish_batches_instruments(tmp_path
     assert set(stored["instrument_id"]) == {instrument_id, peer_id}
     assert "ticker" not in stored.columns
 
-    restated = eod_frame("OLD", [dict(SAMPLE_EOD[0], close=777.0)])
+    restated = eod_frame("OLD", [dict(SAMPLE_EOD[0], close=777.0, high=800.0)])
     store.publish_eod({instrument_id: restated})
     assert store.read_canonical_eod(instrument_id)["close"][0] == 777.0
     assert store.read_canonical_eod(peer_id).height == 1
@@ -170,7 +170,11 @@ def test_failed_atomic_publish_preserves_existing_bucket(tmp_path, monkeypatch):
 
     with pytest.raises(OSError, match="simulated rename failure"):
         store.publish_eod(
-            {"stable-id": eod_frame("OLD", [dict(SAMPLE_EOD[0], close=999.0)])}
+            {
+                "stable-id": eod_frame(
+                    "OLD", [dict(SAMPLE_EOD[0], close=999.0, high=1000.0)]
+                )
+            }
         )
     assert path.read_bytes() == bytes_before
 

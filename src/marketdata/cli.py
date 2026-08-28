@@ -16,6 +16,13 @@ from marketdata import universe as universe_mod
 from marketdata.config import Config, load_config
 from marketdata.identity import DATASET_KEYS
 from marketdata.identity_bootstrap import bootstrap_eod_identities
+from marketdata.identity_episodes import (
+    DEFAULT_EPISODE_GAP_SESSIONS,
+    MIN_EPISODE_GAP_SESSIONS,
+    EodEpisodeRepairResult,
+    recover_interrupted_eod_episode_repairs,
+    repair_eod_episodes,
+)
 from marketdata.ingest import (
     DEFAULT_INTRADAY_FREQ,
     IngestResult,
@@ -45,6 +52,15 @@ from marketdata.store import BarStore, MetaStore
 from marketdata.store.bars import INTRADAY_FREQS
 from marketdata.tiingo import TiingoClient
 
+_DATA_OPERATION_ERRORS = (
+    OSError,
+    RuntimeError,
+    ValueError,
+    sqlite3.Error,
+    duckdb.Error,
+    pl.exceptions.PolarsError,
+)
+
 
 def _client(config: Config) -> TiingoClient:
     if not config.tiingo_token:
@@ -72,6 +88,7 @@ def _finish_ingest(
     result: IngestResult,
     summary_json: str | None,
     scheduler: SchedulerRunResult | None = None,
+    episode_repair: EodEpisodeRepairResult | None = None,
 ) -> None:
     click.echo(f"Done: {result.summary()}")
     if scheduler is not None:
@@ -85,6 +102,8 @@ def _finish_ingest(
             click.echo(f"Scheduler stopped cleanly: {scheduler.stop_reason}")
     if summary_json:
         payload = scheduler.to_dict() if scheduler is not None else result.to_dict()
+        if episode_repair is not None:
+            payload["episode_repair"] = episode_repair.to_dict()
         _write_json_atomic(payload, Path(summary_json))
     if result.failed:
         click.echo("Failed segments: " + ", ".join(sorted(result.failed)), err=True)
@@ -383,19 +402,72 @@ def identity_bootstrap_eod_cmd(
             result = bootstrap_eod_identities(
                 _client(config), meta, ticker_list, progress=progress
             )
-        except (OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
+        except _DATA_OPERATION_ERRORS as exc:
             _raise_ingest_error(exc, summary_json)
     if summary_json:
         _write_json_atomic(result.to_dict(), Path(summary_json))
     click.echo(
         "Identity bootstrap: "
         f"{len(result.validated)} validated, {len(result.skipped)} already valid, "
+        f"{result.registered_episodes} episodes registered, "
+        f"{len(result.overlaps)} overlap-blocked, "
         f"{len(result.blocked)} blocked, {len(result.failed)} failed"
     )
     if result.stop_reason:
         click.echo(f"Identity bootstrap stopped: {result.stop_reason}", err=True)
     if not result.ok:
         raise click.exceptions.Exit(1)
+
+
+@identity.command("repair-eod-episodes")
+@click.option(
+    "--min-gap-sessions",
+    type=click.IntRange(min=MIN_EPISODE_GAP_SESSIONS),
+    default=DEFAULT_EPISODE_GAP_SESSIONS,
+    show_default=True,
+    help="Minimum missing/zero-volume XNYS sessions that define a boundary",
+)
+@click.option(
+    "--apply/--dry-run",
+    default=False,
+    help="Apply the repair; the default only reports the deterministic plan",
+)
+@click.option(
+    "--summary-json",
+    type=click.Path(),
+    default=None,
+    help="Write the complete structured episode-repair report to this file",
+)
+@click.pass_obj
+def identity_repair_eod_episodes_cmd(
+    config: Config,
+    min_gap_sessions: int,
+    apply: bool,
+    summary_json: str | None,
+) -> None:
+    """Split discontinuous EOD histories into stable listing episodes."""
+    _require_initialized_warehouse(config)
+    try:
+        with MetaStore(config.meta_path) as meta:
+            _require_ingestion_ready(meta)
+            report = repair_eod_episodes(
+                BarStore(config.data_dir),
+                meta,
+                min_gap_sessions=min_gap_sessions,
+                apply=apply,
+            )
+    except _DATA_OPERATION_ERRORS as exc:
+        _raise_ingest_error(exc, summary_json)
+    if summary_json:
+        _write_json_atomic(report.to_dict(), Path(summary_json))
+    verb = "Applied" if report.applied else "Planned"
+    click.echo(
+        f"{verb} EOD episode repair: {report.split_sources} source histories, "
+        f"{report.created_episodes} episodes, "
+        f"{report.quarantined_rows} quarantined rows"
+    )
+    if report.backup_path:
+        click.echo(f"Recoverable backup: {report.backup_path}")
 
 
 @main.group()
@@ -433,6 +505,11 @@ def backfill() -> None:
     default=None,
     help="Write a machine-readable result summary to this file",
 )
+@click.option(
+    "--repair-episodes/--no-repair-episodes",
+    default=True,
+    help="Run the idempotent listing-episode repair after this EOD sweep",
+)
 @click.pass_obj
 def backfill_eod_cmd(
     config,
@@ -446,6 +523,7 @@ def backfill_eod_cmd(
     phase,
     max_units,
     summary_json,
+    repair_episodes,
 ):
     """Backfill daily bars through exact identity evidence."""
     _validate_cli_range(start, end, summary_json)
@@ -460,11 +538,17 @@ def backfill_eod_cmd(
             summary_json=summary_json,
         )
         client = _client(config)
+        bars = BarStore(config.data_dir)
         click.echo(f"Backfilling EOD for {len(ticker_list)} tickers...")
         try:
+            recovered = recover_interrupted_eod_episode_repairs(bars, meta)
+            if recovered:
+                click.echo(
+                    f"Recovered {recovered} interrupted EOD episode repair source(s)"
+                )
             scheduler = run_history_request(
                 client,
-                BarStore(config.data_dir),
+                bars,
                 meta,
                 dataset_key="eod",
                 tickers=ticker_list,
@@ -476,15 +560,14 @@ def backfill_eod_cmd(
                 max_units=max_units,
             )
             result = scheduler.ingest
-        except (
-            OSError,
-            RuntimeError,
-            ValueError,
-            sqlite3.Error,
-            pl.exceptions.PolarsError,
-        ) as exc:
+            episode_repair = (
+                repair_eod_episodes(bars, meta, apply=True)
+                if repair_episodes and scheduler.job_status == "complete"
+                else None
+            )
+        except _DATA_OPERATION_ERRORS as exc:
             _raise_ingest_error(exc, summary_json)
-    _finish_ingest(result, summary_json, scheduler)
+    _finish_ingest(result, summary_json, scheduler, episode_repair)
 
 
 @backfill.command("intraday")
@@ -568,13 +651,7 @@ def backfill_intraday_cmd(
                 max_units=max_units,
             )
             result = scheduler.ingest
-        except (
-            OSError,
-            RuntimeError,
-            ValueError,
-            sqlite3.Error,
-            pl.exceptions.PolarsError,
-        ) as exc:
+        except _DATA_OPERATION_ERRORS as exc:
             _raise_ingest_error(exc, summary_json)
     _finish_ingest(result, summary_json, scheduler)
 
@@ -588,7 +665,7 @@ def backfill_cancel_cmd(config: Config, job_id: str) -> None:
     with MetaStore(config.meta_path) as meta:
         try:
             cancel_history_job(meta, job_id)
-        except (OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
+        except _DATA_OPERATION_ERRORS as exc:
             raise click.ClickException(str(exc)) from exc
     click.echo(f"Cancelled history job {job_id}")
 
@@ -630,13 +707,7 @@ def update(config, tickers, tickers_file, universe_year, all_universes, summary_
                 current_datasets=["eod"],
                 history_job_id=None,
             )
-        except (
-            OSError,
-            RuntimeError,
-            ValueError,
-            sqlite3.Error,
-            pl.exceptions.PolarsError,
-        ) as exc:
+        except _DATA_OPERATION_ERRORS as exc:
             _raise_ingest_error(exc, summary_json)
     _finish_ingestion_cycle(cycle, summary_json)
 
@@ -650,7 +721,7 @@ def reconcile_cmd(config):
     try:
         with MetaStore(config.meta_path) as meta:
             report = reconcile_active(bars, meta)
-    except (OSError, RuntimeError, sqlite3.Error, pl.exceptions.PolarsError) as exc:
+    except _DATA_OPERATION_ERRORS as exc:
         raise click.ClickException(str(exc)) from exc
     for issue in report.issues:
         click.echo(
@@ -682,13 +753,7 @@ def migrate_v2_bars_cmd(config: Config, report_path: Path | None) -> None:
             report = migrate_v1_bars(
                 BarStore(config.data_dir), meta, report_path=report_path
             )
-    except (
-        OSError,
-        RuntimeError,
-        ValueError,
-        sqlite3.Error,
-        pl.exceptions.PolarsError,
-    ) as exc:
+    except _DATA_OPERATION_ERRORS as exc:
         raise click.ClickException(str(exc)) from exc
     counts = ", ".join(f"{count} {status}" for status, count in report.counts().items())
     click.echo(f"Migration pass complete: {counts or 'no source files'}")
@@ -770,14 +835,7 @@ def quality_cmd(
             zero_volume_run_length=zero_volume_run,
         )
         gate = evaluate_quality(report, block_on)
-    except (
-        OSError,
-        RuntimeError,
-        ValueError,
-        sqlite3.Error,
-        duckdb.Error,
-        pl.exceptions.PolarsError,
-    ) as exc:
+    except _DATA_OPERATION_ERRORS as exc:
         # A failed scan has no gate outcome. Preserve any standing successful
         # report rather than replacing it with a structurally different file.
         raise _QualityCommandError(f"quality scan failed: {exc}") from exc

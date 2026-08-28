@@ -407,6 +407,51 @@ def test_disconnected_older_coverage_is_bridged_from_its_trailing_edge(tmp_path)
         assert meta.history_targets("trailing-bridge")[0]["successful_depth"] == 1
 
 
+def test_disconnected_validated_range_is_a_terminal_job_blocker(tmp_path):
+    data_dir = tmp_path / "data"
+    alias_start, alias_end = date(2024, 1, 1), date(2024, 12, 31)
+    range_end = date(2024, 6, 30)
+    with MetaStore(data_dir / "meta.db") as meta:
+        meta.activate_canonical_generation()
+        meta.upsert_instrument("instrument-a")
+        meta.add_instrument_alias("instrument-a", "A", alias_start, alias_end)
+        meta.add_vendor_identifier(
+            "instrument-a",
+            "eod",
+            "ticker",
+            "A",
+            alias_start,
+            alias_end,
+            validation_state="validated",
+        )
+        # This later coverage cannot be bridged by a request confined to the
+        # job range. Validated ingestion therefore rejects it before transport.
+        meta.set_coverage("instrument-a", "eod", date(2024, 12, 1), alias_end)
+        initialize_history_job(
+            meta,
+            job_id="disconnected-blocker",
+            dataset_key="eod",
+            tickers=["A"],
+            start=alias_start,
+            end=range_end,
+        )
+        client = FakeIntraday()
+
+        first = run_history_sweep(
+            client, BarStore(data_dir), meta, "disconnected-blocker"
+        )
+        second = run_history_sweep(
+            client, BarStore(data_dir), meta, "disconnected-blocker"
+        )
+
+        history_range = meta.history_ranges("disconnected-blocker")[0]
+        assert first.job_status == "blocked"
+        assert first.ingest.blocked
+        assert history_range["terminal_blocked"] == 1
+        assert second.attempted_units == 0
+        assert client.eod_calls == []
+
+
 def test_partial_trailing_turn_counts_as_successful_request_depth(tmp_path):
     data_dir = tmp_path / "data"
     start, end = date(2024, 1, 1), date(2024, 12, 31)

@@ -87,6 +87,11 @@ data/
   quarantine/
     v1-ticker-bars/eod/{ticker}.parquet
     v1-ticker-bars/intraday/{freq}/{ticker}/{year}.parquet
+    eod-quality/{operation_id}.parquet
+    eod-response/{operation_id}.parquet
+  backups/
+    eod-episodes-{operation_id}/meta.db
+    eod-episodes-{operation_id}/bars/eod/bucket={00..ff}/bars.parquet
   results/
     {study_name}/{run_id}/observations.parquet
     {study_name}/{run_id}/input_files.parquet
@@ -145,6 +150,20 @@ fetches use merge-upsert. A corporate-action full refresh is a validated
 snapshot replacement, because an upsert cannot remove dates omitted by a new
 vendor snapshot (D-009).
 
+EOD history jobs that reach `complete` run D-023's idempotent listing-episode
+audit; blocked/cancelled jobs never trigger it. A manual audit may partition a
+demonstrably discontinuous broad history only when durable source coverage
+spans the candidate boundary. It quarantines invalid OHLC, long internal
+zero-volume bridges, and too-short inferred fragments. The operation stages
+and validates a complete EOD root under the canonical lock, takes a recoverable
+metadata/Parquet backup, atomically swaps the directory, and then retires the
+broad identity. The next EOD command automatically rolls back a pre-swap
+metadata registration or finishes post-swap retirement after an interruption.
+New EOD responses quarantine invalid raw rows individually so valid rows can
+still publish with honest coverage. DuckDB canonical views disable Hive
+partition inference so physical `bucket`/`year` directory keys never leak into
+the published bar schema.
+
 ### SQLite metadata
 
 SQLite schema migrations are ordered by `PRAGMA user_version`. The target
@@ -175,6 +194,12 @@ Identity and ingestion metadata:
   dataset key may jointly cover a request segment; an evidence gap never does.
   A weekend-only interval between trading-day evidence boundaries is a
   non-session continuity marker per D-014, not request or row authorization.
+- `identity_episodes`: provenance for archive-bounded or observed-gap EOD
+  listing episodes, including the superseded source id when one broad history
+  was partitioned, confidence, observed bounds, and the non-key display label
+  `TICKER@YYYYMMDD`. Actual aliases retain the vendor ticker. Per D-023,
+  overlapping archive records remain fail-closed and inferred episodes require
+  a 252-session gap plus at least 20 observations per published fragment.
 - `universe`: original (`year`, `ticker`) seed record, rank, and dollar-volume
   value. Resolution to exactly one instrument is recorded separately so the
   imported source value is not destroyed.
@@ -396,9 +421,10 @@ is stored in SQLite, Parquet, logs, summaries, or result parameters.
 
 Operational commands return nonzero if any requested segment fails and can
 emit machine-readable summaries. The nightly job writes a bounded status
-record (start/end, counts, bytes, failures) and uses the server's chosen
-notification mechanism; merely logging to an unattended file does not satisfy
-the vision's visible-failure criterion.
+record (start/end, counts, bytes, failures). On the owner's personal server,
+the nonzero systemd result plus that inspectable status is the required visible
+failure signal; an external notification channel may be added later but is not
+an M2 gate.
 
 Backups treat `data/` as one unit. Parquet is canonical for bars and result
 observations, while `meta.db` is required for identity evidence, universe

@@ -22,6 +22,42 @@ Newest first. RE-numbers are never reused.
 
 ---
 
+## RE-007: Tiingo can conflate unrelated listings inside one archive record  (2026-08-28, status: worked-around)
+
+**Environment:** Then-current 2006-08-28 through 2026-08-27 seed EOD warehouse,
+Tiingo supported-tickers archive and EOD CSV, measured 2026-08-28.
+
+**Repro/measurement:** A full XNYS-session continuity scan over 4,454 stored
+histories found 60 broad source identities with at least one 252-session
+missing or internal zero-volume gap and at least 20 observations on two sides.
+They partition into 121 substantive episodes. Examples included old delisted
+companies followed years later by unrelated recent listings even though the
+archive/bootstrap had supplied one broad record. The same scan found 1,908
+invalid OHLC, internal zero-bridge, or too-sparse rows outside publishable
+episodes.
+
+**Observed:** Supported-tickers record cardinality is not sufficient evidence
+that a bare-symbol EOD history belongs to one security. Some conflated histories
+also contain long calendar-contiguous zero-volume bridges rather than absent
+rows.
+
+**Expected:** One archive record and its date envelope describe one continuous
+listing history, or the vendor exposes a stable security id for each underlying
+listing.
+
+**Impact:** D-023 adds a terminal, idempotent EOD episode audit. It partitions
+only across conservative XNYS-session discontinuities, retains real tickers as
+date-ranged aliases, quarantines suspicious bridges/short fragments/invalid
+OHLC, and leaves evidence gaps or overlaps unresolved. Archive uniqueness must
+not be treated as proof that the returned history is one security.
+
+The following validated history pass exposed two more covered broad histories
+(`MMV` and `RCM`), which the same idempotent rule split into four episodes. The
+live total is therefore 62 repaired source symbols and 125 inferred episodes;
+the original 1,908-row quarantine is unchanged.
+
+---
+
 ## RE-006: Tiingo bar CSV is uncompressed and billing-byte semantics are undocumented  (2026-08-27, status: worked-around)
 
 **Environment:** Authenticated Tiingo EOD and historical IEX REST endpoints,

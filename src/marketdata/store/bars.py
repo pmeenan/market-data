@@ -12,10 +12,12 @@ until ingestion is moved to stable identities.  Canonical v2 bars live below
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Mapping
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import polars as pl
 
@@ -183,7 +185,7 @@ class BarStore:
         """Merge-upsert daily bars for one ticker. Returns rows in the file."""
         path = self.eod_path(ticker)
         merged = _merge(path, df, key="date")
-        _atomic_write(merged, path)
+        atomic_write_parquet(merged, path)
         return merged.height
 
     def replace_eod(self, ticker: str, df: pl.DataFrame) -> int:
@@ -191,7 +193,7 @@ class BarStore:
         (no merge): used by corporate-action refreshes, where merge-upsert
         could leave stale dates the new snapshot omits."""
         snapshot = df.unique(subset=["date"], keep="last").sort("date")
-        _atomic_write(snapshot, self.eod_path(ticker))
+        atomic_write_parquet(snapshot, self.eod_path(ticker))
         return snapshot.height
 
     def read_eod(self, ticker: str) -> pl.DataFrame | None:
@@ -218,7 +220,7 @@ class BarStore:
         for (year,), part in df.group_by(pl.col("ts").dt.year(), maintain_order=True):
             path = self.intraday_path(ticker, int(year), freq)
             merged = _merge(path, part, key="ts")
-            _atomic_write(merged, path)
+            atomic_write_parquet(merged, path)
             total += merged.height
         return total
 
@@ -278,7 +280,7 @@ class BarStore:
                 key=["instrument_id", "date"],
                 replace_instruments=replace_instruments,
             )
-            _atomic_write(merged, path)
+            atomic_write_parquet(merged, path)
             counts = dict(merged.group_by("instrument_id").len().iter_rows())
             result.update(
                 {
@@ -309,7 +311,7 @@ class BarStore:
             )
             incoming = pl.concat(incoming_frames)
             merged = _merge_canonical(path, incoming, key=["instrument_id", "ts"])
-            _atomic_write(merged, path)
+            atomic_write_parquet(merged, path)
             counts = dict(merged.group_by("instrument_id").len().iter_rows())
             result.update(
                 {
@@ -318,6 +320,34 @@ class BarStore:
                 }
             )
         return result
+
+    def quarantine_eod_response_rows(
+        self,
+        instrument_id: str,
+        ticker: str,
+        rows: list[tuple[Mapping[str, Any], str]],
+    ) -> Path | None:
+        """Persist rejected vendor rows without requiring canonical numeric types."""
+        if not rows:
+            return None
+        now = datetime.now(UTC)
+        frame = pl.DataFrame(
+            {
+                "instrument_id": [instrument_id] * len(rows),
+                "ticker": [ticker.upper()] * len(rows),
+                "date": [str(row.get("date") or "") for row, _ in rows],
+                "reason": [reason for _, reason in rows],
+                "raw_row_json": [
+                    json.dumps(row, sort_keys=True, separators=(",", ":"), default=str)
+                    for row, _ in rows
+                ],
+                "quarantined_at": [now.isoformat()] * len(rows),
+            }
+        )
+        operation_id = now.strftime("%Y%m%dT%H%M%S%fZ") + "-" + uuid4().hex[:8]
+        path = self.data_dir / "quarantine" / "eod-response" / f"{operation_id}.parquet"
+        atomic_write_parquet(frame, path)
+        return path
 
     def read_canonical_eod(self, instrument_id: str) -> pl.DataFrame | None:
         path = self.canonical_eod_path(instrument_id)
@@ -382,6 +412,17 @@ def canonical_dataset_glob(data_dir: Path, dataset_key: str) -> str:
     return str(root / "year=*" / "bucket=*" / "bars.parquet")
 
 
+def create_canonical_parquet_view(
+    con: Any, view_name: str, parquet_glob: str | Path
+) -> None:
+    """Create a canonical DuckDB view without Hive partition-column leakage."""
+    escaped = str(parquet_glob).replace("'", "''")
+    con.execute(
+        f"CREATE VIEW {view_name} AS SELECT * FROM read_parquet("
+        f"'{escaped}', hive_partitioning=false)"
+    )
+
+
 def _safe(ticker: str) -> str:
     return ticker.upper().replace("/", "-")
 
@@ -441,10 +482,28 @@ def _merge_canonical(
     key: list[str],
     replace_instruments: frozenset[str] = frozenset(),
 ) -> pl.DataFrame:
-    if path.exists():
-        existing = pl.read_parquet(path)
+    existing = pl.read_parquet(path) if path.exists() else None
+    return merge_canonical_frames(
+        existing,
+        incoming,
+        key=key,
+        replace_instruments=replace_instruments,
+        source=str(path),
+    )
+
+
+def merge_canonical_frames(
+    existing: pl.DataFrame | None,
+    incoming: pl.DataFrame,
+    *,
+    key: list[str],
+    replace_instruments: frozenset[str] = frozenset(),
+    source: str = "canonical frame",
+) -> pl.DataFrame:
+    """Shared schema-checked canonical merge semantics."""
+    if existing is not None:
         if existing.schema != incoming.schema:
-            raise ValueError(f"canonical schema mismatch in {path}")
+            raise ValueError(f"canonical schema mismatch in {source}")
         if replace_instruments:
             existing = existing.filter(
                 ~pl.col("instrument_id").is_in(list(replace_instruments))
@@ -467,7 +526,8 @@ def require_canonical_generation(bars: BarStore, generation: str) -> None:
         raise RuntimeError("instrument-owned APIs require the v2 storage generation")
 
 
-def _atomic_write(df: pl.DataFrame, path: Path) -> None:
+def atomic_write_parquet(df: pl.DataFrame, path: Path) -> None:
+    """Write one Parquet file through the project's atomic replacement path."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".parquet.tmp")
     df.write_parquet(tmp, compression="zstd")

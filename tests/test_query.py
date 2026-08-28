@@ -13,7 +13,13 @@ from marketdata.query import (
     load_intraday_sessions,
 )
 from marketdata.store import MetaStore
-from marketdata.store.bars import EOD_SCHEMA, INTRADAY_SCHEMA, BarStore
+from marketdata.store.bars import (
+    CANONICAL_EOD_SCHEMA,
+    CANONICAL_INTRADAY_SCHEMA,
+    EOD_SCHEMA,
+    INTRADAY_SCHEMA,
+    BarStore,
+)
 
 
 def _config(tmp_path) -> Config:
@@ -136,6 +142,7 @@ def test_session_loader_filters_and_labels_without_changing_raw_view(tmp_path):
     labelled = load_intraday_sessions(config, instrument_ids=["apple-id"], freq="1hour")
 
     assert raw.height == 3
+    assert raw.schema == pl.Schema(CANONICAL_INTRADAY_SCHEMA)
     assert labelled["ts"].to_list() == [
         datetime(2024, 6, 3, 14, 0, tzinfo=UTC),
         datetime(2024, 6, 3, 19, 0, tzinfo=UTC),
@@ -155,6 +162,7 @@ def test_load_eod_filters(tmp_path):
     )
     bars.publish_eod({"apple-id": _eod("AAPL"), "microsoft-id": _eod("MSFT")})
     df = load_eod(config, instrument_ids=["apple-id"], start="2024-01-03")
+    assert df.schema == pl.Schema(CANONICAL_EOD_SCHEMA)
     assert df["instrument_id"].unique().to_list() == ["apple-id"]
     assert df["date"].min() == date(2024, 1, 3)
 

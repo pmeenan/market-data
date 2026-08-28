@@ -71,23 +71,47 @@ market-data backfill intraday --phase 1 --freq 1hour \
 
 Before a new warehouse can ingest EOD, bootstrap conservative identity
 evidence from Tiingo's public supported-tickers archive plus its authenticated
-EOD metadata endpoint. Only an in-scope ticker with exactly one archive record
-whose ticker, exchange, and date envelope all agree is admitted; reused,
-missing, mismatching, and 404 records remain reported and fail closed. The
-authenticated metadata calls use the durable current-work request/byte ledger.
+EOD metadata endpoint. A unique archive record is admitted only when ticker,
+exchange, and date envelope all agree with authenticated metadata. Reused
+tickers get one internal listing episode per archive record; non-overlapping
+date segments can proceed, while archive overlaps, missing records,
+mismatches, and 404s remain reported and fail closed. The authenticated calls
+use the durable current-work request/byte ledger.
 
 ```bash
 market-data identity bootstrap-eod \
   --summary-json data/operations/identity-bootstrap-eod.json
 ```
 
-The target server currently resumes the frozen phase-1 seed EOD job every 15
+After an EOD history job reaches `complete` (never merely `blocked` or
+cancelled), the command automatically runs the idempotent D-023 episode audit.
+It conservatively splits a broad vendor history only at a gap of at least 252
+expected XNYS sessions (including a long internal zero-volume bridge) that is
+spanned by durable source coverage, keeps the real ticker as the alias, and
+records a stable display label such as `PCS@20070419`. Invalid OHLC, long
+zero-volume bridges, and inferred fragments under 20 rows are quarantined
+instead of published. Invalid OHLC rows in newly fetched EOD responses are
+likewise written with raw response provenance under
+`data/quarantine/eod-response/`, while valid peers in that response continue.
+The apply operation records a recoverable SQLite/Parquet backup under
+`data/backups/`. Inspect or run the coverage-aware repair independently with:
+
+```bash
+market-data identity repair-eod-episodes --dry-run \
+  --summary-json data/operations/eod-episode-repair-plan.json
+market-data identity repair-eod-episodes --apply \
+  --summary-json data/operations/eod-episode-repair-applied.json
+```
+
+The target server resumes the frozen, post-repair phase-1 seed EOD job every 15
 minutes with the user-systemd templates in `deploy/systemd/`. Each invocation
 runs the unfinished breadth-first sweep and exits cleanly at a quota boundary;
-its atomic status is written to `data/operations/phase1-eod-status.json`. Exit
-1 is accepted by the service because unresolved identity ranges remain visible
-while validated peers make progress; the JSON retains blocked and failed
-details.
+its atomic status is written to
+`data/operations/phase1-eod-episodes-v3-status.json`. Exit 1 is accepted by the
+service because unresolved identity ranges remain visible while validated peers
+make progress; the JSON retains blocked and failed details. For this personal
+deployment that bounded status plus the nonzero service result is the required
+failure signal; wiring email later is optional.
 
 On this server the templates were installed under
 `~/.config/systemd/user/`, the timer was enabled, and user lingering was
@@ -262,8 +286,11 @@ Milestone **M2 (trustworthy scheduled ingestion)** is in progress. Its
 cap-safe intraday request planner, XNYS calendar/session-label surface, and
 structured quality/gating layer are implemented, as are durable request-budget
 accounting, current-first breadth-first history scheduling, and shared process
-locking. The phase-1 seed EOD backfill is running through a user-systemd timer;
-nightly current updates, failure email, and phase-1 hourly activation remain.
+locking. The phase-1 seed EOD pass fetched 282 additional histories, and the
+live D-023 repair now represents 62 reused symbols as 125 inferred episodes;
+an aligned EOD job remains scheduled for honest blockers. Nightly current
+updates and phase-1 hourly identity/backfill remain; external failure
+notification is optional for this personal deployment.
 M1 closed on
 2026-08-27 after its controlled EOD/IEX canary passed. Production ingestion is
 permitted only for validated segments; unresolved work remains fail-closed and

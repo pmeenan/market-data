@@ -25,6 +25,66 @@ Decision / Context / Consequences / Reopen if
 
 ---
 
+## D-023: EOD history is partitioned into evidence-bounded listing episodes  (2026-08-28, status: accepted, amends D-014 and D-022)
+
+**Decision:** One internal instrument represents one continuous listing episode,
+not every security that has ever answered to the same bare ticker. Each in-scope
+Tiingo supported-tickers archive row creates a distinct archive-bounded episode.
+Non-overlapping portions may be requested by bare ticker and retain D-014's full
+request/response envelope validation; overlapping archive intervals remain
+multiple matches and fail closed.
+
+After an EOD job reaches `complete` (not `blocked` or cancelled), canonical
+history is also audited for vendor conflation that the archive does not expose.
+A manually invoked audit may run sooner, but a boundary is usable only when
+durable source coverage spans it. A boundary is inferred only at a gap of at
+least 252 expected XNYS sessions, or at an internal run of at least 252
+zero-volume session rows with nonzero observations on both sides. Each
+substantive side must contain at least 20 observations. Substantive episodes
+receive deterministic internal ids and disjoint date-ranged aliases; an
+episode's vendor alias remains the real ticker. A separate display label uses
+`TICKER@YYYYMMDD`, rather than mutating the ticker to `.X`/`.X2`, because an
+ordinal suffix could change if older evidence is discovered. Large zero-volume
+bridges, invalid OHLC rows, and inferred fragments under 20 observations are
+moved to a provenance-bearing quarantine instead of being published or used to
+invent an identity. Missing prices are never fabricated.
+
+The audit is an idempotent part of completed EOD backfill and is also available
+as an explicit dry-run/apply maintenance command. It rewrites a staged complete
+EOD root under D-022's lock, validates the staged schema/keys/buckets, preserves
+a consistent SQLite plus Parquet backup, and swaps the root before retiring the
+superseded broad identity. The next repair or EOD backfill automatically rolls
+back an unswapped metadata registration or completes cleanup for an
+already-swapped tree. New EOD responses quarantine invalid raw or adjusted OHLC
+rows with response provenance while valid rows continue to publication.
+
+**Context:** The first completed 20-year seed EOD load passed structural checks
+but exposed multi-year discontinuities inside identities that Tiingo's archive
+had represented as one listing. A 2026-08-28 audit found 60 such source
+histories, yielding 121 substantive episodes, plus 1,908 zero-bridge, invalid,
+or too-sparse rows requiring quarantine. Several histories visibly joined old
+delisted companies to unrelated recent listings. Retaining one broad alias
+would silently merge securities in research; relying only on duplicated
+archive rows would leave these cases undetected. The subsequent validated
+history pass exposed two more covered broad histories; the live warehouse now
+contains 125 inferred episodes across 62 reused symbols.
+
+**Consequences:** `identity_episodes` records archive or observed-gap
+provenance, confidence, display label, and observed bounds. The original broad
+source instrument remains as provenance but loses aliases, EOD identifiers,
+coverage, and canonical bars after replacement. Research and joins continue to
+use internal ids; display labels are conveniences only. A short fragment stays
+quarantined unless later explicit evidence justifies recovering it. This rule
+is EOD-only: hourly and five-minute evidence must still be established
+independently under D-014.
+
+**Reopen if:** Tiingo supplies a complete immutable security master and stable
+EOD identifier history, a corporate-action source can distinguish a long
+trading halt from symbol reuse, or measured false splits show that the gap and
+minimum-observation thresholds need versioning.
+
+---
+
 ## D-022: Canonical mutations share one persistent data-directory lock  (2026-08-28, status: accepted)
 
 **Decision:** Every library coordinator that can publish or replace canonical
@@ -430,7 +490,7 @@ the long-form columnar path fails representative full-scale benchmarks, or a
 permissively licensed library demonstrably removes more project complexity
 than it adds for a concrete study.
 
-## D-014: Stable instruments own bars; symbols are date-ranged aliases  (2026-08-26, status: accepted, amended by D-017 and D-021; amends D-003, D-004, D-009, and D-011)
+## D-014: Stable instruments own bars; symbols are date-ranged aliases  (2026-08-26, status: accepted, amended by D-017, D-021, and D-023; amends D-003, D-004, D-009, and D-011)
 
 **Decision:** The warehouse's durable identity is an opaque internal
 `instrument_id`, not a ticker string and not a vendor identifier. SQLite will

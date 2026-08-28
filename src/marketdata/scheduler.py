@@ -922,6 +922,10 @@ def _checkpoint_after_ingest(
             detail=detail,
             attempted=True,
             successful=False,
+            # A lower-layer validated-ingest blocker is just as terminal for
+            # this immutable job range as a blocker produced by the planner.
+            # Leaving it active retries the same fail-closed segment forever.
+            terminal_blocked=blocked,
         )
         return False
 

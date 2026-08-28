@@ -16,6 +16,7 @@ from marketdata.store.bars import (
     CANONICAL_INTRADAY_SCHEMA,
     INTRADAY_FREQS,
     BarStore,
+    create_canonical_parquet_view,
     require_canonical_generation,
     require_intraday_freq,
 )
@@ -40,18 +41,12 @@ def connect(config: Config) -> duckdb.DuckDBPyConnection:
         f"ATTACH '{_sql_path(config.meta_path)}' AS meta (TYPE sqlite, READ_ONLY)"
     )
     if bars.canonical_eod_files():
-        con.execute(
-            f"CREATE VIEW eod AS SELECT * FROM read_parquet("
-            f"'{_sql_path(bars.canonical_eod_glob())}')"
-        )
+        create_canonical_parquet_view(con, "eod", bars.canonical_eod_glob())
         _create_alias_view(con, "eod")
     for freq in INTRADAY_FREQS:
         if bars.canonical_intraday_files(freq):
             view = f"intraday_{freq}"
-            con.execute(
-                f"CREATE VIEW {view} AS SELECT * FROM read_parquet("
-                f"'{_sql_path(bars.canonical_intraday_glob(freq))}')"
-            )
+            create_canonical_parquet_view(con, view, bars.canonical_intraday_glob(freq))
             _create_alias_view(con, view)
     return con
 

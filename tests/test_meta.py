@@ -159,7 +159,7 @@ def test_migration_from_v0(tmp_path):
         }
         assert "watermarks" not in tables
         assert "coverage" in tables
-        assert meta._con.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert meta._con.execute("PRAGMA user_version").fetchone()[0] == 5
         assert "ticker_coverage_v1" in tables
 
 
@@ -185,7 +185,7 @@ def test_migration_from_v1_preserves_existing_universe(tmp_path):
 
     with MetaStore(path) as meta:
         assert [row["ticker"] for row in meta.universe(2025)] == ["AAPL"]
-        assert meta._con.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert meta._con.execute("PRAGMA user_version").fetchone()[0] == 5
         assert (
             meta._con.execute(
                 "SELECT COUNT(*) FROM sqlite_master WHERE name = 'instruments'"

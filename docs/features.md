@@ -16,9 +16,9 @@ Status legend: `confirmed` · `proposed` · `rejected (D-NNN)`
 | --- | --- | --- |
 | Annual universes imported from owner's seed CSV (Year,Ticker,MedianDollarVolume) | confirmed | Built and tested |
 | Universe bootstrap from Tiingo supported-tickers + dollar-volume ranking | confirmed | Built; for years the seed CSV doesn't cover |
-| EOD daily backfill + nightly incremental update (resumable, idempotent) | confirmed | Instrument-owned canonical primitives and exact-dataset request validation are built and tested. On 2026-08-28 the target server authenticated 4,454 unambiguous seed EOD listings and started their phase-1 EOD job through a user-systemd timer; unresolved listings remain fail-closed. Nightly current-update wiring remains |
+| EOD daily backfill + nightly incremental update (resumable, idempotent) | confirmed | Instrument-owned canonical primitives and exact-dataset request validation are built and tested. D-023 partitions archive records and conservatively repairs covered, demonstrably discontinuous EOD histories into listing episodes only after completed jobs; overlapping evidence remains fail-closed. The target server's safe phase-1 EOD pass fetched 282 histories and its live repair now records 125 inferred episodes across 62 reused symbols; honest blockers remain scheduled and nightly current-update wiring remains |
 | Intraday ingestion: 1-hour **and 5-minute** bars | confirmed | Storage/query and exact-frequency identity validation are built; M1's controlled live 1-hour IEX canary passed. Historical intraday still needs M2 client hardening for RE-002/RE-004. Measured history begins 2016-12-12; direct hourly omits the opening half-hour (intraday-spike.md, D-012) |
-| Phased backfill: seed EOD 20y + 1-hour from 2016-12-12, then all-ticker EOD 20y, then seed 5-minute newest-to-oldest from current to 2016-12-12; current all-ticker collection continues daily | confirmed | Scope and phase priority in D-011; D-020 makes every historical dataset breadth-first by request depth, while D-013 caps 5-minute history at 30 GB/month and reserves the remaining 10 GB for current/ongoing work. The validated phase-1 EOD cohort began running on 2026-08-28; hourly identity/bootstrap remains |
+| Phased backfill: seed EOD 20y + 1-hour from 2016-12-12, then all-ticker EOD 20y, then seed 5-minute newest-to-oldest from current to 2016-12-12; current all-ticker collection continues daily | confirmed | Scope and phase priority in D-011; D-020 makes every historical dataset breadth-first by request depth, while D-013 caps 5-minute history at 30 GB/month and reserves the remaining 10 GB for current/ongoing work. The validated phase-1 EOD pass and post-backfill identity repair ran on 2026-08-28; its unresolved ranges stay explicit while hourly identity/bootstrap remains |
 | Point-in-time universe storage (per-year membership) | confirmed | Built; reframed by D-010 — a dataset seed filter and historical record, not backtest membership |
 | Coverage-interval ingestion with correction/adjustment refresh | confirmed | Built per D-009 (leading backfills, rolling refresh, corp-action full refresh, `reconcile`) |
 | Data-quality checks (missing trading days, zero-volume runs, OHLC invariants, split sanity, per-dataset coverage/delisting reporting) | confirmed | Built in M2: read-only structured library/CLI findings cover the full architecture minimum, and consumer-declared gates fail closed when a required check was not run. M3 still defines the first study's blocking set |
@@ -43,7 +43,7 @@ Status legend: `confirmed` · `proposed` · `rejected (D-NNN)`
 | Feature | Status | Notes |
 | --- | --- | --- |
 | CLI for ingestion/maintenance + importable Python library | confirmed | Built |
-| Nightly cron update | confirmed | `market-data update` exists; cron wiring + failure visibility is M2 |
+| Nightly cron update | confirmed | `market-data update` exists; systemd wiring plus a bounded nonzero status is M2, while external notification is optional for the personal deployment |
 | Web UI for coverage browsing and backtest results | proposed | Triage 2026-08-26: owner deliberately keeps this proposed; revisit after the first study runs end-to-end (M3). Server has a public IP if wanted |
 | Realtime/streaming layer | proposed | Triage 2026-08-26: owner deliberately keeps this proposed; revisit after M3. Research-only per D-007 either way |
 | Live/automated trade execution | rejected (D-007) | Research tool only |
@@ -80,11 +80,15 @@ Answered by the 2026-08-26 intraday spike:
 Answered by the 2026-08-26 instrument-identity spike:
 
 - **OQ-8 — Instrument identity for reused ticker symbols:** *answered by
-  D-014.* The current supported-tickers archive contains 993 duplicated US
+  D-014 and D-023.* The current supported-tickers archive contains 993 duplicated US
   stock/ETF symbols (2,025 records), including 282 seed symbols (577 records).
   The warehouse will key bars and coverage by an internal stable instrument
   id and keep ticker/exchange/date as aliases; a Tiingo permaTicker is an
   optional, dataset-validated vendor identifier, not the warehouse key.
+  Each archive row is a separate listing episode, and a completed-job EOD audit
+  can split covered broader vendor histories only across conservative
+  252-session gaps;
+  overlaps remain unresolved and short fragments are quarantined.
   Every production write is paused until the M1 migration; afterward every
   response is identity-envelope validated and unresolved request segments fail
   closed while validated segments may ingest. See

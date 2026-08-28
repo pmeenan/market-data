@@ -35,7 +35,8 @@ affected docs. Until then, these govern.
   publishable response row is checked against its resolved identity envelope,
   and unresolved segments fail closed. The sole transport exception is D-021's
   next-session IEX context, whose out-of-segment rows are request-validated and
-  discarded before normalization. (D-014, D-021)
+  discarded before normalization. Discontinuous EOD histories are partitioned
+  only through D-023's evidence-bounded listing episodes. (D-014, D-021, D-023)
 - **Research only; US stocks + ETFs only.** No order execution or broker
   connectivity, ever; no options/futures/crypto. (D-007, D-008)
 - **Ingestion is idempotent, resumable, and vintage-consistent.** Coverage is
@@ -122,8 +123,10 @@ next-session IEX planning and the XNYS session-label surface are implemented;
 structured quality findings, consumer-declared gates, durable request budgets,
 current-first breadth-first scheduling, and shared data-directory mutation
 locking are also implemented. The phase-1 seed EOD backfill is running through
-a user-systemd timer; nightly current updates, failure email, and phase-1 hourly
-activation remain.
+an aligned user-systemd timer after fetching 282 additional histories and
+repairing 62 reused symbols into 125 inferred episodes. Nightly current updates
+and phase-1 hourly identity/backfill remain; external failure notification is
+optional for this personal deployment.
 M1 closed on 2026-08-27. Production ingestion is permitted only for validated
 request segments; unresolved work remains fail-closed. The backtest layer does
 not exist yet. See [docs/plan.md](docs/plan.md). Keep this paragraph short and

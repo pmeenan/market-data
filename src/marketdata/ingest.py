@@ -38,6 +38,7 @@ from marketdata.calendar import (
     plan_intraday_requests,
     weekend_only,
 )
+from marketdata.eod_quality import eod_ohlc_invalid_reason
 from marketdata.errors import BudgetExhausted
 from marketdata.locking import data_directory_locked
 from marketdata.store import BarStore, MetaStore
@@ -305,6 +306,7 @@ class _ValidatedSegmentsClient:
     def __init__(
         self,
         client: TiingoClient,
+        bars: BarStore,
         meta: MetaStore,
         segments: Sequence[ValidatedRequestSegment],
     ):
@@ -317,6 +319,7 @@ class _ValidatedSegmentsClient:
         if len(by_identifier) != len(segments):
             raise ValueError("validated batch contains duplicate request identifiers")
         self._client = client
+        self._bars = bars
         self._meta = meta
         self._segments = by_identifier
 
@@ -385,7 +388,29 @@ class _ValidatedSegmentsClient:
                     f"response row {index} {metadata_key} conflicts with "
                     "validated identity evidence"
                 )
-        return rows
+        if segment.dataset_key != "eod":
+            return rows
+        accepted: list[dict[str, Any]] = []
+        rejected: list[tuple[Mapping[str, Any], str]] = []
+        for row in rows:
+            reason = eod_ohlc_invalid_reason(row)
+            if reason is None:
+                accepted.append(row)
+            else:
+                rejected.append((row, reason))
+        quarantine_path = self._bars.quarantine_eod_response_rows(
+            segment.instrument_id or "",
+            segment.ticker,
+            rejected,
+        )
+        if quarantine_path is not None:
+            log.warning(
+                "quarantined %d invalid EOD response row(s) for %s at %s",
+                len(rejected),
+                segment.instrument_id,
+                quarantine_path,
+            )
+        return accepted
 
     def eod(
         self,
@@ -1197,7 +1222,7 @@ def _execute_validated_segments(
                     )
                     for segment in batch
                 ]
-                validated_client = _ValidatedSegmentsClient(client, meta, batch)
+                validated_client = _ValidatedSegmentsClient(client, bars, meta, batch)
                 try:
                     if dataset_key == "eod":
                         sub_result = backfill_eod(
