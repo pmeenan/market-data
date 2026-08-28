@@ -259,9 +259,20 @@ Scope:
   quota-interrupted batch, terminalizes identity/oversized-response blockers,
   permits audited job cancellation/retry, and gives each force invocation a
   fresh resumable job unless an explicit id is supplied.
-- [ ] Put ingestion, reconciliation, and later research publication behind the
+- [x] Put ingestion, reconciliation, and later research publication behind the
   shared data-directory process lock. Preserve nonzero CLI exits and bounded
   machine-readable summaries for partial failure.
+  Completed 2026-08-28: D-022's persistent advisory lock serializes ingestion,
+  historical job setup/request turns, reconciliation, migration, and legacy
+  bar ranking at library coordinator boundaries; nested coordinators are
+  reentrant, while competing threads/processes fail fast with bounded holder
+  diagnostics. History yields the lock between durable turns, and cancellation
+  remains an available SQLite control signal that stops a live sweep after its
+  current turn.
+  Cross-process CLI fixtures prove contention makes update, backfill, and
+  reconcile exit nonzero, preserves bounded JSON failure summaries, and does
+  not create a contended history job. M3's library study runner will acquire
+  this same lock through input selection and result publication.
 - [ ] Install the owner's scheduled Linux job for current updates with a bounded
   status record and an actually observed notification path for failure. Start
   phase 1 (seed EOD plus hourly) as the first resumable background backfill.

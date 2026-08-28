@@ -31,13 +31,13 @@ from marketdata.quality import (
     check_quality,
     evaluate_quality,
 )
-from marketdata.reconcile import reconcile_canonical, reconcile_legacy
+from marketdata.reconcile import reconcile_active
 from marketdata.scheduler import (
     DEFAULT_BUDGET_POLICY,
     IngestionCycleResult,
     SchedulerRunResult,
-    resolve_history_job,
-    run_history_sweep,
+    cancel_history_job,
+    run_history_request,
     run_ingestion_cycle,
 )
 from marketdata.store import BarStore, MetaStore
@@ -57,6 +57,13 @@ def _require_ingestion_ready(meta: MetaStore) -> None:
     if meta.storage_generation() != "v2":
         raise click.ClickException(
             "production ingestion remains paused: migrate the warehouse to v2 first"
+        )
+
+
+def _require_initialized_warehouse(config: Config) -> None:
+    if not config.data_dir.is_dir() or not config.meta_path.is_file():
+        raise click.ClickException(
+            f"warehouse is not initialized at {config.data_dir}; run init first"
         )
 
 
@@ -392,7 +399,9 @@ def backfill_eod_cmd(
         client = _client(config)
         click.echo(f"Backfilling EOD for {len(ticker_list)} tickers...")
         try:
-            durable_job_id = resolve_history_job(
+            scheduler = run_history_request(
+                client,
+                BarStore(config.data_dir),
                 meta,
                 dataset_key="eod",
                 tickers=ticker_list,
@@ -401,12 +410,6 @@ def backfill_eod_cmd(
                 phase=phase,
                 force=force,
                 job_id=job_id,
-            )
-            scheduler = run_history_sweep(
-                client,
-                BarStore(config.data_dir),
-                meta,
-                durable_job_id,
                 max_units=max_units,
             )
             result = scheduler.ingest
@@ -488,7 +491,9 @@ def backfill_intraday_cmd(
         dataset_key = f"intraday_{freq}"
         click.echo(f"Backfilling {freq} bars for {len(ticker_list)} tickers...")
         try:
-            durable_job_id = resolve_history_job(
+            scheduler = run_history_request(
+                client,
+                BarStore(config.data_dir),
                 meta,
                 dataset_key=dataset_key,
                 tickers=ticker_list,
@@ -497,12 +502,6 @@ def backfill_intraday_cmd(
                 phase=phase,
                 force=force,
                 job_id=job_id,
-            )
-            scheduler = run_history_sweep(
-                client,
-                BarStore(config.data_dir),
-                meta,
-                durable_job_id,
                 max_units=max_units,
             )
             result = scheduler.ingest
@@ -522,10 +521,11 @@ def backfill_intraday_cmd(
 @click.pass_obj
 def backfill_cancel_cmd(config: Config, job_id: str) -> None:
     """Cancel a durable history job while retaining its audit trail."""
+    _require_initialized_warehouse(config)
     with MetaStore(config.meta_path) as meta:
         try:
-            meta.cancel_history_job(job_id)
-        except (ValueError, sqlite3.Error) as exc:
+            cancel_history_job(meta, job_id)
+        except (OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
             raise click.ClickException(str(exc)) from exc
     click.echo(f"Cancelled history job {job_id}")
 
@@ -582,30 +582,23 @@ def update(config, tickers, tickers_file, universe_year, all_universes, summary_
 @click.pass_obj
 def reconcile_cmd(config):
     """Rebuild coverage metadata from the active generation's Parquet files."""
+    _require_initialized_warehouse(config)
     bars = BarStore(config.data_dir)
-    owner_label = "tickers"
-    report = None
     try:
         with MetaStore(config.meta_path) as meta:
-            generation = meta.storage_generation()
-            bars.validate_generation(generation)
-            if generation == "v2":
-                report = reconcile_canonical(bars, meta)
-                counts = report.counts
-                owner_label = "instruments"
-                for issue in report.issues:
-                    click.echo(
-                        f"warning: {issue.dataset_key} {issue.instrument_id}: "
-                        f"{issue.issue} ({issue.detail})",
-                        err=True,
-                    )
-            else:
-                counts = reconcile_legacy(bars, meta)
+            report = reconcile_active(bars, meta)
     except (OSError, RuntimeError, sqlite3.Error, pl.exceptions.PolarsError) as exc:
         raise click.ClickException(str(exc)) from exc
-    for dataset, n in counts.items():
+    for issue in report.issues:
+        click.echo(
+            f"warning: {issue.dataset_key} {issue.instrument_id}: "
+            f"{issue.issue} ({issue.detail})",
+            err=True,
+        )
+    owner_label = "instruments" if report.generation == "v2" else "tickers"
+    for dataset, n in report.counts.items():
         click.echo(f"{dataset}: coverage rebuilt for {n} {owner_label}")
-    if report is not None and report.issues:
+    if report.issues:
         raise click.exceptions.Exit(1)
 
 

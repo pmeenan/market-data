@@ -19,6 +19,7 @@ from pathlib import Path
 
 import duckdb
 
+from marketdata.locking import data_directory_locked
 from marketdata.store import BarStore, MetaStore
 
 # Header aliases (lowercased, underscores stripped) accepted for the
@@ -98,6 +99,7 @@ def import_csv(
     return {y: len(es) for y, es in sorted(by_year.items())}, warnings
 
 
+@data_directory_locked("universe:rank-legacy-bars")
 def rank_by_dollar_volume(
     meta: MetaStore, bars: BarStore, year: int, top_n: int, min_days: int = 60
 ) -> int:

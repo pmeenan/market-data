@@ -69,6 +69,10 @@ market-data backfill intraday --phase 1 --freq 1hour \
   --start 2016-12-12 --max-units 500
 ```
 
+Cancellation is also available while a sweep is running. Any already-started
+request turn finishes and checkpoints safely, then the sweep stops before the
+next instrument turn.
+
 Authenticated attempts reserve quota in SQLite before transport and settle to
 the encoded body bytes observed afterward; retries and rejected payloads count,
 and incomplete transfers retain their reservation. Because Tiingo does not

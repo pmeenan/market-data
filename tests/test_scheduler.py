@@ -1,13 +1,18 @@
 """Durable request-budget and breadth-first scheduler tests (offline)."""
 
+import json
+import threading
 from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
+import marketdata.scheduler as scheduler_mod
+from marketdata.locking import LOCK_FILE_NAME
 from marketdata.scheduler import (
     BudgetExhausted,
     BudgetPolicy,
     PersistentAttemptObserver,
+    cancel_history_job,
     history_job_id,
     initialize_history_job,
     resolve_history_job,
@@ -141,6 +146,109 @@ def test_scheduler_resumes_unvisited_remainder_before_any_target_deepens(tmp_pat
 
         run_history_sweep(client, BarStore(data_dir), meta, job_id)
         assert [call[0] for call in client.calls[:6]] == cohort_order * 2
+
+
+def test_history_sweep_holds_shared_lock_during_transport(tmp_path):
+    data_dir, job_id = _scheduler_store(tmp_path, tickers=("A",))
+
+    class LockInspectingClient(FakeIntraday):
+        def intraday(self, ticker, start, end, freq="1hour"):
+            holder = json.loads((data_dir / LOCK_FILE_NAME).read_text())
+            assert holder["operation"].startswith("ingest:history-turn:")
+            return super().intraday(ticker, start, end, freq)
+
+    with MetaStore(data_dir / "meta.db") as meta:
+        result = run_history_sweep(
+            LockInspectingClient(), BarStore(data_dir), meta, job_id
+        )
+
+    assert result.successful_units == 1
+
+
+def test_cancel_stops_a_running_sweep_after_its_current_turn(tmp_path):
+    assert instrument_bucket("instrument-a") != instrument_bucket("instrument-b")
+    data_dir, job_id = _scheduler_store(tmp_path, tickers=("A", "B"))
+    started = threading.Event()
+    release = threading.Event()
+    outcome = []
+
+    class PausedClient(FakeIntraday):
+        def intraday(self, ticker, start, end, freq="1hour"):
+            started.set()
+            assert release.wait(timeout=5)
+            return super().intraday(ticker, start, end, freq)
+
+    client = PausedClient()
+
+    def run() -> None:
+        with MetaStore(data_dir / "meta.db") as meta:
+            outcome.append(run_history_sweep(client, BarStore(data_dir), meta, job_id))
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    assert started.wait(timeout=5)
+    with MetaStore(data_dir / "meta.db") as meta:
+        cancel_history_job(meta, job_id)
+    release.set()
+    thread.join(timeout=5)
+
+    assert not thread.is_alive()
+    assert len(client.calls) == 1
+    assert outcome[0].job_status == "cancelled"
+    with MetaStore(data_dir / "meta.db") as meta:
+        job = meta.history_job(job_id)
+        assert (job["status"], job["cancelled"]) == ("blocked", 1)
+
+
+def test_history_sweep_yields_lock_between_turns_for_current_work(
+    tmp_path, monkeypatch
+):
+    assert instrument_bucket("instrument-a") != instrument_bucket("instrument-b")
+    data_dir, job_id = _scheduler_store(tmp_path, tickers=("A", "B"))
+    turn_released = threading.Event()
+    current_finished = threading.Event()
+    history_outcome = []
+    original_exit = scheduler_mod.DataDirectoryLock.__exit__
+    yielded = False
+
+    def yield_after_first_turn(lock, exc_type, exc, traceback):
+        nonlocal yielded
+        original_exit(lock, exc_type, exc, traceback)
+        if lock.operation.startswith("ingest:history-turn:") and not yielded:
+            yielded = True
+            turn_released.set()
+            assert current_finished.wait(timeout=5)
+
+    monkeypatch.setattr(
+        scheduler_mod.DataDirectoryLock, "__exit__", yield_after_first_turn
+    )
+
+    def run_history() -> None:
+        with MetaStore(data_dir / "meta.db") as meta:
+            history_outcome.append(
+                run_history_sweep(FakeIntraday(), BarStore(data_dir), meta, job_id)
+            )
+
+    thread = threading.Thread(target=run_history)
+    thread.start()
+    assert turn_released.wait(timeout=5)
+    try:
+        with MetaStore(data_dir / "meta.db") as meta:
+            current = run_ingestion_cycle(
+                FakeIntraday(),
+                BarStore(data_dir),
+                meta,
+                current_tickers=["A"],
+                current_datasets=["intraday_5min"],
+                history_job_id=None,
+            )
+    finally:
+        current_finished.set()
+    thread.join(timeout=5)
+
+    assert current.ok
+    assert not thread.is_alive()
+    assert history_outcome[0].sweep_ended == 1
 
 
 def test_ready_units_in_one_bucket_publish_as_one_batch(tmp_path, monkeypatch):

@@ -77,6 +77,7 @@ renamed into place only after validation.
 
 ```text
 data/
+  .market-data.lock
   meta.db
   bars/
     eod/bucket={00..ff}/bars.parquet
@@ -90,6 +91,19 @@ data/
     {study_name}/{run_id}/observations.parquet
     {study_name}/{run_id}/input_files.parquet
 ```
+
+Per D-022, the persistent `.market-data.lock` is the one advisory canonical
+mutation lock for the warehouse. Library-level ingestion, reconciliation,
+migration, legacy bar ranking, and research-publication coordinators acquire
+it; nested coordinators are reentrant. Current collection holds it across its
+declared datasets, while historical work releases it after each durable turn.
+A competing thread or process fails fast with bounded PID, operation, and
+acquisition-time diagnostics so an unattended overlap cannot hang
+indefinitely. Holder metadata is cleared before unlock, but the file is never
+unlinked during normal operation because all processes must continue
+contending on the same inode. SQLite-only configuration and control writes use
+SQLite transactions; notably, cancellation remains available while a history
+turn is in flight and takes effect at the next turn boundary.
 
 `instrument_id` is opaque; `run_id` is opaque and filesystem-safe; and
 `study_name` is a registered filesystem-safe slug. D-019 assigns an instrument
@@ -299,6 +313,12 @@ history can run, while the separate 30 GB rolling history ceiling preserves at
 least 10 GB beneath the 40 GB rolling total ceiling. RE-006's vendor billing
 basis remains undocumented, so the rolling window and response reservation are
 deliberately stricter than an assumed calendar-month/observed-byte ledger.
+Each durable historical turn holds D-022's mutation lock through planning,
+transport, publication, and checkpoint, then yields it before the next turn.
+Cancellation is a concurrent SQLite control signal; an in-flight turn may
+finish, but checkpointing preserves the cancelled terminal state and no next
+turn begins.
+
 Responses are capped while streaming; an undeclared oversized body is charged,
 checkpointed as a durable range blocker, and is not downloaded again on every
 automatic resume.

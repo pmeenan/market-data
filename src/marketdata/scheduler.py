@@ -28,6 +28,11 @@ from marketdata.ingest import (
     update_eod_validated,
     update_intraday_validated,
 )
+from marketdata.locking import (
+    DataDirectoryLock,
+    coordinated_data_directory,
+    data_directory_locked,
+)
 from marketdata.store import BarStore, MetaStore
 from marketdata.store.bars import instrument_bucket
 from marketdata.tiingo import (
@@ -271,6 +276,7 @@ def history_job_id(
     return f"history-{digest}"
 
 
+@data_directory_locked("ingest:history-job-resolve")
 def resolve_history_job(
     meta: MetaStore,
     *,
@@ -311,6 +317,54 @@ def resolve_history_job(
     return durable_job_id
 
 
+def run_history_request(
+    client: TiingoLike,
+    bars: BarStore,
+    meta: MetaStore,
+    *,
+    dataset_key: str,
+    tickers: Sequence[str],
+    start: date,
+    end: date | None,
+    phase: int | None = None,
+    force: bool = False,
+    job_id: str | None = None,
+    policy: BudgetPolicy = DEFAULT_BUDGET_POLICY,
+    max_units: int | None = None,
+    clock: Callable[[], datetime] = _utc_now,
+) -> SchedulerRunResult:
+    """Resolve a history request, then run it in lock-yielding turns."""
+    durable_job_id = resolve_history_job(
+        meta,
+        dataset_key=dataset_key,
+        tickers=tickers,
+        start=start,
+        end=end,
+        phase=phase,
+        force=force,
+        job_id=job_id,
+    )
+    return run_history_sweep(
+        client,
+        bars,
+        meta,
+        durable_job_id,
+        policy=policy,
+        max_units=max_units,
+        clock=clock,
+    )
+
+
+def cancel_history_job(meta: MetaStore, job_id: str) -> None:
+    """Signal cancellation without waiting for a running history turn.
+
+    This SQLite-only control operation deliberately bypasses the Parquet
+    mutation lock. A running sweep observes it after its current durable turn.
+    """
+    meta.cancel_history_job(job_id)
+
+
+@data_directory_locked("ingest:history-job-initialize")
 def initialize_history_job(
     meta: MetaStore,
     *,
@@ -451,41 +505,44 @@ def run_ingestion_cycle(
     ]
     if invalid:
         raise ValueError(f"invalid current dataset {invalid[0]!r}")
+    data_dir = coordinated_data_directory(bars=bars, meta=meta)
     cycle = IngestionCycleResult()
-    for dataset_key in datasets:
-        observer = PersistentAttemptObserver(
-            meta,
-            work_kind="current",
-            operation=f"current:{dataset_key}",
-            policy=policy,
-            clock=clock,
-        )
-        try:
-            with observed_client(client, observer) as metered:
-                if dataset_key == "eod":
-                    result = update_eod_validated(
-                        metered,  # type: ignore[arg-type]
-                        bars,
-                        meta,
-                        current_tickers,
-                    )
-                else:
-                    result = update_intraday_validated(
-                        metered,  # type: ignore[arg-type]
-                        bars,
-                        meta,
-                        current_tickers,
-                        freq=dataset_key.removeprefix("intraday_"),
-                    )
-        except BudgetExhausted as exc:
-            if exc.partial_ingest is not None:
-                _merge_ingest(cycle.current, exc.partial_ingest)
-            cycle.stop_reason = exc.reason
-            return cycle
-        _merge_ingest(cycle.current, result)
-        if not result.ok:
-            cycle.stop_reason = "current_work_incomplete"
-            return cycle
+    if datasets:
+        with DataDirectoryLock(data_dir, operation="ingest:current-first-cycle"):
+            for dataset_key in datasets:
+                observer = PersistentAttemptObserver(
+                    meta,
+                    work_kind="current",
+                    operation=f"current:{dataset_key}",
+                    policy=policy,
+                    clock=clock,
+                )
+                try:
+                    with observed_client(client, observer) as metered:
+                        if dataset_key == "eod":
+                            result = update_eod_validated(
+                                metered,  # type: ignore[arg-type]
+                                bars,
+                                meta,
+                                current_tickers,
+                            )
+                        else:
+                            result = update_intraday_validated(
+                                metered,  # type: ignore[arg-type]
+                                bars,
+                                meta,
+                                current_tickers,
+                                freq=dataset_key.removeprefix("intraday_"),
+                            )
+                except BudgetExhausted as exc:
+                    if exc.partial_ingest is not None:
+                        _merge_ingest(cycle.current, exc.partial_ingest)
+                    cycle.stop_reason = exc.reason
+                    return cycle
+                _merge_ingest(cycle.current, result)
+                if not result.ok:
+                    cycle.stop_reason = "current_work_incomplete"
+                    return cycle
 
     if history_job_id is not None:
         cycle.history = run_history_sweep(
@@ -511,31 +568,32 @@ def run_history_sweep(
     max_units: int | None = None,
     clock: Callable[[], datetime] = _utc_now,
 ) -> SchedulerRunResult:
-    """Resume and finish at most the current durable breadth-first sweep."""
-    job = meta.history_job(job_id)
-    if job is None:
-        raise ValueError(f"unknown history job {job_id!r}")
+    """Resume one breadth-first sweep, yielding the lock between turns."""
     if max_units is not None and max_units <= 0:
         raise ValueError("max_units must be positive")
-    started_sweep = int(job["sweep"])
-    report = SchedulerRunResult(
-        job_id=job_id,
-        job_status=_job_status(job),
-        sweep_started=started_sweep,
-        sweep_ended=started_sweep,
-    )
-    if job["phase"] is not None:
-        predecessors = meta.active_lower_phase_jobs(int(job["phase"]))
-        if predecessors:
-            report.stop_reason = "phase_predecessor_active"
+    data_dir = coordinated_data_directory(bars=bars, meta=meta)
+    with DataDirectoryLock(data_dir, operation=f"ingest:history-sweep-setup:{job_id}"):
+        job = meta.history_job(job_id)
+        if job is None:
+            raise ValueError(f"unknown history job {job_id!r}")
+        started_sweep = int(job["sweep"])
+        report = SchedulerRunResult(
+            job_id=job_id,
+            job_status=_job_status(job),
+            sweep_started=started_sweep,
+            sweep_ended=started_sweep,
+        )
+        if job["phase"] is not None:
+            predecessors = meta.active_lower_phase_jobs(int(job["phase"]))
+            if predecessors:
+                report.stop_reason = "phase_predecessor_active"
+                return report
+        if job["status"] != "active":
+            _add_static_blockers(meta, job_id, report.ingest)
             return report
-    if job["status"] != "active":
-        _add_static_blockers(meta, job_id, report.ingest)
-        return report
-
-    targets = meta.history_targets(job_id)
-    if not targets:
-        return report
+        targets = meta.history_targets(job_id)
+        if not targets:
+            return report
     observer = PersistentAttemptObserver(
         meta,
         work_kind="historical",
@@ -545,193 +603,19 @@ def run_history_sweep(
     )
     with observed_client(client, observer) as metered:
         while report.sweep_ended == started_sweep:
-            job = meta.history_job(job_id)
-            assert job is not None
-            cursor = int(job["cursor"])
-            target = targets[cursor]
-            active_range = _active_range(meta, job_id, int(target["target_ordinal"]))
-            if active_range is None:
-                _checkpoint(
+            with DataDirectoryLock(data_dir, operation=f"ingest:history-turn:{job_id}"):
+                keep_running = _run_history_turn(
+                    client,
+                    metered,
+                    bars,
                     meta,
                     job_id,
-                    target,
-                    _last_range(meta, job_id, int(target["target_ordinal"])),
-                    attempt_status="already_complete",
-                    detail="",
-                    attempted=False,
-                    successful=False,
+                    targets,
+                    observer,
+                    report,
+                    max_units,
                 )
-                current = meta.history_job(job_id)
-                assert current is not None
-                report.sweep_ended = int(current["sweep"])
-                report.job_status = _job_status(current)
-                if report.job_status != "active":
-                    break
-                continue
-
-            planned = _plan_target_unit(meta, job, target, active_range)
-            if planned is None:
-                _checkpoint(
-                    meta,
-                    job_id,
-                    target,
-                    active_range,
-                    attempt_status="already_covered",
-                    detail="",
-                    attempted=False,
-                    successful=False,
-                    range_status="complete",
-                )
-                current = meta.history_job(job_id)
-                assert current is not None
-                report.sweep_ended = int(current["sweep"])
-                report.job_status = _job_status(current)
-                if report.job_status != "active":
-                    break
-                continue
-
-            segment, direction = planned
-            if segment.status == "non_session_gap":
-                _checkpoint_success_without_request(
-                    meta, job_id, target, active_range, segment, direction
-                )
-                report.advanced_units += 1
-            elif segment.status != "ready":
-                detail = segment.detail or segment.status
-                report.ingest.blocked[segment.key] = detail
-                report.ingest.segments.append(
-                    {**segment.to_dict(outcome="blocked"), "detail": detail}
-                )
-                _checkpoint(
-                    meta,
-                    job_id,
-                    target,
-                    active_range,
-                    attempt_status="identity_blocked",
-                    detail=detail,
-                    attempted=True,
-                    successful=False,
-                    terminal_blocked=True,
-                )
-                report.attempted_units += 1
-            else:
-                batch = [(target, active_range, segment, direction)]
-                remaining = (
-                    len(targets)
-                    if max_units is None
-                    else max_units - report.attempted_units
-                )
-                bucket = instrument_bucket(str(target["instrument_id"]))
-                for candidate_target in targets[cursor + 1 :]:
-                    if (
-                        len(batch) >= remaining
-                        or instrument_bucket(str(candidate_target["instrument_id"]))
-                        != bucket
-                    ):
-                        break
-                    candidate_range = _active_range(
-                        meta, job_id, int(candidate_target["target_ordinal"])
-                    )
-                    if candidate_range is None:
-                        break
-                    candidate_plan = _plan_target_unit(
-                        meta, job, candidate_target, candidate_range
-                    )
-                    if candidate_plan is None or candidate_plan[0].status != "ready":
-                        break
-                    batch.append(
-                        (
-                            candidate_target,
-                            candidate_range,
-                            candidate_plan[0],
-                            candidate_plan[1],
-                        )
-                    )
-                attempts_per_unit = int(getattr(client, "max_attempts", 1))
-                if len(batch) > 1 and not observer.can_start_batch(
-                    len(batch) * attempts_per_unit
-                ):
-                    batch = batch[:1]
-                try:
-                    unit_result = _execute_validated_segments(
-                        metered,
-                        bars,
-                        meta,
-                        [item[2] for item in batch],
-                        force=bool(job["force"]),
-                    )
-                except BudgetExhausted as exc:
-                    attempted, advanced = _checkpoint_partial_batch(
-                        meta, job_id, batch, exc.partial_ingest, report.ingest
-                    )
-                    report.attempted_units += attempted
-                    report.successful_units += advanced
-                    report.advanced_units += advanced
-                    report.stop_reason = exc.reason
-                    break
-                except ResponseReservationExceeded as exc:
-                    processed, advanced = _checkpoint_partial_batch(
-                        meta,
-                        job_id,
-                        batch,
-                        getattr(exc, "partial_ingest", None),
-                        report.ingest,
-                    )
-                    report.successful_units += advanced
-                    report.advanced_units += advanced
-                    report.attempted_units += processed + 1
-                    failed_target, failed_range, failed_segment, _ = batch[processed]
-                    detail = str(exc)
-                    report.ingest.failed[failed_segment.key] = detail
-                    report.ingest.segments.append(
-                        {
-                            **failed_segment.to_dict(outcome="failed"),
-                            "detail": detail,
-                        }
-                    )
-                    _checkpoint(
-                        meta,
-                        job_id,
-                        failed_target,
-                        failed_range,
-                        attempt_status="response_reservation_exceeded",
-                        detail=detail,
-                        attempted=True,
-                        successful=False,
-                        terminal_blocked=True,
-                    )
-                    report.stop_reason = "response_reservation_exceeded"
-                    break
-                _merge_ingest(report.ingest, unit_result)
-                report.attempted_units += len(batch)
-                for (
-                    batch_target,
-                    batch_range,
-                    batch_segment,
-                    batch_direction,
-                ) in batch:
-                    successful = _checkpoint_after_ingest(
-                        meta,
-                        job_id,
-                        batch_target,
-                        batch_range,
-                        batch_segment,
-                        batch_direction,
-                        unit_result,
-                        force=bool(job["force"]),
-                    )
-                    if successful:
-                        report.successful_units += 1
-                        report.advanced_units += 1
-
-            current = meta.history_job(job_id)
-            assert current is not None
-            report.sweep_ended = int(current["sweep"])
-            report.job_status = _job_status(current)
-            if report.job_status != "active":
-                break
-            if max_units is not None and report.attempted_units >= max_units:
-                report.stop_reason = "max_units"
+            if not keep_running:
                 break
 
     _add_static_blockers(meta, job_id, report.ingest)
@@ -740,6 +624,205 @@ def run_history_sweep(
     report.sweep_ended = int(current["sweep"])
     report.job_status = _job_status(current)
     return report
+
+
+def _run_history_turn(
+    client: TiingoLike,
+    metered: TiingoLike,
+    bars: BarStore,
+    meta: MetaStore,
+    job_id: str,
+    targets: list[Any],
+    observer: PersistentAttemptObserver,
+    report: SchedulerRunResult,
+    max_units: int | None,
+) -> bool:
+    """Plan, publish, and checkpoint one lock-bounded durable turn."""
+    job = meta.history_job(job_id)
+    if job is None:
+        raise RuntimeError(f"history job {job_id!r} disappeared")
+    report.job_status = _job_status(job)
+    report.sweep_ended = int(job["sweep"])
+    if report.job_status != "active":
+        return False
+    if job["phase"] is not None and meta.active_lower_phase_jobs(int(job["phase"])):
+        report.stop_reason = "phase_predecessor_active"
+        return False
+
+    cursor = int(job["cursor"])
+    target = targets[cursor]
+    active_range = _active_range(meta, job_id, int(target["target_ordinal"]))
+    if active_range is None:
+        _checkpoint(
+            meta,
+            job_id,
+            target,
+            _last_range(meta, job_id, int(target["target_ordinal"])),
+            attempt_status="already_complete",
+            detail="",
+            attempted=False,
+            successful=False,
+        )
+        return _history_turn_continues(meta, job_id, report, max_units)
+
+    planned = _plan_target_unit(meta, job, target, active_range)
+    if planned is None:
+        _checkpoint(
+            meta,
+            job_id,
+            target,
+            active_range,
+            attempt_status="already_covered",
+            detail="",
+            attempted=False,
+            successful=False,
+            range_status="complete",
+        )
+        return _history_turn_continues(meta, job_id, report, max_units)
+
+    segment, direction = planned
+    if segment.status == "non_session_gap":
+        _checkpoint_success_without_request(
+            meta, job_id, target, active_range, segment, direction
+        )
+        report.advanced_units += 1
+    elif segment.status != "ready":
+        detail = segment.detail or segment.status
+        report.ingest.blocked[segment.key] = detail
+        report.ingest.segments.append(
+            {**segment.to_dict(outcome="blocked"), "detail": detail}
+        )
+        _checkpoint(
+            meta,
+            job_id,
+            target,
+            active_range,
+            attempt_status="identity_blocked",
+            detail=detail,
+            attempted=True,
+            successful=False,
+            terminal_blocked=True,
+        )
+        report.attempted_units += 1
+    else:
+        batch = [(target, active_range, segment, direction)]
+        remaining = (
+            len(targets) if max_units is None else max_units - report.attempted_units
+        )
+        bucket = instrument_bucket(str(target["instrument_id"]))
+        for candidate_target in targets[cursor + 1 :]:
+            if (
+                len(batch) >= remaining
+                or instrument_bucket(str(candidate_target["instrument_id"])) != bucket
+            ):
+                break
+            candidate_range = _active_range(
+                meta, job_id, int(candidate_target["target_ordinal"])
+            )
+            if candidate_range is None:
+                break
+            candidate_plan = _plan_target_unit(
+                meta, job, candidate_target, candidate_range
+            )
+            if candidate_plan is None or candidate_plan[0].status != "ready":
+                break
+            batch.append(
+                (
+                    candidate_target,
+                    candidate_range,
+                    candidate_plan[0],
+                    candidate_plan[1],
+                )
+            )
+        attempts_per_unit = int(getattr(client, "max_attempts", 1))
+        if len(batch) > 1 and not observer.can_start_batch(
+            len(batch) * attempts_per_unit
+        ):
+            batch = batch[:1]
+        try:
+            unit_result = _execute_validated_segments(
+                metered,
+                bars,
+                meta,
+                [item[2] for item in batch],
+                force=bool(job["force"]),
+            )
+        except BudgetExhausted as exc:
+            attempted, advanced = _checkpoint_partial_batch(
+                meta, job_id, batch, exc.partial_ingest, report.ingest
+            )
+            report.attempted_units += attempted
+            report.successful_units += advanced
+            report.advanced_units += advanced
+            report.stop_reason = exc.reason
+            return False
+        except ResponseReservationExceeded as exc:
+            processed, advanced = _checkpoint_partial_batch(
+                meta,
+                job_id,
+                batch,
+                getattr(exc, "partial_ingest", None),
+                report.ingest,
+            )
+            report.successful_units += advanced
+            report.advanced_units += advanced
+            report.attempted_units += processed + 1
+            failed_target, failed_range, failed_segment, _ = batch[processed]
+            detail = str(exc)
+            report.ingest.failed[failed_segment.key] = detail
+            report.ingest.segments.append(
+                {**failed_segment.to_dict(outcome="failed"), "detail": detail}
+            )
+            _checkpoint(
+                meta,
+                job_id,
+                failed_target,
+                failed_range,
+                attempt_status="response_reservation_exceeded",
+                detail=detail,
+                attempted=True,
+                successful=False,
+                terminal_blocked=True,
+            )
+            report.stop_reason = "response_reservation_exceeded"
+            return False
+        _merge_ingest(report.ingest, unit_result)
+        report.attempted_units += len(batch)
+        for batch_target, batch_range, batch_segment, batch_direction in batch:
+            successful = _checkpoint_after_ingest(
+                meta,
+                job_id,
+                batch_target,
+                batch_range,
+                batch_segment,
+                batch_direction,
+                unit_result,
+                force=bool(job["force"]),
+            )
+            if successful:
+                report.successful_units += 1
+                report.advanced_units += 1
+
+    return _history_turn_continues(meta, job_id, report, max_units)
+
+
+def _history_turn_continues(
+    meta: MetaStore,
+    job_id: str,
+    report: SchedulerRunResult,
+    max_units: int | None,
+) -> bool:
+    current = meta.history_job(job_id)
+    if current is None:
+        raise RuntimeError(f"history job {job_id!r} disappeared")
+    report.sweep_ended = int(current["sweep"])
+    report.job_status = _job_status(current)
+    if report.job_status != "active":
+        return False
+    if max_units is not None and report.attempted_units >= max_units:
+        report.stop_reason = "max_units"
+        return False
+    return report.sweep_ended == report.sweep_started
 
 
 def _plan_target_unit(meta, job, target, range_row):

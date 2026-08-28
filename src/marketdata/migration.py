@@ -10,6 +10,7 @@ from typing import Literal
 
 import polars as pl
 
+from marketdata.locking import data_directory_locked
 from marketdata.reconcile import ReconciliationIssue, reconcile_canonical
 from marketdata.store.bars import BarStore, instrument_bucket
 from marketdata.store.meta import MetaStore
@@ -71,6 +72,7 @@ def default_migration_report_path(data_dir: Path) -> Path:
     return Path(data_dir) / QUARANTINE_V1_RELATIVE / DEFAULT_MIGRATION_REPORT
 
 
+@data_directory_locked("migration:v1-to-v2")
 def migrate_v1_bars(
     bars: BarStore, meta: MetaStore, report_path: Path | None = None
 ) -> MigrationReport:

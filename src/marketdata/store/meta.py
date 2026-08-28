@@ -1502,6 +1502,7 @@ class MetaStore:
         rows = self._con.execute(
             """SELECT job_id FROM history_jobs
                WHERE phase IS NOT NULL AND phase < ? AND status = 'active'
+                 AND cancelled = 0
                ORDER BY phase, dataset_key, job_id""",
             (phase,),
         ).fetchall()
@@ -1565,7 +1566,9 @@ class MetaStore:
             )
             self._con.execute(
                 """UPDATE history_jobs
-                   SET cursor = ?, sweep = ?, status = ?, updated_at = ?
+                   SET cursor = ?, sweep = ?,
+                       status = CASE WHEN cancelled = 1 THEN 'blocked' ELSE ? END,
+                       updated_at = ?
                    WHERE job_id = ?""",
                 (cursor, sweep, job_status, now, job_id),
             )

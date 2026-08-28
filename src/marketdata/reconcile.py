@@ -8,6 +8,7 @@ from pathlib import Path
 
 import polars as pl
 
+from marketdata.locking import data_directory_locked
 from marketdata.store.bars import INTRADAY_FREQS, BarStore, instrument_bucket
 from marketdata.store.meta import MetaStore
 
@@ -27,6 +28,25 @@ class ReconciliationReport:
     issues: tuple[ReconciliationIssue, ...]
 
 
+@dataclass(frozen=True)
+class ActiveReconciliationReport:
+    generation: str
+    counts: dict[str, int]
+    issues: tuple[ReconciliationIssue, ...]
+
+
+@data_directory_locked("reconcile:active-generation")
+def reconcile_active(bars: BarStore, meta: MetaStore) -> ActiveReconciliationReport:
+    """Validate, dispatch, and rebuild the active generation under one lock."""
+    generation = meta.storage_generation()
+    bars.validate_generation(generation)
+    if generation == "v2":
+        report = reconcile_canonical(bars, meta)
+        return ActiveReconciliationReport(generation, report.counts, report.issues)
+    return ActiveReconciliationReport(generation, reconcile_legacy(bars, meta), ())
+
+
+@data_directory_locked("reconcile:canonical")
 def reconcile_canonical(bars: BarStore, meta: MetaStore) -> ReconciliationReport:
     """Conservatively rebuild instrument coverage from canonical files."""
     entries: dict[tuple[str, str], tuple[date, date]] = {}
@@ -146,6 +166,7 @@ def reconcile_canonical(bars: BarStore, meta: MetaStore) -> ReconciliationReport
     return ReconciliationReport(counts, entries, tuple(issues))
 
 
+@data_directory_locked("reconcile:legacy")
 def reconcile_legacy(bars: BarStore, meta: MetaStore) -> dict[str, int]:
     """Rebuild pre-migration ticker coverage without changing generations."""
     entries: dict[tuple[str, str], tuple[date, date]] = {}

@@ -46,6 +46,11 @@ affected docs. Until then, these govern.
 - **Historical backfills advance breadth-first.** Within a phase/dataset, each
   eligible instrument gets one maximum-safe request-depth turn before any gets
   another; quota stops resume the unfinished deterministic sweep. (D-020)
+- **Canonical mutations share one persistent process lock.** Ingestion,
+  reconciliation, migration, legacy bar ranking, and cataloged research use
+  `.market-data.lock`; historical work yields it between durable turns, while
+  cancellation remains a concurrent SQLite control signal. Never unlink the
+  lock file during normal operation. (D-022)
 - **Apache-2.0, permissive direct deps.** Dependencies must carry
   Apache-2.0-compatible permissive licenses, verified against the package's own
   metadata. Every package in the universal lock plus the pinned build backend
@@ -115,8 +120,8 @@ build → commit loop, on-demand reviews, and the human commit gate.
 Milestone **M2 (trustworthy scheduled ingestion)** is in progress. Cap-safe
 next-session IEX planning and the XNYS session-label surface are implemented;
 structured quality findings, consumer-declared gates, durable request budgets,
-and current-first breadth-first scheduling are also implemented. Shared locking
-and scheduled operations remain.
+current-first breadth-first scheduling, and shared data-directory mutation
+locking are also implemented. Scheduled operations remain.
 M1 closed on 2026-08-27. Production ingestion is permitted only for validated
 request segments; unresolved work remains fail-closed. The backtest layer does
 not exist yet. See [docs/plan.md](docs/plan.md). Keep this paragraph short and

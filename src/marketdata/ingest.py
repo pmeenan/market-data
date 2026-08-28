@@ -39,6 +39,7 @@ from marketdata.calendar import (
     weekend_only,
 )
 from marketdata.errors import BudgetExhausted
+from marketdata.locking import data_directory_locked
 from marketdata.store import BarStore, MetaStore
 from marketdata.store.bars import (
     eod_frame,
@@ -666,6 +667,7 @@ def _bucket_groups(targets: list[IngestTarget]) -> Iterator[list[IngestTarget]]:
     yield from (grouped[bucket] for bucket in sorted(grouped))
 
 
+@data_directory_locked("ingest:eod-backfill")
 def backfill_eod(
     client: TiingoClient,
     bars: BarStore,
@@ -790,6 +792,7 @@ def backfill_eod(
     return result
 
 
+@data_directory_locked("ingest:eod-update")
 def update_eod(
     client: TiingoClient,
     bars: BarStore,
@@ -881,6 +884,7 @@ def update_eod(
     return result
 
 
+@data_directory_locked("ingest:intraday-backfill")
 def backfill_intraday(
     client: TiingoClient,
     bars: BarStore,
@@ -1260,6 +1264,7 @@ def _execute_validated_segments(
     return result
 
 
+@data_directory_locked("ingest:validated-eod-backfill")
 def backfill_eod_validated(
     client: TiingoClient,
     bars: BarStore,
@@ -1277,6 +1282,7 @@ def backfill_eod_validated(
     return _execute_validated_segments(client, bars, meta, segments, force=force)
 
 
+@data_directory_locked("ingest:validated-intraday-backfill")
 def backfill_intraday_validated(
     client: TiingoClient,
     bars: BarStore,
@@ -1296,6 +1302,7 @@ def backfill_intraday_validated(
     return _execute_validated_segments(client, bars, meta, segments, force=force)
 
 
+@data_directory_locked("ingest:validated-intraday-update")
 def update_intraday_validated(
     client: TiingoClient,
     bars: BarStore,
@@ -1315,6 +1322,7 @@ def update_intraday_validated(
     return _execute_validated_segments(client, bars, meta, segments, update=True)
 
 
+@data_directory_locked("ingest:validated-eod-update")
 def update_eod_validated(
     client: TiingoClient,
     bars: BarStore,
@@ -1413,6 +1421,7 @@ def _plan_current_update_segments(
     return segments
 
 
+@data_directory_locked("reconcile:canonical")
 def reconcile(bars: BarStore, meta: MetaStore) -> dict[str, int]:
     """Rebuild canonical instrument coverage from active v2 Parquet only."""
     require_canonical_generation(bars, meta.storage_generation())

@@ -25,6 +25,51 @@ Decision / Context / Consequences / Reopen if
 
 ---
 
+## D-022: Canonical mutations share one persistent data-directory lock  (2026-08-28, status: accepted)
+
+**Decision:** Every library coordinator that can publish or replace canonical
+Parquet, rebuild its coverage, cross the storage-generation boundary, or read
+bars for cataloged research uses the same advisory process lock at
+`data/.market-data.lock`. The lock file is persistent and is never unlinked
+during normal operation, so every process continues to lock the same inode.
+Nested coordinators are reentrant. Contention fails closed with a nonzero
+operational result and bounded holder metadata.
+
+Current collection holds the lock through its declared datasets. Historical
+backfill holds it only for one durable request-depth turn (including a D-019
+same-bucket batch), then releases it before planning the next turn so current
+work and other operators are not excluded for an entire sweep. Job resolution
+and initialization are locked. Cancellation is the deliberate exception: it
+is a SQLite-only control signal that may run while a historical turn owns the
+lock; the runner completes any already-started durable turn, preserves the
+cancelled terminal state while checkpointing, and stops before the next turn.
+Other SQLite-only configuration/control writes rely on SQLite transactions;
+the legacy universe rank is locked because it reads bar files.
+
+**Context:** Atomic per-file replacement does not prevent a reader from seeing
+a mixed multi-file vintage or two coordinators from planning against stale
+coverage. D-016 already required the eventual study runner to share an
+ingestion lock from input selection through result publication. A persistent
+advisory lock is the smallest single-server mechanism that covers both flows.
+Holding it for a complete network-bound historical sweep, however, would block
+scheduled current updates for hours and would make the existing durable cancel
+operation unable to stop a runaway sweep.
+
+**Consequences:** Lock ownership is enforced at library coordinator boundaries,
+not only by the CLI. The holder record contains bounded PID, operation, and UTC
+acquisition time, is written through an unbuffered descriptor, and is cleared
+before unlock; the empty persistent file remains. Read-only ad hoc queries may
+still run concurrently but cannot publish cataloged results. A history command
+may stop on contention between turns and is safely resumable from its durable
+cursor. M3 must use this same lock for its manifest scan and publication.
+
+**Reopen if:** The warehouse moves to a concurrent-writer database or a
+manifest/pointer protocol that supplies equivalent multi-file snapshots; the
+target filesystem does not provide reliable local advisory locking; or measured
+turn duration requires a queued/current-priority lock protocol.
+
+---
+
 ## D-021: IEX finalization lookahead is discard-only transport context  (2026-08-27, status: accepted, amends D-014 and D-020)
 
 **Decision:** An identity-validated historical IEX target unit may extend its
