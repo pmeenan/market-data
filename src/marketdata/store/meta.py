@@ -1,4 +1,4 @@
-"""SQLite metadata store: identity, universes, and coverage intervals.
+"""SQLite metadata store: identity, universes, coverage, and scheduler state.
 
 Bar data lives in Parquet (see bars.py); this database only tracks the
 small relational state around it, so it stays tiny and trivially portable.
@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Mapping
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -29,7 +29,7 @@ from marketdata.identity import (
     require_validation_state,
 )
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _SCHEMA_V1 = """
 CREATE TABLE IF NOT EXISTS tickers (
@@ -158,6 +158,105 @@ INSERT OR IGNORE INTO storage_state (key, value)
 VALUES ('storage_generation', 'v1');
 """
 
+_SCHEMA_V4 = """
+CREATE TABLE IF NOT EXISTS api_request_attempts (
+    attempt_id       INTEGER PRIMARY KEY,
+    occurred_at      TEXT NOT NULL,
+    work_kind        TEXT NOT NULL,
+    operation        TEXT NOT NULL,
+    reserved_bytes   INTEGER NOT NULL,
+    observed_bytes   INTEGER NOT NULL DEFAULT 0,
+    settled          INTEGER NOT NULL DEFAULT 0,
+    complete         INTEGER NOT NULL DEFAULT 0,
+    bytes_known      INTEGER NOT NULL DEFAULT 0,
+    CHECK (work_kind IN ('current', 'historical')),
+    CHECK (reserved_bytes >= 0),
+    CHECK (observed_bytes >= 0),
+    CHECK (settled IN (0, 1)),
+    CHECK (complete IN (0, 1)),
+    CHECK (bytes_known IN (0, 1))
+);
+CREATE INDEX IF NOT EXISTS api_request_attempts_time
+    ON api_request_attempts (occurred_at);
+CREATE INDEX IF NOT EXISTS api_request_attempts_kind_time
+    ON api_request_attempts (work_kind, occurred_at);
+
+CREATE TABLE IF NOT EXISTS history_jobs (
+    job_id           TEXT PRIMARY KEY,
+    phase            INTEGER,
+    dataset_key      TEXT NOT NULL,
+    range_start      TEXT NOT NULL,
+    range_end        TEXT NOT NULL,
+    request_hash     TEXT NOT NULL,
+    cohort_hash      TEXT NOT NULL,
+    force            INTEGER NOT NULL DEFAULT 0,
+    cancelled        INTEGER NOT NULL DEFAULT 0,
+    status           TEXT NOT NULL,
+    sweep            INTEGER NOT NULL DEFAULT 0,
+    cursor           INTEGER NOT NULL DEFAULT 0,
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL,
+    CHECK (phase IS NULL OR phase IN (1, 2, 3)),
+    CHECK (dataset_key IN ('eod', 'intraday_1hour', 'intraday_5min')),
+    CHECK (range_start <= range_end),
+    CHECK (force IN (0, 1)),
+    CHECK (cancelled IN (0, 1)),
+    CHECK (status IN ('active', 'complete', 'blocked')),
+    CHECK (sweep >= 0),
+    CHECK (cursor >= 0)
+);
+
+CREATE TABLE IF NOT EXISTS history_targets (
+    job_id           TEXT NOT NULL REFERENCES history_jobs(job_id) ON DELETE CASCADE,
+    target_ordinal   INTEGER NOT NULL,
+    instrument_id    TEXT NOT NULL REFERENCES instruments(instrument_id),
+    successful_depth INTEGER NOT NULL DEFAULT 0,
+    attempted_turns  INTEGER NOT NULL DEFAULT 0,
+    last_attempt_status TEXT,
+    last_attempt_detail TEXT NOT NULL DEFAULT '',
+    updated_at       TEXT NOT NULL,
+    PRIMARY KEY (job_id, target_ordinal),
+    UNIQUE (job_id, instrument_id),
+    CHECK (target_ordinal >= 0),
+    CHECK (successful_depth >= 0),
+    CHECK (attempted_turns >= 0)
+);
+
+CREATE TABLE IF NOT EXISTS history_ranges (
+    job_id           TEXT NOT NULL,
+    target_ordinal   INTEGER NOT NULL,
+    range_ordinal    INTEGER NOT NULL,
+    ticker           TEXT NOT NULL,
+    range_start      TEXT NOT NULL,
+    range_end        TEXT NOT NULL,
+    frontier_end     TEXT NOT NULL,
+    status           TEXT NOT NULL DEFAULT 'active',
+    terminal_blocked INTEGER NOT NULL DEFAULT 0,
+    updated_at       TEXT NOT NULL,
+    PRIMARY KEY (job_id, target_ordinal, range_ordinal),
+    FOREIGN KEY (job_id, target_ordinal)
+        REFERENCES history_targets(job_id, target_ordinal) ON DELETE CASCADE,
+    CHECK (range_start <= range_end),
+    CHECK (frontier_end <= range_end),
+    CHECK (status IN ('active', 'complete')),
+    CHECK (terminal_blocked IN (0, 1))
+);
+CREATE INDEX IF NOT EXISTS history_ranges_job_status
+    ON history_ranges (job_id, status);
+
+CREATE TABLE IF NOT EXISTS history_blocked_ranges (
+    job_id           TEXT NOT NULL REFERENCES history_jobs(job_id) ON DELETE CASCADE,
+    blocked_ordinal  INTEGER NOT NULL,
+    ticker           TEXT NOT NULL,
+    range_start      TEXT NOT NULL,
+    range_end        TEXT NOT NULL,
+    status           TEXT NOT NULL,
+    detail           TEXT NOT NULL,
+    PRIMARY KEY (job_id, blocked_ordinal),
+    CHECK (range_start <= range_end)
+);
+"""
+
 
 def _migrate(con: sqlite3.Connection) -> None:
     version = con.execute("PRAGMA user_version").fetchone()[0]
@@ -185,16 +284,61 @@ def _migrate(con: sqlite3.Connection) -> None:
             con.executescript(_SCHEMA_V3)
             con.execute("PRAGMA user_version = 3")
         version = 3
+    if version < 4:
+        with con:
+            con.executescript(_SCHEMA_V4)
+            con.execute("PRAGMA user_version = 4")
+        version = 4
     if version > SCHEMA_VERSION:
         raise RuntimeError(
             f"meta.db schema version {version} is newer than this code "
             f"supports ({SCHEMA_VERSION}) — update the tool"
         )
-    # Keep additions made during the still-uncommitted v3 implementation
-    # idempotent for local databases opened by an earlier working-tree build.
-    if version == 3:
+    if version == 4:
+        # Schema v4 was exercised from the working tree before it was
+        # committed. Preserve those local ledgers with narrowly additive
+        # compatibility columns instead of rerunning every v3/v4 DDL script.
         with con:
-            con.executescript(_SCHEMA_V3)
+            attempt_columns = {
+                row[1]
+                for row in con.execute(
+                    "PRAGMA table_info('api_request_attempts')"
+                ).fetchall()
+            }
+            if "bytes_known" not in attempt_columns:
+                con.execute(
+                    """ALTER TABLE api_request_attempts
+                       ADD COLUMN bytes_known INTEGER NOT NULL DEFAULT 0
+                       CHECK (bytes_known IN (0, 1))"""
+                )
+                con.execute(
+                    """UPDATE api_request_attempts SET bytes_known = 1
+                       WHERE complete = 1"""
+                )
+            job_columns = {
+                row[1]
+                for row in con.execute("PRAGMA table_info('history_jobs')").fetchall()
+            }
+            if "cancelled" not in job_columns:
+                con.execute(
+                    """ALTER TABLE history_jobs
+                       ADD COLUMN cancelled INTEGER NOT NULL DEFAULT 0
+                       CHECK (cancelled IN (0, 1))"""
+                )
+            range_columns = {
+                row[1]
+                for row in con.execute("PRAGMA table_info('history_ranges')").fetchall()
+            }
+            if "terminal_blocked" not in range_columns:
+                con.execute(
+                    """ALTER TABLE history_ranges
+                       ADD COLUMN terminal_blocked INTEGER NOT NULL DEFAULT 0
+                       CHECK (terminal_blocked IN (0, 1))"""
+                )
+            con.execute(
+                """CREATE INDEX IF NOT EXISTS history_ranges_job_status
+                   ON history_ranges (job_id, status)"""
+            )
 
 
 class MetaStore:
@@ -954,6 +1098,483 @@ class MetaStore:
                    VALUES (?, ?, ?, ?, ?)""",
                 normalized,
             )
+
+    # ---- durable request accounting ------------------------------------
+
+    def reserve_request_attempt(
+        self,
+        *,
+        now: datetime,
+        work_kind: str,
+        operation: str,
+        reserved_bytes: int,
+        hourly_request_limit: int,
+        daily_request_limit: int,
+        total_byte_limit: int,
+        historical_byte_limit: int,
+        rolling_days: int,
+    ) -> tuple[int | None, str | None]:
+        """Atomically reserve one request or return its quota stop reason.
+
+        Incomplete attempts retain ``reserved_bytes`` in the charged total.
+        This intentionally overcounts an interrupted transfer rather than
+        permitting a process crash to reopen budget that may have been spent.
+        """
+        if work_kind not in {"current", "historical"}:
+            raise ValueError(f"invalid work_kind {work_kind!r}")
+        if not operation or len(operation) > 512:
+            raise ValueError("request operation must contain 1..512 characters")
+        limits = (
+            hourly_request_limit,
+            daily_request_limit,
+            total_byte_limit,
+            historical_byte_limit,
+            rolling_days,
+        )
+        if any(value <= 0 for value in limits) or reserved_bytes < 0:
+            raise ValueError("request accounting limits must be positive")
+        timestamp = _utc_timestamp(now)
+        try:
+            self._con.execute("BEGIN IMMEDIATE")
+            usage = self._request_window_usage(now=now, rolling_days=rolling_days)
+            reason = None
+            if usage["hourly_requests"] >= hourly_request_limit:
+                reason = "hourly_request_limit"
+            elif usage["daily_requests"] >= daily_request_limit:
+                reason = "daily_request_limit"
+            elif usage["charged_bytes"] + reserved_bytes > total_byte_limit:
+                reason = "rolling_total_byte_limit"
+            elif (
+                work_kind == "historical"
+                and usage["historical_charged_bytes"] + reserved_bytes
+                > historical_byte_limit
+            ):
+                reason = "rolling_historical_byte_limit"
+            if reason is not None:
+                self._con.commit()
+                return None, reason
+            cursor = self._con.execute(
+                """INSERT INTO api_request_attempts
+                       (occurred_at, work_kind, operation, reserved_bytes)
+                   VALUES (?, ?, ?, ?)""",
+                (timestamp, work_kind, operation, reserved_bytes),
+            )
+            attempt_id = int(cursor.lastrowid)
+            self._con.commit()
+            return attempt_id, None
+        except BaseException:
+            self._con.rollback()
+            raise
+
+    def settle_request_attempt(
+        self,
+        attempt_id: int,
+        observed_bytes: int,
+        *,
+        complete: bool,
+        bytes_known: bool | None = None,
+    ) -> None:
+        if observed_bytes < 0:
+            raise ValueError("observed response bytes must not be negative")
+        if bytes_known is None:
+            bytes_known = complete
+        with self._con:
+            cursor = self._con.execute(
+                """UPDATE api_request_attempts
+                   SET observed_bytes = ?, settled = 1, complete = ?, bytes_known = ?
+                   WHERE attempt_id = ? AND settled = 0""",
+                (observed_bytes, int(complete), int(bytes_known), attempt_id),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError(
+                    f"request attempt {attempt_id} is missing or already settled"
+                )
+
+    def can_start_request_batch(
+        self,
+        *,
+        now: datetime,
+        work_kind: str,
+        attempts: int,
+        reserved_bytes: int,
+        hourly_request_limit: int,
+        daily_request_limit: int,
+        total_byte_limit: int,
+        historical_byte_limit: int,
+        rolling_days: int,
+    ) -> bool:
+        """Conservative preflight used only to retain normal bucket batching.
+
+        Individual attempts still reserve atomically. A false result falls
+        back to one target, where an exact quota stop can retain its cursor.
+        """
+        if attempts <= 0:
+            raise ValueError("batch attempt allowance must be positive")
+        usage = self._request_window_usage(now=now, rolling_days=rolling_days)
+        reservation = attempts * reserved_bytes
+        return (
+            usage["hourly_requests"] + attempts <= hourly_request_limit
+            and usage["daily_requests"] + attempts <= daily_request_limit
+            and usage["charged_bytes"] + reservation <= total_byte_limit
+            and (
+                work_kind != "historical"
+                or usage["historical_charged_bytes"] + reservation
+                <= historical_byte_limit
+            )
+        )
+
+    def request_usage(self, *, now: datetime, rolling_days: int) -> dict[str, int]:
+        usage = self._request_window_usage(now=now, rolling_days=rolling_days)
+        return {
+            key: usage[key]
+            for key in (
+                "requests",
+                "observed_bytes",
+                "charged_bytes",
+                "historical_charged_bytes",
+                "incomplete_attempts",
+            )
+        }
+
+    def _request_window_usage(
+        self, *, now: datetime, rolling_days: int
+    ) -> dict[str, int]:
+        """Return one canonical view of rolling request and byte usage."""
+        hour_start = _utc_timestamp(now - timedelta(hours=1))
+        day_start = _utc_timestamp(now - timedelta(days=1))
+        period_start = _utc_timestamp(now - timedelta(days=rolling_days))
+        row = self._con.execute(
+            """WITH windowed AS (
+                   SELECT *,
+                          CASE WHEN settled = 1 AND bytes_known = 1
+                               THEN observed_bytes
+                               ELSE MAX(reserved_bytes, observed_bytes)
+                          END AS charged_bytes
+                   FROM api_request_attempts
+                   WHERE occurred_at > ?
+               )
+               SELECT COALESCE(SUM(CASE WHEN occurred_at > ? THEN 1 ELSE 0 END), 0)
+                          AS hourly_requests,
+                      COALESCE(SUM(CASE WHEN occurred_at > ? THEN 1 ELSE 0 END), 0)
+                          AS daily_requests,
+                      COUNT(*) AS requests,
+                      COALESCE(SUM(observed_bytes), 0) AS observed_bytes,
+                      COALESCE(SUM(charged_bytes), 0) AS charged_bytes,
+                      COALESCE(SUM(CASE WHEN work_kind = 'historical'
+                           THEN charged_bytes ELSE 0 END), 0)
+                           AS historical_charged_bytes,
+                      COALESCE(SUM(CASE WHEN complete = 0 THEN 1 ELSE 0 END), 0)
+                           AS incomplete_attempts
+               FROM windowed""",
+            (period_start, hour_start, day_start),
+        ).fetchone()
+        return {key: int(row[key]) for key in row.keys()}
+
+    def request_attempts(self) -> list[sqlite3.Row]:
+        return self._con.execute(
+            """SELECT * FROM api_request_attempts ORDER BY attempt_id"""
+        ).fetchall()
+
+    # ---- durable breadth-first history progress ------------------------
+
+    def create_history_job(
+        self,
+        *,
+        job_id: str,
+        phase: int | None,
+        dataset_key: str,
+        start: date,
+        end: date,
+        request_hash: str,
+        cohort_hash: str,
+        force: bool,
+        targets: list[dict[str, Any]],
+        blocked_ranges: list[dict[str, Any]],
+    ) -> None:
+        """Create an immutable cohort snapshot; an identical job is a no-op."""
+        if not job_id.strip() or len(job_id) > 128:
+            raise ValueError("history job_id must contain 1..128 characters")
+        dataset_key = require_dataset_key(dataset_key)
+        if start > end:
+            raise ValueError("history job start must not be after end")
+        if phase not in {None, 1, 2, 3}:
+            raise ValueError("history phase must be 1, 2, 3, or None")
+        existing = self._con.execute(
+            """SELECT phase, dataset_key, range_start, range_end, request_hash,
+                      cohort_hash, force
+               FROM history_jobs WHERE job_id = ?""",
+            (job_id,),
+        ).fetchone()
+        definition = (
+            phase,
+            dataset_key,
+            start.isoformat(),
+            end.isoformat(),
+            request_hash,
+            cohort_hash,
+            int(force),
+        )
+        if existing is not None:
+            if tuple(existing) != definition:
+                raise ValueError(
+                    f"history job {job_id!r} already has a different definition"
+                )
+            return
+        now = _now()
+        status = "active" if targets else "blocked" if blocked_ranges else "complete"
+        with self._con:
+            self._con.execute(
+                """INSERT INTO history_jobs
+                       (job_id, phase, dataset_key, range_start, range_end,
+                        request_hash, cohort_hash, force, status, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (job_id, *definition, status, now, now),
+            )
+            self._con.executemany(
+                """INSERT INTO history_targets
+                       (job_id, target_ordinal, instrument_id, updated_at)
+                   VALUES (?, ?, ?, ?)""",
+                [
+                    (job_id, ordinal, target["instrument_id"], now)
+                    for ordinal, target in enumerate(targets)
+                ],
+            )
+            self._con.executemany(
+                """INSERT INTO history_ranges
+                       (job_id, target_ordinal, range_ordinal, ticker,
+                        range_start, range_end, frontier_end, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                [
+                    (
+                        job_id,
+                        target_ordinal,
+                        range_ordinal,
+                        item["ticker"],
+                        item["start"].isoformat(),
+                        item["end"].isoformat(),
+                        item["end"].isoformat(),
+                        now,
+                    )
+                    for target_ordinal, target in enumerate(targets)
+                    for range_ordinal, item in enumerate(target["ranges"])
+                ],
+            )
+            self._con.executemany(
+                """INSERT INTO history_blocked_ranges
+                       (job_id, blocked_ordinal, ticker, range_start, range_end,
+                        status, detail)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                [
+                    (
+                        job_id,
+                        ordinal,
+                        item["ticker"],
+                        item["start"].isoformat(),
+                        item["end"].isoformat(),
+                        item["status"],
+                        item["detail"],
+                    )
+                    for ordinal, item in enumerate(blocked_ranges)
+                ],
+            )
+
+    def history_job(self, job_id: str) -> sqlite3.Row | None:
+        return self._con.execute(
+            "SELECT * FROM history_jobs WHERE job_id = ?", (job_id,)
+        ).fetchone()
+
+    def history_targets(self, job_id: str) -> list[sqlite3.Row]:
+        return self._con.execute(
+            """SELECT * FROM history_targets WHERE job_id = ?
+               ORDER BY target_ordinal""",
+            (job_id,),
+        ).fetchall()
+
+    def history_ranges(
+        self, job_id: str, target_ordinal: int | None = None
+    ) -> list[sqlite3.Row]:
+        if target_ordinal is None:
+            return self._con.execute(
+                """SELECT * FROM history_ranges WHERE job_id = ?
+                   ORDER BY target_ordinal, range_ordinal""",
+                (job_id,),
+            ).fetchall()
+        return self._con.execute(
+            """SELECT * FROM history_ranges
+               WHERE job_id = ? AND target_ordinal = ?
+               ORDER BY range_ordinal""",
+            (job_id, target_ordinal),
+        ).fetchall()
+
+    def history_blocked_ranges(self, job_id: str) -> list[sqlite3.Row]:
+        return self._con.execute(
+            """SELECT * FROM history_blocked_ranges WHERE job_id = ?
+               ORDER BY blocked_ordinal""",
+            (job_id,),
+        ).fetchall()
+
+    def history_target_count(self, job_id: str) -> int:
+        return int(
+            self._con.execute(
+                "SELECT COUNT(*) FROM history_targets WHERE job_id = ?", (job_id,)
+            ).fetchone()[0]
+        )
+
+    def history_has_active_range(
+        self,
+        job_id: str,
+        *,
+        excluding: tuple[int, int] | None = None,
+    ) -> bool:
+        if excluding is None:
+            row = self._con.execute(
+                """SELECT 1 FROM history_ranges
+                   WHERE job_id = ? AND status = 'active'
+                     AND terminal_blocked = 0 LIMIT 1""",
+                (job_id,),
+            ).fetchone()
+        else:
+            row = self._con.execute(
+                """SELECT 1 FROM history_ranges
+                   WHERE job_id = ? AND status = 'active'
+                     AND terminal_blocked = 0
+                     AND NOT (target_ordinal = ? AND range_ordinal = ?)
+                   LIMIT 1""",
+                (job_id, *excluding),
+            ).fetchone()
+        return row is not None
+
+    def history_has_blockers(self, job_id: str) -> bool:
+        row = self._con.execute(
+            """SELECT 1 FROM history_blocked_ranges WHERE job_id = ? LIMIT 1""",
+            (job_id,),
+        ).fetchone()
+        if row is not None:
+            return True
+        return (
+            self._con.execute(
+                """SELECT 1 FROM history_ranges
+                   WHERE job_id = ? AND terminal_blocked = 1 LIMIT 1""",
+                (job_id,),
+            ).fetchone()
+            is not None
+        )
+
+    def reactivate_history_job(self, job_id: str) -> bool:
+        """Retry runtime-blocked ranges of an explicitly rerun job."""
+        job = self.history_job(job_id)
+        if job is None or job["cancelled"]:
+            return False
+        with self._con:
+            changed = self._con.execute(
+                """UPDATE history_ranges
+                   SET terminal_blocked = 0, updated_at = ?
+                   WHERE job_id = ? AND terminal_blocked = 1""",
+                (_now(), job_id),
+            ).rowcount
+            if changed:
+                self._con.execute(
+                    """UPDATE history_jobs SET status = 'active', updated_at = ?
+                       WHERE job_id = ? AND status = 'blocked'""",
+                    (_now(), job_id),
+                )
+        return bool(changed)
+
+    def cancel_history_job(self, job_id: str) -> None:
+        """Terminally cancel a durable job without deleting its audit trail."""
+        with self._con:
+            cursor = self._con.execute(
+                """UPDATE history_jobs
+                   SET status = 'blocked', cancelled = 1, updated_at = ?
+                   WHERE job_id = ? AND status IN ('active', 'blocked')
+                     AND cancelled = 0""",
+                (_now(), job_id),
+            )
+            if cursor.rowcount != 1:
+                row = self.history_job(job_id)
+                if row is None:
+                    raise ValueError(f"unknown history job {job_id!r}")
+                raise ValueError(f"history job {job_id!r} is already {row['status']}")
+
+    def active_lower_phase_jobs(self, phase: int) -> list[str]:
+        if phase not in {1, 2, 3}:
+            raise ValueError("history phase must be 1, 2, or 3")
+        rows = self._con.execute(
+            """SELECT job_id FROM history_jobs
+               WHERE phase IS NOT NULL AND phase < ? AND status = 'active'
+               ORDER BY phase, dataset_key, job_id""",
+            (phase,),
+        ).fetchall()
+        return [str(row["job_id"]) for row in rows]
+
+    def checkpoint_history_turn(
+        self,
+        *,
+        job_id: str,
+        target_ordinal: int,
+        range_ordinal: int,
+        frontier_end: date,
+        range_status: str,
+        attempt_status: str,
+        detail: str,
+        attempted: bool,
+        successful: bool,
+        terminal_blocked: bool,
+        cursor: int,
+        sweep: int,
+        job_status: str,
+    ) -> None:
+        if range_status not in {"active", "complete"}:
+            raise ValueError(f"invalid history range status {range_status!r}")
+        if job_status not in {"active", "complete", "blocked"}:
+            raise ValueError(f"invalid history job status {job_status!r}")
+        now = _now()
+        with self._con:
+            updated = self._con.execute(
+                """UPDATE history_ranges
+                   SET frontier_end = ?, status = ?, terminal_blocked = ?, updated_at = ?
+                   WHERE job_id = ? AND target_ordinal = ? AND range_ordinal = ?""",
+                (
+                    frontier_end.isoformat(),
+                    range_status,
+                    int(terminal_blocked),
+                    now,
+                    job_id,
+                    target_ordinal,
+                    range_ordinal,
+                ),
+            )
+            if updated.rowcount != 1:
+                raise RuntimeError("history range disappeared while checkpointing")
+            self._con.execute(
+                """UPDATE history_targets
+                   SET successful_depth = successful_depth + ?,
+                       attempted_turns = attempted_turns + ?,
+                       last_attempt_status = ?, last_attempt_detail = ?,
+                       updated_at = ?
+                   WHERE job_id = ? AND target_ordinal = ?""",
+                (
+                    int(successful),
+                    int(attempted),
+                    attempt_status,
+                    detail[:1000],
+                    now,
+                    job_id,
+                    target_ordinal,
+                ),
+            )
+            self._con.execute(
+                """UPDATE history_jobs
+                   SET cursor = ?, sweep = ?, status = ?, updated_at = ?
+                   WHERE job_id = ?""",
+                (cursor, sweep, job_status, now, job_id),
+            )
+
+
+def _utc_timestamp(value: datetime) -> str:
+    if value.tzinfo is None:
+        raise ValueError("request accounting timestamps must be timezone-aware")
+    return value.astimezone(UTC).isoformat(timespec="microseconds")
 
 
 def _now() -> str:

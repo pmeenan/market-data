@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 import click
@@ -17,9 +18,6 @@ from marketdata.identity import DATASET_KEYS
 from marketdata.ingest import (
     DEFAULT_INTRADAY_FREQ,
     IngestResult,
-    backfill_eod_validated,
-    backfill_intraday_validated,
-    update_eod_validated,
 )
 from marketdata.migration import (
     _write_json_atomic,
@@ -34,6 +32,14 @@ from marketdata.quality import (
     evaluate_quality,
 )
 from marketdata.reconcile import reconcile_canonical, reconcile_legacy
+from marketdata.scheduler import (
+    DEFAULT_BUDGET_POLICY,
+    IngestionCycleResult,
+    SchedulerRunResult,
+    resolve_history_job,
+    run_history_sweep,
+    run_ingestion_cycle,
+)
 from marketdata.store import BarStore, MetaStore
 from marketdata.store.bars import INTRADAY_FREQS
 from marketdata.tiingo import TiingoClient
@@ -54,10 +60,46 @@ def _require_ingestion_ready(meta: MetaStore) -> None:
         )
 
 
-def _finish_ingest(result: IngestResult, summary_json: str | None) -> None:
+def _finish_ingest(
+    result: IngestResult,
+    summary_json: str | None,
+    scheduler: SchedulerRunResult | None = None,
+) -> None:
     click.echo(f"Done: {result.summary()}")
+    if scheduler is not None:
+        click.echo(
+            f"Scheduler {scheduler.job_id}: {scheduler.job_status}; "
+            f"sweep {scheduler.sweep_started} -> {scheduler.sweep_ended}; "
+            f"{scheduler.attempted_units} attempted, "
+            f"{scheduler.advanced_units} advanced"
+        )
+        if scheduler.stop_reason:
+            click.echo(f"Scheduler stopped cleanly: {scheduler.stop_reason}")
     if summary_json:
-        _write_json_atomic(result.to_dict(), Path(summary_json))
+        payload = scheduler.to_dict() if scheduler is not None else result.to_dict()
+        _write_json_atomic(payload, Path(summary_json))
+    if result.failed:
+        click.echo("Failed segments: " + ", ".join(sorted(result.failed)), err=True)
+    if result.blocked:
+        click.echo(
+            "Identity-blocked segments: " + ", ".join(sorted(result.blocked)),
+            err=True,
+        )
+    if not result.ok:
+        raise click.exceptions.Exit(1)
+
+
+def _finish_ingestion_cycle(
+    cycle: IngestionCycleResult, summary_json: str | None
+) -> None:
+    result = cycle.current
+    click.echo(f"Done: {result.summary()}")
+    if cycle.stop_reason:
+        clean = cycle.stop_reason.endswith("_limit")
+        qualifier = " stopped cleanly" if clean else " stopped"
+        click.echo(f"Current collection{qualifier}: {cycle.stop_reason}")
+    if summary_json:
+        _write_json_atomic(cycle.to_dict(), Path(summary_json))
     if result.failed:
         click.echo("Failed segments: " + ", ".join(sorted(result.failed)), err=True)
     if result.blocked:
@@ -299,6 +341,23 @@ def backfill() -> None:
     "--force", is_flag=True, help="Refetch even where coverage says up-to-date"
 )
 @click.option(
+    "--job-id",
+    default=None,
+    help="Durable scheduler job id (default: derived from this exact request)",
+)
+@click.option(
+    "--phase",
+    type=click.IntRange(min=1, max=3),
+    default=None,
+    help="D-011 phase; enforces the allowed dataset and earlier-phase gate",
+)
+@click.option(
+    "--max-units",
+    type=click.IntRange(min=1),
+    default=None,
+    help="Stop cleanly after this many instrument turns",
+)
+@click.option(
     "--summary-json",
     type=click.Path(),
     default=None,
@@ -306,7 +365,17 @@ def backfill() -> None:
 )
 @click.pass_obj
 def backfill_eod_cmd(
-    config, tickers, tickers_file, universe_year, start, end, force, summary_json
+    config,
+    tickers,
+    tickers_file,
+    universe_year,
+    start,
+    end,
+    force,
+    job_id,
+    phase,
+    max_units,
+    summary_json,
 ):
     """Backfill daily bars through exact identity evidence."""
     _validate_cli_range(start, end, summary_json)
@@ -323,15 +392,24 @@ def backfill_eod_cmd(
         client = _client(config)
         click.echo(f"Backfilling EOD for {len(ticker_list)} tickers...")
         try:
-            result = backfill_eod_validated(
+            durable_job_id = resolve_history_job(
+                meta,
+                dataset_key="eod",
+                tickers=ticker_list,
+                start=start.date(),
+                end=end.date() if end else None,
+                phase=phase,
+                force=force,
+                job_id=job_id,
+            )
+            scheduler = run_history_sweep(
                 client,
                 BarStore(config.data_dir),
                 meta,
-                ticker_list,
-                start.date(),
-                end.date() if end else None,
-                force=force,
+                durable_job_id,
+                max_units=max_units,
             )
+            result = scheduler.ingest
         except (
             OSError,
             RuntimeError,
@@ -340,7 +418,7 @@ def backfill_eod_cmd(
             pl.exceptions.PolarsError,
         ) as exc:
             _raise_ingest_error(exc, summary_json)
-    _finish_ingest(result, summary_json)
+    _finish_ingest(result, summary_json, scheduler)
 
 
 @backfill.command("intraday")
@@ -354,6 +432,26 @@ def backfill_eod_cmd(
     show_default=True,
 )
 @click.option(
+    "--force", is_flag=True, help="Refetch even where coverage says up-to-date"
+)
+@click.option(
+    "--job-id",
+    default=None,
+    help="Durable scheduler job id (default: derived from this exact request)",
+)
+@click.option(
+    "--phase",
+    type=click.IntRange(min=1, max=3),
+    default=None,
+    help="D-011 phase; enforces the allowed dataset and earlier-phase gate",
+)
+@click.option(
+    "--max-units",
+    type=click.IntRange(min=1),
+    default=None,
+    help="Stop cleanly after this many instrument turns",
+)
+@click.option(
     "--summary-json",
     type=click.Path(),
     default=None,
@@ -361,7 +459,18 @@ def backfill_eod_cmd(
 )
 @click.pass_obj
 def backfill_intraday_cmd(
-    config, tickers, tickers_file, universe_year, start, end, freq, summary_json
+    config,
+    tickers,
+    tickers_file,
+    universe_year,
+    start,
+    end,
+    freq,
+    force,
+    job_id,
+    phase,
+    max_units,
+    summary_json,
 ):
     """Backfill intraday bars through exact-frequency identity evidence."""
     _validate_cli_range(start, end, summary_json)
@@ -376,17 +485,27 @@ def backfill_intraday_cmd(
             summary_json=summary_json,
         )
         client = _client(config)
+        dataset_key = f"intraday_{freq}"
         click.echo(f"Backfilling {freq} bars for {len(ticker_list)} tickers...")
         try:
-            result = backfill_intraday_validated(
+            durable_job_id = resolve_history_job(
+                meta,
+                dataset_key=dataset_key,
+                tickers=ticker_list,
+                start=start.date(),
+                end=end.date() if end else None,
+                phase=phase,
+                force=force,
+                job_id=job_id,
+            )
+            scheduler = run_history_sweep(
                 client,
                 BarStore(config.data_dir),
                 meta,
-                ticker_list,
-                start.date(),
-                end.date() if end else None,
-                freq=freq,
+                durable_job_id,
+                max_units=max_units,
             )
+            result = scheduler.ingest
         except (
             OSError,
             RuntimeError,
@@ -395,7 +514,20 @@ def backfill_intraday_cmd(
             pl.exceptions.PolarsError,
         ) as exc:
             _raise_ingest_error(exc, summary_json)
-    _finish_ingest(result, summary_json)
+    _finish_ingest(result, summary_json, scheduler)
+
+
+@backfill.command("cancel")
+@click.argument("job_id")
+@click.pass_obj
+def backfill_cancel_cmd(config: Config, job_id: str) -> None:
+    """Cancel a durable history job while retaining its audit trail."""
+    with MetaStore(config.meta_path) as meta:
+        try:
+            meta.cancel_history_job(job_id)
+        except (ValueError, sqlite3.Error) as exc:
+            raise click.ClickException(str(exc)) from exc
+    click.echo(f"Cancelled history job {job_id}")
 
 
 @main.command()
@@ -425,11 +557,15 @@ def update(config, tickers, tickers_file, universe_year, all_universes, summary_
             default_scope="all" if all_universes else "latest",
             summary_json=summary_json,
         )
-        client = _client(config)
         click.echo(f"Updating EOD for {len(ticker_list)} tickers...")
         try:
-            result = update_eod_validated(
-                client, BarStore(config.data_dir), meta, ticker_list
+            cycle = run_ingestion_cycle(
+                _client(config),
+                BarStore(config.data_dir),
+                meta,
+                current_tickers=ticker_list,
+                current_datasets=["eod"],
+                history_job_id=None,
             )
         except (
             OSError,
@@ -439,7 +575,7 @@ def update(config, tickers, tickers_file, universe_year, all_universes, summary_
             pl.exceptions.PolarsError,
         ) as exc:
             _raise_ingest_error(exc, summary_json)
-    _finish_ingest(result, summary_json)
+    _finish_ingestion_cycle(cycle, summary_json)
 
 
 @main.command("reconcile")
@@ -691,6 +827,16 @@ def status(config: Config) -> None:
         if cov:
             oldest_edge = min(last for _, last in cov.values())
             click.echo(f"Oldest EOD coverage edge: {oldest_edge}")
+        usage = meta.request_usage(
+            now=datetime.now(UTC), rolling_days=DEFAULT_BUDGET_POLICY.rolling_days
+        )
+        if usage["requests"]:
+            click.echo(
+                "Tiingo rolling usage: "
+                f"{usage['requests']:,} requests, "
+                f"{usage['observed_bytes']:,} observed bytes, "
+                f"{usage['charged_bytes']:,} budgeted bytes"
+            )
 
 
 @main.command()

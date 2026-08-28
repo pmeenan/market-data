@@ -1,7 +1,56 @@
+import sqlite3
 from datetime import date
 
 from marketdata.identity import ACTIVE_ALIAS_END
 from marketdata.store.meta import MetaStore
+
+
+def test_inflight_schema_v4_gets_additive_scheduler_columns(tmp_path):
+    path = tmp_path / "meta.db"
+    con = sqlite3.connect(path)
+    con.executescript(
+        """
+        CREATE TABLE api_request_attempts (
+            attempt_id INTEGER PRIMARY KEY,
+            occurred_at TEXT NOT NULL,
+            work_kind TEXT NOT NULL,
+            operation TEXT NOT NULL,
+            reserved_bytes INTEGER NOT NULL,
+            observed_bytes INTEGER NOT NULL DEFAULT 0,
+            settled INTEGER NOT NULL DEFAULT 0,
+            complete INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE history_jobs (
+            job_id TEXT PRIMARY KEY,
+            status TEXT NOT NULL
+        );
+        CREATE TABLE history_ranges (
+            job_id TEXT NOT NULL,
+            target_ordinal INTEGER NOT NULL,
+            range_ordinal INTEGER NOT NULL,
+            status TEXT NOT NULL
+        );
+        INSERT INTO api_request_attempts
+            (occurred_at, work_kind, operation, reserved_bytes, observed_bytes,
+             settled, complete)
+        VALUES
+            ('2026-08-28T00:00:00+00:00', 'current', 'done', 100, 10, 1, 1),
+            ('2026-08-28T00:00:01+00:00', 'current', 'partial', 100, 7, 1, 0);
+        PRAGMA user_version = 4;
+        """
+    )
+    con.close()
+
+    with MetaStore(path) as meta:
+        assert [row["bytes_known"] for row in meta.request_attempts()] == [1, 0]
+        assert "cancelled" in {
+            row["name"]
+            for row in meta._con.execute("PRAGMA table_info('history_jobs')")
+        }
+        assert "terminal_blocked" in {
+            row["name"]
+            for row in meta._con.execute("PRAGMA table_info('history_ranges')")
+        }
 
 
 def test_universe_roundtrip(tmp_path):
@@ -110,7 +159,7 @@ def test_migration_from_v0(tmp_path):
         }
         assert "watermarks" not in tables
         assert "coverage" in tables
-        assert meta._con.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert meta._con.execute("PRAGMA user_version").fetchone()[0] == 4
         assert "ticker_coverage_v1" in tables
 
 
@@ -136,7 +185,7 @@ def test_migration_from_v1_preserves_existing_universe(tmp_path):
 
     with MetaStore(path) as meta:
         assert [row["ticker"] for row in meta.universe(2025)] == ["AAPL"]
-        assert meta._con.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert meta._con.execute("PRAGMA user_version").fetchone()[0] == 4
         assert (
             meta._con.execute(
                 "SELECT COUNT(*) FROM sqlite_master WHERE name = 'instruments'"

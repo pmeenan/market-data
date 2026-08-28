@@ -171,10 +171,18 @@ Identity and ingestion metadata:
   D-017 boundary sets `v2` and clears derived ticker-keyed v1 coverage; legacy
   ingestion/query commands then fail closed until their instrument-keyed paths
   replace them.
-- scheduler/request accounting: billing-period byte usage plus the persisted
-  phase/dataset cohort, per-instrument frontier, and breadth-first sweep cursor
-  required by D-013 and D-020. This is operational state, not a second
-  statement of bar coverage.
+- scheduler/request accounting: every authenticated attempt, its current or
+  historical work class, conservative pre-request byte reservation, observed
+  encoded response bytes, and complete/incomplete state; plus the immutable
+  phase/dataset cohort, per-alias-range frontier, per-instrument attempt depth,
+  and breadth-first sweep cursor required by D-013 and D-020. This is
+  operational state, not a second statement of bar coverage. The initial hard
+  budget uses a 32-day rolling window (longer than any calendar month) and a
+  64 MB response reservation because Tiingo does not publish its byte basis or
+  billing reset boundary. Complete responses settle to actual observed bytes;
+  interrupted responses retain the larger reservation, while an orderly
+  transport failure before any response exists settles to the known zero-byte
+  body. A crashed/unsettled attempt always retains its reservation.
 
 Research metadata follows D-016:
 
@@ -277,13 +285,23 @@ refreshes current data first, enforces the vendor-period byte budget, and
 advances every phase/dataset history breadth-first: one maximum-safe request
 unit from each eligible instrument's newest uncovered frontier per durable
 sweep before any instrument receives another older unit (D-011, D-013,
-D-020). A quota stop resumes the unfinished sweep. Failed and identity-blocked
-units retain their own frontier but count as attempted turns, so they do not
-stall safe peers. The client records encoded response-body bytes from the raw
-transport, including retry bodies, partial reads where the HTTP stack exposes
-their count, and responses that later fail validation. M2 must verify how that
-observable maps to Tiingo's vendor bandwidth ledger before enforcing the cap
-(RE-006).
+D-020). A quota stop publishes and checkpoints any completed prefix of a bucket
+batch, then resumes the unfinished sweep. Failed and identity-blocked units
+retain their own frontier but count as attempted turns, so they do not stall
+safe peers. When only terminal identity blockers remain, the job becomes
+`blocked` and no longer holds a later phase; explicitly rerunning the same job
+reactivates those ranges after evidence is repaired. Every authenticated attempt reserves request and byte budget
+durably before transport, including each retry. It then records encoded
+response-body bytes from the raw transport, including retry bodies, partial
+reads where the HTTP stack exposes their count, and responses that later fail
+validation. Current cycles complete every declared current dataset before
+history can run, while the separate 30 GB rolling history ceiling preserves at
+least 10 GB beneath the 40 GB rolling total ceiling. RE-006's vendor billing
+basis remains undocumented, so the rolling window and response reservation are
+deliberately stricter than an assumed calendar-month/observed-byte ledger.
+Responses are capped while streaming; an undeclared oversized body is charged,
+checkpointed as a durable range blocker, and is not downloaded again on every
+automatic resume.
 
 ## Query, calendar, and quality contracts
 

@@ -1,4 +1,5 @@
 import gzip
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -7,7 +8,12 @@ import requests
 import responses
 
 from marketdata.store.bars import eod_frame, intraday_frame
-from marketdata.tiingo import BASE_URL, TiingoClient, TiingoError
+from marketdata.tiingo import (
+    BASE_URL,
+    ResponseReservationExceeded,
+    TiingoClient,
+    TiingoError,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures" / "tiingo"
 
@@ -36,6 +42,39 @@ def test_eod_request_and_retry():
     frame = eod_frame("AAPL", rows)
     assert frame.row(0, named=True)["close"] == 101.0
     assert frame.row(0, named=True)["volume"] == 123456
+
+
+@responses.activate
+def test_attempt_observer_accounts_for_each_retry_body(monkeypatch):
+    url = f"{BASE_URL}/tiingo/daily/aapl/prices"
+    retry_body = b"retry later"
+    csv_body = (FIXTURES / "eod.csv").read_bytes()
+    responses.add(responses.GET, url, body=retry_body, status=503)
+    responses.add(responses.GET, url, body=csv_body, status=200)
+    monkeypatch.setattr("marketdata.tiingo.time.sleep", lambda _: None)
+
+    class Observer:
+        def __init__(self):
+            self.next_id = 0
+            self.settled = []
+
+        def before_attempt(self, path="", params=None):
+            self.next_id += 1
+            return self.next_id
+
+        def after_attempt(self, reservation, observed_bytes, *, complete, bytes_known):
+            self.settled.append((reservation, observed_bytes, complete, bytes_known))
+
+    observer = Observer()
+    client = TiingoClient("test-token", min_request_interval=0.0)
+    client.set_attempt_observer(observer)
+
+    client.eod("AAPL", "2024-01-01", "2024-01-05")
+
+    assert observer.settled == [
+        (1, len(retry_body), True, True),
+        (2, len(csv_body), True, True),
+    ]
 
 
 @responses.activate
@@ -78,17 +117,65 @@ def test_metadata_remains_json_and_is_metered():
 
 
 @responses.activate
-def test_invalid_csv_is_rejected_after_response_is_metered():
+def test_invalid_csv_is_rejected_after_response_is_metered(tmp_path):
     url = f"{BASE_URL}/iex/aapl/prices"
     body = b"date,open,high,low,close\n2024-01-02,1,2,0.5,1.5\n"
     responses.add(responses.GET, url, body=body, status=200)
 
+    from marketdata.scheduler import PersistentAttemptObserver
+    from marketdata.store import MetaStore
+
     client = TiingoClient("test-token", min_request_interval=0.0)
-    with pytest.raises(TiingoError, match="missing columns.*volume"):
-        client.intraday("AAPL", "2024-01-02", "2024-01-03")
+    with MetaStore(tmp_path / "meta.db") as meta:
+        client.set_attempt_observer(
+            PersistentAttemptObserver(
+                meta, work_kind="historical", operation="rejected-csv"
+            )
+        )
+        with pytest.raises(TiingoError, match="missing columns.*volume"):
+            client.intraday("AAPL", "2024-01-02", "2024-01-03")
+
+        usage = meta.request_usage(now=datetime.now(UTC), rolling_days=32)
+        assert usage["requests"] == 1
+        assert usage["observed_bytes"] == len(body)
+        assert usage["charged_bytes"] == len(body)
+        assert meta.request_attempts()[0]["operation"].endswith("/iex/aapl/prices")
 
     assert client.request_count == 1
     assert client.response_bytes == len(body)
+
+
+@responses.activate
+def test_attempt_observer_rejects_declared_body_larger_than_reservation():
+    url = f"{BASE_URL}/tiingo/daily/aapl/prices"
+    responses.add(
+        responses.GET,
+        url,
+        body=b"too large",
+        headers={"Content-Length": "1000"},
+        status=200,
+    )
+
+    class Observer:
+        settled = []
+
+        def before_attempt(self, path="", params=None):
+            return 1
+
+        def response_byte_limit(self, reservation):
+            return 999
+
+        def after_attempt(self, reservation, observed_bytes, *, complete, bytes_known):
+            self.settled.append((reservation, observed_bytes, complete, bytes_known))
+
+    observer = Observer()
+    client = TiingoClient("test-token", min_request_interval=0.0)
+    client.set_attempt_observer(observer)
+
+    with pytest.raises(TiingoError, match="exceeds the reserved"):
+        client.eod("AAPL", "2024-01-01", "2024-01-05")
+
+    assert observer.settled == [(1, 0, False, False)]
 
 
 @pytest.mark.parametrize(
@@ -231,6 +318,86 @@ def test_partial_network_response_is_metered_and_wrapped(monkeypatch):
 
     assert client.request_count == 1
     assert client.response_bytes == 17
+
+
+def test_zero_byte_connection_retries_release_byte_reservations(tmp_path, monkeypatch):
+    from marketdata.scheduler import PersistentAttemptObserver
+    from marketdata.store import MetaStore
+
+    client = TiingoClient("test-token", min_request_interval=0.0, max_retries=2)
+    monkeypatch.setattr("marketdata.tiingo.time.sleep", lambda _: None)
+    monkeypatch.setattr(
+        client._session,
+        "get",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            requests.ConnectionError("offline")
+        ),
+    )
+    with MetaStore(tmp_path / "meta.db") as meta:
+        client.set_attempt_observer(
+            PersistentAttemptObserver(
+                meta, work_kind="historical", operation="connection-outage"
+            )
+        )
+
+        with pytest.raises(TiingoError, match="failed after 3 attempts"):
+            client.eod("AAPL", "2024-01-01", "2024-01-05")
+
+        usage = meta.request_usage(now=datetime.now(UTC), rolling_days=32)
+        assert usage["requests"] == 3
+        assert usage["charged_bytes"] == 0
+        assert usage["incomplete_attempts"] == 3
+        assert [row["bytes_known"] for row in meta.request_attempts()] == [1, 1, 1]
+
+
+def test_chunked_response_stops_when_stream_crosses_reservation():
+    class RawCounter:
+        transferred = 0
+
+        def tell(self):
+            return self.transferred
+
+    class ChunkedResponse:
+        status_code = 200
+        headers = {}
+
+        def __init__(self):
+            self.raw = RawCounter()
+            self.chunks_read = 0
+
+        def iter_content(self, chunk_size):
+            for chunk in (b"a" * 6, b"b" * 6, b"c" * 6):
+                self.chunks_read += 1
+                self.raw.transferred += len(chunk)
+                yield chunk
+
+        def close(self):
+            pass
+
+    class Observer:
+        settled = []
+
+        def before_attempt(self, path="", params=None):
+            return 1
+
+        def response_byte_limit(self, reservation):
+            return 10
+
+        def after_attempt(self, reservation, observed_bytes, *, complete, bytes_known):
+            self.settled.append((reservation, observed_bytes, complete, bytes_known))
+
+    response = ChunkedResponse()
+    client = TiingoClient("test-token", min_request_interval=0.0)
+    client._session.get = lambda *args, **kwargs: response
+    observer = Observer()
+    client.set_attempt_observer(observer)
+
+    with pytest.raises(ResponseReservationExceeded):
+        client.eod("AAPL", "2024-01-01", "2024-01-05")
+
+    assert response.chunks_read == 2
+    assert client.response_bytes == 12
+    assert observer.settled == [(1, 12, False, True)]
 
 
 @responses.activate

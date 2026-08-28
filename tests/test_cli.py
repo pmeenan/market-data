@@ -1,5 +1,6 @@
 """CLI behavior tests (offline; the Tiingo client is faked)."""
 
+import json
 from datetime import date
 
 from click.testing import CliRunner
@@ -57,6 +58,9 @@ def test_v2_backfill_ingests_validated_segment_and_writes_report(tmp_path, monke
     assert result.exit_code == 0, result.output
     assert "1 fetched" in result.output
     assert '"status": "fetched"' in summary.read_text()
+    payload = json.loads(summary.read_text())
+    assert payload["ok"] is True
+    assert payload["scheduler"]["job_status"] == "complete"
 
 
 def test_invalid_range_is_click_error_and_writes_summary_atomically(tmp_path):
@@ -209,6 +213,84 @@ def test_update_defaults_to_latest_universe(tmp_path, monkeypatch):
     )
     assert all_result.exit_code == 0, all_result.output
     assert {call[0] for call in client.eod_calls} == {"NEW"}
+
+
+def test_update_reports_budget_pause_as_clean_resumable_stop(tmp_path, monkeypatch):
+    from marketdata.errors import BudgetExhausted
+    from marketdata.store import MetaStore
+
+    class BudgetStopped:
+        def eod(self, ticker, start, end):
+            raise BudgetExhausted("hourly_request_limit")
+
+    data_dir = tmp_path / "data"
+    summary = tmp_path / "summary.json"
+    with MetaStore(data_dir / "meta.db") as meta:
+        meta.activate_canonical_generation()
+        meta.upsert_instrument("apple-id")
+        meta.add_instrument_alias("apple-id", "AAPL", date(2024, 1, 1))
+        meta.add_vendor_identifier(
+            "apple-id",
+            "eod",
+            "ticker",
+            "AAPL",
+            date(2024, 1, 1),
+            date.max,
+            validation_state="validated",
+        )
+    monkeypatch.setattr(cli_mod, "_client", lambda config: BudgetStopped())
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "--data-dir",
+            str(data_dir),
+            "update",
+            "-t",
+            "AAPL",
+            "--summary-json",
+            str(summary),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "stopped cleanly: hourly_request_limit" in result.output
+    payload = json.loads(summary.read_text())
+    assert payload["stop_reason"] == "hourly_request_limit"
+    assert payload["current"]["ok"] is True
+
+
+def test_backfill_cancel_releases_phase_gate_without_deleting_audit_state(tmp_path):
+    from marketdata.scheduler import initialize_history_job
+    from marketdata.store import MetaStore
+
+    data_dir = tmp_path / "data"
+    with MetaStore(data_dir / "meta.db") as meta:
+        meta.activate_canonical_generation()
+        meta.upsert_instrument("apple-id")
+        meta.add_instrument_alias(
+            "apple-id", "AAPL", date(2024, 1, 1), date(2024, 1, 31)
+        )
+        initialize_history_job(
+            meta,
+            job_id="obsolete-phase-1",
+            phase=1,
+            dataset_key="eod",
+            tickers=["AAPL"],
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 31),
+        )
+
+    result = CliRunner().invoke(
+        main,
+        ["--data-dir", str(data_dir), "backfill", "cancel", "obsolete-phase-1"],
+    )
+
+    assert result.exit_code == 0, result.output
+    with MetaStore(data_dir / "meta.db") as meta:
+        assert meta.history_job("obsolete-phase-1")["status"] == "blocked"
+        assert meta.history_job("obsolete-phase-1")["cancelled"] == 1
+        assert meta.active_lower_phase_jobs(2) == []
 
 
 def test_reconcile_command(tmp_path, monkeypatch):

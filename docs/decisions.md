@@ -87,6 +87,13 @@ without guessing identity or falsely covering the failed range. Current
 collection retains D-013's priority over all historical sweeps, and D-011's
 phase order is unchanged.
 
+If all remaining ranges are terminally identity-blocked, the job records a
+`blocked` terminal state. That durable unresolved report satisfies the phase
+gate without claiming coverage; explicitly rerunning the same request
+reactivates its runtime-blocked ranges after identity evidence is repaired.
+Operators can cancel an obsolete active/blocked job without deleting its audit
+trail, so a superseded request cannot orphan a permanent predecessor gate.
+
 **Context:** Tiingo silently limits historical IEX responses to 10,000 rows,
 while request quotas reset hourly and daily. A ticker-at-a-time traversal can
 consume a quota window on a few deep histories and leave most of the cohort
@@ -496,6 +503,17 @@ resumes from its persisted oldest completed band after the vendor budget
 resets. Historical work never delays current collection or borrows from its
 10 GB reserve.
 
+The initial M2 enforcement (2026-08-28) is intentionally stricter while
+Tiingo's billing basis and reset boundary remain undocumented (RE-006): both
+ceilings use a 32-day rolling window, every response reserves 64 MB before
+transport, complete bodies settle to observed encoded bytes, and incomplete
+bodies retain the reservation. An orderly failure before any response exists
+settles the body to a known zero bytes; an interrupted process or partial body
+keeps the reservation. This may resume later than the vendor's actual reset,
+but it cannot spend the current-work reserve on history. The policy can
+relax to an authoritative billing window only after Tiingo exposes or an
+account measurement proves that mapping.
+
 **Context:** The owner wants useful recent 5-minute coverage first and wants
 the historical backfill capped at 30 GB/month, leaving 10 GB of headroom under
 the 40 GB monthly limit so current data can still be refreshed daily. A
@@ -507,11 +525,13 @@ month end.
 still follows the EOD and hourly phases. D-011's ongoing all-ticker 5-minute
 collection now starts no later than phase 3 rather than waiting for every
 historical band to finish. The scheduler needs persisted band progress,
-separate current-versus-history byte accounting, the vendor bandwidth-reset
-boundary, a refresh-cost forecast, and hard stops at both 30 GB of historical
-transfer and 40 GB total. At the measured 68.5 GB seed-list projection, phase
-3 requires at least three billing windows. Recent cross-sectional history
-becomes usable incrementally while the backfill works toward 2016-12-12.
+separate current-versus-history byte accounting, and hard stops at both 30 GB
+of historical transfer and 40 GB total. The initial conservative rolling
+window supplies the current-work reserve without guessing a vendor reset or
+refresh forecast; a verified billing window may replace it later. At the
+measured 68.5 GB seed-list projection, phase 3 requires at least three billing
+windows. Recent cross-sectional history becomes usable incrementally while the
+backfill works toward 2016-12-12.
 
 **Reopen if:** The Tiingo cap/reset rules change, measured ongoing work cannot
 fit within the 10 GB reserve, or the owner changes the 30 GB ceiling, phase
@@ -617,8 +637,8 @@ same day. Resolves OQ-7.
 planning must treat it as a long-running metered process with resumable
 state (which D-009's coverage intervals already provide). The Tiingo client's
 M1 move to CSV parsing for bulk endpoints includes CSV transport fixtures and
-in-memory request/wire-byte measurement; durable scheduler accounting
-remains M2. The OQ-2 measurement calibrates the initial
+in-memory request/wire-byte measurement; durable scheduler accounting lands in
+M2. The OQ-2 measurement calibrates the initial
 projection; the scheduler must continue tracking actual bytes/ticker because
 listing lifetimes and payload sizes vary.
 

@@ -26,6 +26,14 @@ _BAR_LABEL_SEMANTICS = {
 _NORMAL_SESSION_MINUTES = 390
 
 
+def weekend_only(start: date, end: date) -> bool:
+    """Whether an inclusive interval contains no possible weekday session."""
+    return all(
+        date.fromordinal(ordinal).weekday() >= 5
+        for ordinal in range(start.toordinal(), end.toordinal() + 1)
+    )
+
+
 @dataclass(frozen=True)
 class IntradayRequestChunk:
     """One target range plus the next-session request lookahead.

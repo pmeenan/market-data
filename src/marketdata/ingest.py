@@ -36,7 +36,9 @@ from marketdata.calendar import (
     IntradayRequestChunk,
     next_session_after,
     plan_intraday_requests,
+    weekend_only,
 )
+from marketdata.errors import BudgetExhausted
 from marketdata.store import BarStore, MetaStore
 from marketdata.store.bars import (
     eod_frame,
@@ -45,7 +47,7 @@ from marketdata.store.bars import (
     require_canonical_generation,
     require_intraday_freq,
 )
-from marketdata.tiingo import TiingoClient, TiingoError
+from marketdata.tiingo import ResponseReservationExceeded, TiingoClient, TiingoError
 
 log = logging.getLogger(__name__)
 
@@ -60,6 +62,8 @@ PUBLICATION_LAG_DAYS = 5
 INTRADAY_PUBLICATION_LAG_DAYS = 1
 
 DEFAULT_INTRADAY_FREQ = "1hour"
+DEFAULT_EOD_HISTORY_START = date(2000, 1, 3)
+IEX_HISTORY_START = date(2016, 12, 12)
 
 
 @dataclass(frozen=True)
@@ -181,17 +185,6 @@ class ValidatedRequestSegment:
         }
 
 
-def _weekend_only(start: date, end: date) -> bool:
-    if start > end:
-        return True
-    cursor = start
-    while cursor <= end:
-        if cursor.weekday() < 5:
-            return False
-        cursor += timedelta(days=1)
-    return True
-
-
 def plan_validated_segments(
     meta: MetaStore,
     tickers: Sequence[str],
@@ -212,7 +205,7 @@ def plan_validated_segments(
         alias_report = meta.resolve_alias_range(ticker, start, end)
         for alias_segment in alias_report.segments:
             if alias_segment.status != "resolved":
-                weekend_gap = alias_segment.status == "zero_matches" and _weekend_only(
+                weekend_gap = alias_segment.status == "zero_matches" and weekend_only(
                     alias_segment.start, alias_segment.end
                 )
                 planned.append(
@@ -238,51 +231,70 @@ def plan_validated_segments(
                 continue
             instrument_id = alias_segment.instrument_id
             assert instrument_id is not None
-            identifier_segments = meta.resolve_vendor_identifier_range(
-                instrument_id,
-                dataset_key,
-                alias_segment.start,
-                alias_segment.end,
+            planned.extend(
+                _plan_identifier_segments(
+                    meta,
+                    ticker=ticker,
+                    dataset_key=dataset_key,
+                    instrument_id=instrument_id,
+                    alias_ids=alias_segment.alias_ids,
+                    start=alias_segment.start,
+                    end=alias_segment.end,
+                )
             )
-            for identifier in identifier_segments:
-                status = (
-                    "ready"
-                    if identifier.status == "resolved"
-                    else f"identifier_{identifier.status}"
-                )
-                detail = ""
-                if status == "ready" and identifier.identifier_type.lower() == "ticker":
-                    if identifier.identifier_value.upper() != ticker:
-                        status = "identifier_alias_mismatch"
-                        detail = (
-                            "bare-ticker identifier does not match the requested alias"
-                        )
-                if status != "ready" and not detail:
-                    detail = "no unique validated identifier covers this exact dataset/date range"
-                if status == "identifier_zero_matches" and _weekend_only(
-                    identifier.start, identifier.end
-                ):
-                    status = "non_session_gap"
-                    detail = "weekend-only interval has no possible market bars"
-                planned.append(
-                    ValidatedRequestSegment(
-                        ticker=ticker,
-                        dataset_key=dataset_key,
-                        start=identifier.start,
-                        end=identifier.end,
-                        status=status,
-                        instrument_ids=(instrument_id,),
-                        alias_ids=alias_segment.alias_ids,
-                        instrument_id=instrument_id,
-                        identifier_type=identifier.identifier_type,
-                        identifier_value=identifier.identifier_value,
-                        vendor_identifier_ids=identifier.vendor_identifier_ids,
-                        conflicting_instrument_ids=(
-                            identifier.conflicting_instrument_ids
-                        ),
-                        detail=detail,
-                    )
-                )
+    return planned
+
+
+def _plan_identifier_segments(
+    meta: MetaStore,
+    *,
+    ticker: str,
+    dataset_key: str,
+    instrument_id: str,
+    alias_ids: tuple[int, ...],
+    start: date,
+    end: date,
+) -> list[ValidatedRequestSegment]:
+    planned: list[ValidatedRequestSegment] = []
+    for identifier in meta.resolve_vendor_identifier_range(
+        instrument_id, dataset_key, start, end
+    ):
+        status = (
+            "ready"
+            if identifier.status == "resolved"
+            else f"identifier_{identifier.status}"
+        )
+        detail = ""
+        if status == "ready" and identifier.identifier_type.lower() == "ticker":
+            if identifier.identifier_value.upper() != ticker:
+                status = "identifier_alias_mismatch"
+                detail = "bare-ticker identifier does not match the requested alias"
+        if status != "ready" and not detail:
+            detail = (
+                "no unique validated identifier covers this exact dataset/date range"
+            )
+        if status == "identifier_zero_matches" and weekend_only(
+            identifier.start, identifier.end
+        ):
+            status = "non_session_gap"
+            detail = "weekend-only interval has no possible market bars"
+        planned.append(
+            ValidatedRequestSegment(
+                ticker=ticker,
+                dataset_key=dataset_key,
+                start=identifier.start,
+                end=identifier.end,
+                status=status,
+                instrument_ids=(instrument_id,),
+                alias_ids=alias_ids,
+                instrument_id=instrument_id,
+                identifier_type=identifier.identifier_type,
+                identifier_value=identifier.identifier_value,
+                vendor_identifier_ids=identifier.vendor_identifier_ids,
+                conflicting_instrument_ids=identifier.conflicting_instrument_ids,
+                detail=detail,
+            )
+        )
     return planned
 
 
@@ -678,6 +690,7 @@ def backfill_eod(
         frames: dict[str, pl.DataFrame] = {}
         replacements: set[str] = set()
         ready: dict[str, tuple[date, date, str]] = {}
+        interrupted: BudgetExhausted | ResponseReservationExceeded | None = None
         for target in group:
             instrument_id = target.instrument_id
             target_start, target_end = requested_ranges[instrument_id]
@@ -747,6 +760,9 @@ def backfill_eod(
                     )
                 else:
                     result.skipped.append(instrument_id)
+            except (BudgetExhausted, ResponseReservationExceeded) as exc:
+                interrupted = exc
+                break
             except (TiingoError, ValueError, pl.exceptions.PolarsError) as exc:
                 log.warning("eod backfill failed for %s: %s", instrument_id, exc)
                 result.failed[instrument_id] = str(exc)
@@ -762,6 +778,10 @@ def backfill_eod(
             meta.set_coverage(instrument_id, "eod", new_first, new_last)
             getattr(result, outcome).append(instrument_id)
 
+        if interrupted is not None:
+            interrupted.partial_ingest = result  # type: ignore[attr-defined]
+            raise interrupted
+
         processed += len(group)
         if processed % 25 < len(group) or processed == len(targets):
             log.info(
@@ -776,7 +796,7 @@ def update_eod(
     meta: MetaStore,
     targets: list[IngestTarget],
     *,
-    default_start: date = date(2000, 1, 3),
+    default_start: date = DEFAULT_EOD_HISTORY_START,
 ) -> IngestResult:
     """Nightly incremental update.
 
@@ -871,6 +891,7 @@ def backfill_intraday(
     *,
     freq: str = DEFAULT_INTRADAY_FREQ,
     ranges: Mapping[str, tuple[date, date]] | None = None,
+    force: bool = False,
 ) -> IngestResult:
     """Fetch intraday bars in chunks to cover [start, end], leading segments
     included. Note: Tiingo's IEX feed reaches back a bounded number of years,
@@ -890,9 +911,13 @@ def backfill_intraday(
         wrote_any = dict.fromkeys(targets_by_id, False)
         failed: set[str] = set()
         planned: set[str] = set()
+        interrupted: BudgetExhausted | ResponseReservationExceeded | None = None
+        interrupted_instrument: str | None = None
+        completed_calls: set[str] = set()
         for target in group:
             target_start, target_end = requested_ranges[target.instrument_id]
-            covered = meta.get_coverage(target.instrument_id, dataset)
+            existing_coverage = meta.get_coverage(target.instrument_id, dataset)
+            covered = None if force else existing_coverage
             segments = _missing_segments((target_start, target_end), covered)
             plan: list[IntradayRequestChunk] = []
             for seg_start, seg_end in segments:
@@ -938,6 +963,11 @@ def backfill_intraday(
                         covered_to = min(covered_to, today - timedelta(days=1))
                     if covered_to is not None and covered_to >= chunk.start:
                         coverage_ready[instrument_id] = (chunk.start, covered_to)
+                    completed_calls.add(instrument_id)
+                except (BudgetExhausted, ResponseReservationExceeded) as exc:
+                    interrupted = exc
+                    interrupted_instrument = instrument_id
+                    break
                 except (TiingoError, ValueError, pl.exceptions.PolarsError) as exc:
                     log.warning(
                         "%s backfill failed for %s: %s", dataset, instrument_id, exc
@@ -959,6 +989,19 @@ def backfill_intraday(
                         coverage_ready.pop(instrument_id, None)
             for instrument_id, (chunk_start, covered_to) in coverage_ready.items():
                 meta.extend_coverage(instrument_id, dataset, chunk_start, covered_to)
+
+            if interrupted is not None:
+                for instrument_id in sorted(completed_calls - failed):
+                    if instrument_id == interrupted_instrument:
+                        continue
+                    if not plans[instrument_id]:
+                        (
+                            result.fetched
+                            if wrote_any[instrument_id]
+                            else result.skipped
+                        ).append(instrument_id)
+                interrupted.partial_ingest = result  # type: ignore[attr-defined]
+                raise interrupted
 
         for instrument_id in sorted(planned - failed):
             (result.fetched if wrote_any[instrument_id] else result.skipped).append(
@@ -1059,10 +1102,8 @@ def _adjacent_to_coverage(
     if segment.end >= first and segment.start <= last:
         return True
     if segment.start > last:
-        return _weekend_only(
-            last + timedelta(days=1), segment.start - timedelta(days=1)
-        )
-    return _weekend_only(segment.end + timedelta(days=1), first - timedelta(days=1))
+        return weekend_only(last + timedelta(days=1), segment.start - timedelta(days=1))
+    return weekend_only(segment.end + timedelta(days=1), first - timedelta(days=1))
 
 
 def _execute_validated_segments(
@@ -1153,29 +1194,44 @@ def _execute_validated_segments(
                     for segment in batch
                 ]
                 validated_client = _ValidatedSegmentsClient(client, meta, batch)
-                if dataset_key == "eod":
-                    sub_result = backfill_eod(
-                        validated_client,  # type: ignore[arg-type]
-                        bars,
-                        meta,
-                        targets,
-                        segment_start,
-                        segment_end,
-                        force=True if update else force,
-                        ranges=ranges,
+                try:
+                    if dataset_key == "eod":
+                        sub_result = backfill_eod(
+                            validated_client,  # type: ignore[arg-type]
+                            bars,
+                            meta,
+                            targets,
+                            segment_start,
+                            segment_end,
+                            force=True if update else force,
+                            ranges=ranges,
+                        )
+                    else:
+                        freq = dataset_key.removeprefix("intraday_")
+                        sub_result = backfill_intraday(
+                            validated_client,  # type: ignore[arg-type]
+                            bars,
+                            meta,
+                            targets,
+                            segment_start,
+                            segment_end,
+                            freq=freq,
+                            ranges=ranges,
+                            force=True if update else force,
+                        )
+                except (BudgetExhausted, ResponseReservationExceeded) as exc:
+                    sub_result = getattr(exc, "partial_ingest", None) or IngestResult()
+                    successful = set(
+                        sub_result.fetched
+                        + sub_result.skipped
+                        + sub_result.refreshed
+                        + list(sub_result.failed)
                     )
-                else:
-                    freq = dataset_key.removeprefix("intraday_")
-                    sub_result = backfill_intraday(
-                        validated_client,  # type: ignore[arg-type]
-                        bars,
-                        meta,
-                        targets,
-                        segment_start,
-                        segment_end,
-                        freq=freq,
-                        ranges=ranges,
-                    )
+                    for segment in batch:
+                        if segment.instrument_id in successful:
+                            _record_segment_result(result, segment, sub_result)
+                    exc.partial_ingest = result  # type: ignore[attr-defined]
+                    raise
                 for segment in batch:
                     _record_segment_result(result, segment, sub_result)
                     owner = (segment.instrument_id or "", segment.dataset_key)
@@ -1230,13 +1286,33 @@ def backfill_intraday_validated(
     end: date | None = None,
     *,
     freq: str = DEFAULT_INTRADAY_FREQ,
+    force: bool = False,
 ) -> IngestResult:
     """Identity-plan and ingest one exact IEX frequency."""
     require_intraday_freq(freq)
     require_canonical_generation(bars, meta.storage_generation())
     end = end or date.today()
     segments = plan_validated_segments(meta, tickers, f"intraday_{freq}", start, end)
-    return _execute_validated_segments(client, bars, meta, segments)
+    return _execute_validated_segments(client, bars, meta, segments, force=force)
+
+
+def update_intraday_validated(
+    client: TiingoClient,
+    bars: BarStore,
+    meta: MetaStore,
+    tickers: Sequence[str],
+    *,
+    freq: str = DEFAULT_INTRADAY_FREQ,
+    default_start: date = IEX_HISTORY_START,
+) -> IngestResult:
+    """Refresh current exact-frequency IEX data through identity evidence."""
+    require_intraday_freq(freq)
+    require_canonical_generation(bars, meta.storage_generation())
+    dataset_key = f"intraday_{freq}"
+    segments = _plan_current_update_segments(
+        meta, tickers, dataset_key, default_start=default_start
+    )
+    return _execute_validated_segments(client, bars, meta, segments, update=True)
 
 
 def update_eod_validated(
@@ -1245,14 +1321,31 @@ def update_eod_validated(
     meta: MetaStore,
     tickers: Sequence[str],
     *,
-    default_start: date = date(2000, 1, 3),
+    default_start: date = DEFAULT_EOD_HISTORY_START,
 ) -> IngestResult:
     """Update each ticker's current alias through an exact EOD identity plan."""
     require_canonical_generation(bars, meta.storage_generation())
+    segments = _plan_current_update_segments(
+        meta, tickers, "eod", default_start=default_start
+    )
+    return _execute_validated_segments(client, bars, meta, segments, update=True)
+
+
+def _plan_current_update_segments(
+    meta: MetaStore,
+    tickers: Sequence[str],
+    dataset_key: str,
+    *,
+    default_start: date,
+) -> list[ValidatedRequestSegment]:
+    """Plan current aliases once, then validate only their exact identifiers."""
     today = date.today()
     segments: list[ValidatedRequestSegment] = []
     for ticker in tickers:
-        alias_report = meta.resolve_alias_range(ticker, date.min, today)
+        normalized = ticker.strip().upper()
+        if not normalized:
+            raise ValueError("ticker must not be empty")
+        alias_report = meta.resolve_alias_range(normalized, date.min, today)
         current = alias_report.segments[-1]
         if current.instrument_id is None:
             latest_resolved = next(
@@ -1266,8 +1359,8 @@ def update_eod_validated(
             if current.status == "zero_matches" and latest_resolved is not None:
                 segments.append(
                     ValidatedRequestSegment(
-                        ticker=ticker.upper(),
-                        dataset_key="eod",
+                        ticker=normalized,
+                        dataset_key=dataset_key,
                         start=today,
                         end=today,
                         status="inactive",
@@ -1278,20 +1371,46 @@ def update_eod_validated(
                     )
                 )
                 continue
-            segments.extend(
-                plan_validated_segments(meta, [ticker], "eod", today, today)
+            weekend_gap = current.status == "zero_matches" and weekend_only(
+                today, today
+            )
+            segments.append(
+                ValidatedRequestSegment(
+                    ticker=normalized,
+                    dataset_key=dataset_key,
+                    start=today,
+                    end=today,
+                    status=(
+                        "non_session_gap" if weekend_gap else f"alias_{current.status}"
+                    ),
+                    instrument_ids=current.instrument_ids,
+                    alias_ids=current.alias_ids,
+                    detail=(
+                        "weekend-only interval has no possible market bars"
+                        if weekend_gap
+                        else "ticker/date range does not resolve to exactly one instrument"
+                    ),
+                )
             )
             continue
-        covered = meta.get_coverage(current.instrument_id, "eod")
+        covered = meta.get_coverage(current.instrument_id, dataset_key)
         request_start = (
             max(current.start, covered[1] - timedelta(days=REFRESH_WINDOW_DAYS))
             if covered is not None
             else max(default_start, current.start)
         )
         segments.extend(
-            plan_validated_segments(meta, [ticker], "eod", request_start, today)
+            _plan_identifier_segments(
+                meta,
+                ticker=normalized,
+                dataset_key=dataset_key,
+                instrument_id=current.instrument_id,
+                alias_ids=current.alias_ids,
+                start=request_start,
+                end=today,
+            )
         )
-    return _execute_validated_segments(client, bars, meta, segments, update=True)
+    return segments
 
 
 def reconcile(bars: BarStore, meta: MetaStore) -> dict[str, int]:

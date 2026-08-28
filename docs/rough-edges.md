@@ -22,7 +22,7 @@ Newest first. RE-numbers are never reused.
 
 ---
 
-## RE-006: Tiingo bar CSV is uncompressed and billing-byte semantics are undocumented  (2026-08-27, status: open)
+## RE-006: Tiingo bar CSV is uncompressed and billing-byte semantics are undocumented  (2026-08-27, status: worked-around)
 
 **Environment:** Authenticated Tiingo EOD and historical IEX REST endpoints,
 CSV, Power tier; measured 2026-08-27 with Requests streaming raw bodies.
@@ -46,10 +46,13 @@ documents why not, and defines the byte counter clients must enforce.
 
 **Impact:** Do not force identity encoding. Meter encoded bytes through the
 HTTP raw-stream count so future automatic decompression cannot corrupt the
-measurement, but verify the vendor ledger's accounting basis before M2 treats
-that counter as authoritative. Until then, a hard budget must use a
-conservatively safe interpretation. Keep exact JSON `[]`, header-only CSV,
-empty bodies, and BOM-only bodies as tested empty-result variants. See
+measurement. M2's initial hard budget therefore uses a 32-day rolling window
+and reserves 64 MB before each response; complete responses settle to observed
+encoded bytes, while partial/unknown transfers retain the reservation. This can
+stop work earlier or keep it paused longer than Tiingo's actual ledger, but it
+does not assume an undocumented reset or compression basis. Keep exact JSON
+`[]`, header-only CSV, empty bodies, and BOM-only bodies as tested empty-result
+variants. See
 Tiingo's [general API documentation](https://www.tiingo.com/documentation/general).
 
 ## RE-005: Tiingo identity surfaces are incomplete and dataset-dependent  (2026-08-26, status: open)

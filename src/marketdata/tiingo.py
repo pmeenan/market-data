@@ -16,7 +16,7 @@ import time
 import zipfile
 from datetime import UTC, date, datetime
 from email.utils import parsedate_to_datetime
-from typing import Any
+from typing import Any, Protocol
 
 import requests
 
@@ -40,6 +40,35 @@ class TiingoError(RuntimeError):
     pass
 
 
+class ResponseReservationExceeded(TiingoError):
+    """The response body exceeded the bytes reserved before transport."""
+
+
+class RequestAttemptObserver(Protocol):
+    """Durably account for one authenticated transport attempt.
+
+    ``before_attempt`` runs before the request is sent and may raise to stop on
+    quota.  ``after_attempt`` receives the encoded bytes observed for that
+    attempt.  An incomplete attempt is intentionally distinguishable so a
+    conservative ledger can retain its pre-request byte reservation.
+    """
+
+    def before_attempt(
+        self, path: str = "", params: dict[str, Any] | None = None
+    ) -> Any: ...
+
+    def after_attempt(
+        self,
+        reservation: Any,
+        observed_bytes: int,
+        *,
+        complete: bool,
+        bytes_known: bool,
+    ) -> None: ...
+
+    def response_byte_limit(self, reservation: Any) -> int | None: ...
+
+
 class TiingoClient:
     def __init__(
         self,
@@ -59,6 +88,7 @@ class TiingoClient:
         self._last_request = 0.0
         self._request_count = 0
         self._response_bytes = 0
+        self._attempt_observer: RequestAttemptObserver | None = None
 
     @property
     def request_count(self) -> int:
@@ -69,6 +99,19 @@ class TiingoClient:
     def response_bytes(self) -> int:
         """Cumulative encoded response-body bytes observed on the transport."""
         return self._response_bytes
+
+    @property
+    def max_attempts(self) -> int:
+        """Maximum authenticated attempts made for one logical request."""
+        return self._max_retries + 1
+
+    def set_attempt_observer(
+        self, observer: RequestAttemptObserver | None
+    ) -> RequestAttemptObserver | None:
+        """Attach durable quota/accounting hooks for subsequent attempts."""
+        previous = self._attempt_observer
+        self._attempt_observer = observer
+        return previous
 
     def _request(
         self, path: str, params: dict[str, Any] | None = None
@@ -81,18 +124,51 @@ class TiingoClient:
                 time.sleep(wait)
             self._last_request = time.monotonic()
 
+            observer = self._attempt_observer
+            reservation = (
+                observer.before_attempt(path, params) if observer is not None else None
+            )
             self._request_count += 1
+            bytes_before = self._response_bytes
+            body_complete = False
+            bytes_known = False
             resp: requests.Response | None = None
             try:
                 resp = self._session.get(
                     url, params=params, timeout=self._timeout, stream=True
                 )
-                self._read_and_meter(resp)
-            except TiingoError:
+                byte_limit = (
+                    getattr(observer, "response_byte_limit", lambda _: None)(
+                        reservation
+                    )
+                    if observer is not None
+                    else None
+                )
+                content_length = _content_length(resp.headers.get("Content-Length"))
+                if (
+                    byte_limit is not None
+                    and content_length is not None
+                    and content_length > byte_limit
+                ):
+                    raise ResponseReservationExceeded(
+                        "Tiingo response Content-Length exceeds the reserved "
+                        "budget allowance"
+                    )
+                self._read_and_meter(resp, byte_limit=byte_limit)
+                body_complete = True
+                bytes_known = True
+            except TiingoError as exc:
+                bytes_known = bytes_known or bool(
+                    getattr(exc, "response_bytes_known", False)
+                )
                 if resp is not None:
                     resp.close()
                 raise
             except requests.RequestException as exc:
+                # No response means the authenticated attempt transferred no
+                # response body. Partial bodies retain their reservation even
+                # when the transport exposes a measured prefix.
+                bytes_known = resp is None
                 if resp is not None:
                     resp.close()
                 if attempt < self._max_retries:
@@ -107,6 +183,14 @@ class TiingoClient:
                 raise TiingoError(
                     f"Tiingo transport failed after {attempt + 1} attempts: {path}"
                 ) from exc
+            finally:
+                if observer is not None:
+                    observer.after_attempt(
+                        reservation,
+                        self._response_bytes - bytes_before,
+                        complete=body_complete,
+                        bytes_known=bytes_known,
+                    )
             if resp.status_code == 200:
                 return resp
             if resp.status_code == 404:
@@ -132,10 +216,33 @@ class TiingoClient:
             f"Tiingo request failed after {self._max_retries} retries: {path}"
         )
 
-    def _read_and_meter(self, resp: requests.Response) -> None:
-        """Consume one body and charge encoded bytes, including partial reads."""
+    def _read_and_meter(
+        self, resp: requests.Response, *, byte_limit: int | None = None
+    ) -> None:
+        """Consume one body, enforcing its reservation while it streams."""
+        chunks: list[bytes] = []
         try:
-            _ = resp.content
+            iterator = (
+                resp.iter_content(chunk_size=64 * 1024)
+                if hasattr(resp, "iter_content")
+                else (resp.content,)
+            )
+            for chunk in iterator:
+                if chunk:
+                    chunks.append(chunk)
+                transferred = _transferred_bytes(resp, complete=False)
+                measured = (
+                    transferred
+                    if transferred is not None
+                    else sum(len(item) for item in chunks)
+                )
+                if byte_limit is not None and measured > byte_limit:
+                    self._response_bytes += measured
+                    exc = ResponseReservationExceeded(
+                        "Tiingo response exceeded its conservative byte reservation"
+                    )
+                    exc.response_bytes_known = True  # type: ignore[attr-defined]
+                    raise exc
         except requests.RequestException as exc:
             transferred = _transferred_bytes(resp, complete=False)
             if transferred is None:
@@ -145,6 +252,8 @@ class TiingoClient:
                 ) from exc
             self._response_bytes += transferred
             raise
+        resp._content = b"".join(chunks)
+        resp._content_consumed = True
         transferred = _transferred_bytes(resp, complete=True)
         if transferred is None:
             raise TiingoError("Tiingo response bytes could not be measured")
@@ -295,3 +404,13 @@ def _retry_delay(retry_after: str | None, default: float) -> float:
         if retry_at.tzinfo is None:
             retry_at = retry_at.replace(tzinfo=UTC)
         return max(0.0, (retry_at - datetime.now(UTC)).total_seconds())
+
+
+def _content_length(value: str | None) -> int | None:
+    if value is None:
+        return None
+    try:
+        parsed = int(value)
+    except ValueError:
+        return None
+    return parsed if parsed >= 0 else None

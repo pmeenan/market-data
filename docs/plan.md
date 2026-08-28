@@ -234,7 +234,7 @@ Scope:
   intraday rows, and per-dataset coverage/lifecycle summaries. Library and CLI
   reports are deterministic and structured; consumer-declared gates block on
   warning/error findings and fail closed when a declared check was not run.
-- [ ] Persist observed encoded-response-byte/request accounting and scheduler
+- [x] Persist observed encoded-response-byte/request accounting and scheduler
   progress.
   Execute D-011's phases, D-013's current-first/budget policy, and D-020's
   breadth-first request-depth sweeps for every manual or scheduled historical
@@ -242,6 +242,23 @@ Scope:
   vendor bandwidth cap, verify Tiingo's billing-byte basis or budget against a
   conservatively safe interpretation; RE-006 found no compression in current
   bar responses but the published limit does not define its accounting basis.
+  Completed 2026-08-28: schema-v4 request attempts reserve quota before every
+  authenticated transport attempt and settle to observed encoded bytes after
+  complete responses, including retries and later-rejected payloads; partial
+  attempts and process crashes retain their conservative reservation, while
+  orderly failures before any response settle to a known zero bytes. A 32-day rolling window and
+  64 MB per-response reservation enforce the 30 GB history and 40 GB total
+  ceilings without assuming an undocumented reset/billing basis. Manual and
+  scheduled history share immutable stable-instrument cohorts, durable
+  per-alias frontiers and sweep cursors, exact phase/dataset gates, and one
+  maximum-safe request unit per eligible instrument per sweep; ready peers in
+  one hash bucket retain D-019's batched publication. The current-first cycle
+  records current and historical work separately and will not begin history
+  after incomplete current work. Review hardening made overlap refreshes
+  effective for intraday data, checkpoints the published prefix of a
+  quota-interrupted batch, terminalizes identity/oversized-response blockers,
+  permits audited job cancellation/retry, and gives each force invocation a
+  fresh resumable job unless an explicit id is supplied.
 - [ ] Put ingestion, reconciliation, and later research publication behind the
   shared data-directory process lock. Preserve nonzero CLI exits and bounded
   machine-readable summaries for partial failure.
@@ -254,12 +271,16 @@ Exit criteria:
 - [ ] Offline boundary fixtures prove chunk planning neither loses nor duplicates
   rows at the row cap, year, alias, DST, holiday, and half-day boundaries; a
   controlled Tiingo run confirms the planner against both intraday frequencies.
-- [ ] Scheduler tests prove current work wins; quota stops resume the unvisited
+- [x] Scheduler tests prove current work wins; quota stops resume the unvisited
   remainder of the same deterministic sweep; no instrument reaches request
   depth N+1 before every eligible peer receives a depth-N turn; failed or
   identity-blocked segments retain their frontier without stalling safe peers;
   actual bytes are charged even for rejected responses; and neither monthly
   hard cap can be exceeded.
+  Completed 2026-08-28 with offline restart, retry, quota, phase-order,
+  current-first, failure, identity-block, trailing-coverage, partial-batch,
+  force-lifecycle, oversized-stream, zero-byte-outage, and dual-byte-ceiling
+  fixtures.
 - [x] Every minimum architecture quality check has a focused fixture and appears in
   structured CLI/library reports on stored data. The mechanism for a consumer
   to declare findings blocking is tested; M3 defines the first study's set.

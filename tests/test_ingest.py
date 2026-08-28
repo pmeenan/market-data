@@ -2,9 +2,11 @@
 
 from datetime import date, timedelta
 
+import pytest
 import responses
 
 from marketdata.calendar import IntradayRequestChunk
+from marketdata.errors import BudgetExhausted
 from marketdata.ingest import (
     REFRESH_WINDOW_DAYS,
     IngestTarget,
@@ -13,6 +15,7 @@ from marketdata.ingest import (
     plan_validated_segments,
     reconcile,
     update_eod_validated,
+    update_intraday_validated,
 )
 from marketdata.ingest import (
     backfill_eod as _backfill_eod,
@@ -147,6 +150,85 @@ def test_ingestion_owns_bars_and_coverage_by_instrument_id(tmp_path):
     stored = bars.read_canonical_eod("stable-id")
     assert stored["instrument_id"].unique().to_list() == ["stable-id"]
     assert "ticker" not in stored.columns
+
+
+def test_quota_stop_publishes_completed_bucket_peers_before_propagating(tmp_path):
+    bars, meta = stores(tmp_path)
+    first = "partial-first"
+    second = next(
+        f"partial-peer-{number}"
+        for number in range(10_000)
+        if instrument_bucket(f"partial-peer-{number}") == instrument_bucket(first)
+    )
+    for instrument_id in (first, second):
+        meta.upsert_instrument(instrument_id)
+
+    class StopAfterOne:
+        calls = 0
+
+        def eod(self, ticker, start, end):
+            self.calls += 1
+            if self.calls == 2:
+                raise BudgetExhausted("hourly_request_limit")
+            return [eod_row(date.fromisoformat(str(end)))]
+
+    with pytest.raises(BudgetExhausted) as stopped:
+        _backfill_eod(
+            StopAfterOne(),
+            bars,
+            meta,
+            [IngestTarget(first, "FIRST"), IngestTarget(second, "SECOND")],
+            date(2024, 1, 1),
+            date(2024, 1, 5),
+        )
+
+    assert stopped.value.partial_ingest.fetched == [first]
+    assert meta.get_coverage(first, "eod") == (
+        date(2024, 1, 1),
+        date(2024, 1, 5),
+    )
+    assert meta.get_coverage(second, "eod") is None
+    assert bars.read_canonical_eod(first).height == 1
+
+
+def test_current_intraday_update_refetches_overlap_with_exact_frequency_evidence(
+    tmp_path,
+):
+    bars, meta = stores(tmp_path)
+    today = date.today()
+    start = today - timedelta(days=3)
+    meta.upsert_instrument("stable-id")
+    meta.add_instrument_alias("stable-id", "SAFE", start)
+    meta.add_vendor_identifier(
+        "stable-id",
+        "intraday_1hour",
+        "ticker",
+        "SAFE",
+        start,
+        date.max,
+        validation_state="validated",
+    )
+    covered_through = today - timedelta(days=2)
+    meta.set_coverage("stable-id", "intraday_1hour", start, covered_through)
+    client = FakeTiingo({})
+
+    result = update_intraday_validated(
+        client,
+        bars,
+        meta,
+        ["SAFE"],
+        freq="1hour",
+        default_start=start,
+    )
+
+    assert result.ok
+    assert result.fetched == ["stable-id"]
+    assert client.intraday_calls[0][0:2] == ("SAFE", start)
+    assert client.intraday_calls[0][3] == "1hour"
+    assert meta.get_coverage("stable-id", "intraday_1hour") == (
+        start,
+        today - timedelta(days=1),
+    )
 
 
 @responses.activate

@@ -51,6 +51,36 @@ through alias and exact-dataset identifier evidence. Validated segments may
 proceed; unresolved/conflicting segments are reported and make the command exit
 nonzero. An unmigrated v1 warehouse remains blocked.
 
+Every manual historical command now creates or resumes a schema-v4 scheduler
+job and completes at most its current breadth-first sweep.
+Each eligible stable instrument gets one maximum-safe request unit before any
+peer deepens; `--max-units` can stop even earlier, and `--job-id` names an
+explicit rerunnable job. `--phase 1|2|3` applies D-011's dataset and predecessor
+gates. An omitted `--end` is frozen when the job is first created, so the same
+command still resolves to that job on later days. Re-run it to continue the
+next sweep. Each `--force` invocation creates a fresh job; supply its printed
+`--job-id` to resume that exact force run. A superseded active/blocked job can
+be released from phase gating without erasing its audit trail with
+`market-data backfill cancel JOB_ID`:
+
+```bash
+market-data backfill eod --phase 1 --start 2006-08-28
+market-data backfill intraday --phase 1 --freq 1hour \
+  --start 2016-12-12 --max-units 500
+```
+
+Authenticated attempts reserve quota in SQLite before transport and settle to
+the encoded body bytes observed afterward; retries and rejected payloads count,
+and incomplete transfers retain their reservation. Because Tiingo does not
+publish its billing-byte basis or reset boundary, enforcement conservatively
+uses a 32-day rolling window and a 64 MB response allowance: history stops at
+30 GB while the 40 GB total ceiling preserves at least 10 GB for current work.
+An orderly connection failure before any response exists settles at zero body
+bytes; crashes and partial bodies retain the full reservation. Responses are
+capped while streaming so an oversized undeclared body becomes a durable
+blocker rather than a repeating download.
+`market-data status` displays rolling observed and budgeted usage.
+
 The ingestion primitives are idempotent and resumable: each
 (`instrument_id`, exact dataset key) pair tracks
 a coverage interval (so backfills fill missing leading history too), Parquet
@@ -103,8 +133,9 @@ records a durable generation marker, clears derived v1 ticker coverage, and
 disables legacy ticker-owned paths. Instrument-keyed queries are active; the
 operator ingestion commands validate and report every request segment before
 calling the canonical primitives, and reject any response outside that segment.
-Schema v3 names the canonical SQL table `meta.coverage` and retains the old
-shape explicitly as `meta.ticker_coverage_v1` during the transition.
+Schema v4 names the canonical SQL table `meta.coverage`, retains the old shape
+explicitly as `meta.ticker_coverage_v1`, and adds durable request-attempt and
+historical scheduler state.
 
 ## Using the library
 
@@ -177,6 +208,7 @@ src/marketdata/
   bar_fields.py              shared Tiingo bar-field contract
   calendar.py                XNYS sessions, IEX request bounds, bar labels
   quality.py                 structured checks + consumer-declared gates
+  scheduler.py               durable budgets + breadth-first history sweeps
   identity.py               fail-closed identity resolution result contracts
   tiingo.py                 Tiingo REST client (CSV bars, retries, metering)
   store/bars.py             Parquet bar storage (merge-upsert writes)
@@ -192,8 +224,9 @@ src/marketdata/
 
 Milestone **M2 (trustworthy scheduled ingestion)** is in progress. Its
 cap-safe intraday request planner, XNYS calendar/session-label surface, and
-structured quality/gating layer are implemented; durable scheduler/budget
-state, shared process locking, and scheduled operations remain. M1 closed on
+structured quality/gating layer are implemented, as are durable request-budget
+accounting and current-first breadth-first history scheduling. Shared process
+locking and scheduled operations remain. M1 closed on
 2026-08-27 after its controlled EOD/IEX canary passed. Production ingestion is
 permitted only for validated segments; unresolved work remains fail-closed and
 visible. The research/backtesting layer begins in M3.
