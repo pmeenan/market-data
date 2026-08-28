@@ -1,0 +1,11 @@
+[Unit]
+Description=Run market-data current EOD collection after each US trading day
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 23:30:00 UTC
+Persistent=true
+AccuracySec=1min
+Unit=market-data-current-eod.service
+
+[Install]
+WantedBy=timers.target

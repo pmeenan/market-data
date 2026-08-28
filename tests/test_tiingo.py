@@ -1,4 +1,6 @@
 import gzip
+import io
+import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,12 +12,30 @@ import responses
 from marketdata.store.bars import eod_frame, intraday_frame
 from marketdata.tiingo import (
     BASE_URL,
+    SUPPORTED_TICKERS_URL,
     ResponseReservationExceeded,
     TiingoClient,
     TiingoError,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures" / "tiingo"
+
+
+@responses.activate
+def test_supported_tickers_filters_while_reading_archive():
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr(
+            "supported.csv",
+            "ticker,exchange,assetType,priceCurrency,startDate,endDate\n"
+            "AAPL,NASDAQ,Stock,USD,1980-12-12,2026-08-28\n"
+            "MSFT,NASDAQ,Stock,USD,1986-03-13,2026-08-28\n",
+        )
+    responses.add(responses.GET, SUPPORTED_TICKERS_URL, body=archive.getvalue())
+
+    rows = TiingoClient("test-token").supported_tickers({"msft"})
+
+    assert [row["ticker"] for row in rows] == ["MSFT"]
 
 
 @responses.activate

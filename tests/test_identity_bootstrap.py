@@ -6,6 +6,7 @@ from datetime import UTC, date, datetime
 
 from marketdata.identity_bootstrap import _instrument_id, bootstrap_eod_identities
 from marketdata.store import MetaStore
+from marketdata.tiingo import TiingoError
 
 
 def _archive(
@@ -31,12 +32,24 @@ class FakeIdentityClient:
         self.metadata = metadata
         self.metadata_calls: list[str] = []
 
-    def supported_tickers(self):
-        return self.archive
+    def supported_tickers(self, tickers=None):
+        if tickers is None:
+            return self.archive
+        return [row for row in self.archive if row["ticker"] in tickers]
 
     def ticker_metadata(self, ticker):
         self.metadata_calls.append(ticker)
         return self.metadata[ticker]
+
+
+class FailingMetadataClient(FakeIdentityClient):
+    def __init__(self, archive, exc):
+        super().__init__(archive, {})
+        self.exc = exc
+
+    def ticker_metadata(self, ticker):
+        self.metadata_calls.append(ticker)
+        raise self.exc
 
 
 def _metadata(row, **overrides):
@@ -170,3 +183,45 @@ def test_bootstrap_collapses_stale_snapshots_and_upgrades_singleton(tmp_path):
         episode = meta.identity_episodes()[0]
         assert episode["confidence"] == "metadata_validated"
         assert episode["episode_ordinal"] == 1
+
+
+def test_bootstrap_records_per_ticker_vendor_errors_as_partial(tmp_path):
+    archive = _archive("SAFE")
+    cases = ("Not found", "transport failed")
+
+    for index, message in enumerate(cases):
+        with MetaStore(tmp_path / str(index) / "meta.db") as meta:
+            result = bootstrap_eod_identities(
+                FailingMetadataClient([archive], TiingoError(message)),
+                meta,
+                ["SAFE"],
+            )
+
+        assert result.failed == {"SAFE": message}
+        assert result.partial is True
+        assert result.operational_failure is False
+
+
+def test_bootstrap_skips_universe_resolution_when_identity_is_unchanged(
+    tmp_path, monkeypatch
+):
+    archive = _archive("SAFE")
+    client = FakeIdentityClient([archive], {"SAFE": _metadata(archive)})
+
+    with MetaStore(tmp_path / "meta.db") as meta:
+        meta.set_universe(2026, [{"ticker": "SAFE", "rank": 1}])
+        first = bootstrap_eod_identities(client, meta, ["SAFE"])
+        assert first.validated == ["SAFE"]
+
+        resolutions = []
+        original = MetaStore.resolve_universe
+
+        def track_resolution(store, year):
+            resolutions.append(year)
+            return original(store, year)
+
+        monkeypatch.setattr(MetaStore, "resolve_universe", track_resolution)
+        second = bootstrap_eod_identities(client, meta, ["SAFE"])
+
+    assert second.skipped == ["SAFE"]
+    assert resolutions == []

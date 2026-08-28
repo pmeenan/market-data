@@ -421,10 +421,16 @@ is stored in SQLite, Parquet, logs, summaries, or result parameters.
 
 Operational commands return nonzero if any requested segment fails and can
 emit machine-readable summaries. The nightly job writes a bounded status
-record (start/end, counts, bytes, failures). On the owner's personal server,
-the nonzero systemd result plus that inspectable status is the required visible
-failure signal; an external notification channel may be added later but is not
-an M2 gate.
+record (start/end, counts, bytes, and at most 100 details per diagnostic
+category). It refreshes latest-universe EOD identity evidence and collects bars
+under one shared-lock ownership interval. Per-symbol fail-closed identity and
+vendor failures return 1 and are accepted as a completed partial pass by the
+user service; quota boundaries return 0. Coordinator, configuration, lock, and
+status-publication failures return 2. The nightly service retries exit 2 up to
+three times at two-minute intervals before remaining failed. On the owner's
+personal server, that systemd result plus the
+inspectable status is the required visible failure signal; an external
+notification channel may be added later but is not an M2 gate.
 
 Backups treat `data/` as one unit. Parquet is canonical for bars and result
 observations, while `meta.db` is required for identity evidence, universe

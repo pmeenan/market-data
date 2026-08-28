@@ -124,9 +124,10 @@ structured quality findings, consumer-declared gates, durable request budgets,
 current-first breadth-first scheduling, and shared data-directory mutation
 locking are also implemented. The phase-1 seed EOD backfill is running through
 an aligned user-systemd timer after fetching 282 additional histories and
-repairing 62 reused symbols into 125 inferred episodes. Nightly current updates
-and phase-1 hourly identity/backfill remain; external failure notification is
-optional for this personal deployment.
+repairing 62 reused symbols into 125 inferred episodes. A bounded-status nightly
+current-EOD timer is installed; two actual post-market runs and phase-1 hourly
+identity/backfill remain. External failure notification is optional for this
+personal deployment.
 M1 closed on 2026-08-27. Production ingestion is permitted only for validated
 request segments; unresolved work remains fail-closed. The backtest layer does
 not exist yet. See [docs/plan.md](docs/plan.md). Keep this paragraph short and

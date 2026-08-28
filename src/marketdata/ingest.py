@@ -97,8 +97,13 @@ class IngestResult:
     segments: list[dict[str, Any]] = field(default_factory=list)
 
     @property
+    def partial(self) -> bool:
+        """Whether at least one requested segment was excluded or failed."""
+        return bool(self.failed or self.blocked)
+
+    @property
     def ok(self) -> bool:
-        return not self.failed and not self.blocked
+        return not self.partial
 
     def summary(self) -> str:
         parts = [

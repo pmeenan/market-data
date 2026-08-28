@@ -694,7 +694,7 @@ class MetaStore:
         ticker: str,
         start: date,
         end: date,
-    ) -> None:
+    ) -> bool:
         """Drop stale duplicate archive snapshots for one effective episode."""
         if not self.has_exact_identity_evidence(
             instrument_id, "eod", ticker, start, end
@@ -704,7 +704,7 @@ class MetaStore:
             )
         normalized_ticker = ticker.strip().upper()
         with self._con:
-            self._con.execute(
+            alias_cursor = self._con.execute(
                 """DELETE FROM instrument_aliases
                    WHERE instrument_id = ? AND ticker = ?
                      AND NOT (start_date = ? AND end_date = ?)""",
@@ -715,7 +715,7 @@ class MetaStore:
                     end.isoformat(),
                 ),
             )
-            self._con.execute(
+            vendor_cursor = self._con.execute(
                 """DELETE FROM vendor_identifiers
                    WHERE instrument_id = ? AND dataset_key = 'eod'
                      AND lower(identifier_type) = 'ticker'
@@ -728,6 +728,7 @@ class MetaStore:
                     end.isoformat(),
                 ),
             )
+        return bool(alias_cursor.rowcount or vendor_cursor.rowcount)
 
     def remove_uncovered_archive_episode(self, instrument_id: str) -> None:
         """Fail closed when a formerly archive-bound singleton needs validation."""

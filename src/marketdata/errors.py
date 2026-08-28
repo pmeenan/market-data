@@ -5,6 +5,15 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+QUOTA_STOP_REASONS = frozenset(
+    {
+        "hourly_request_limit",
+        "daily_request_limit",
+        "rolling_total_byte_limit",
+        "rolling_historical_byte_limit",
+    }
+)
+
 
 class BudgetExhausted(RuntimeError):
     """A clean pre-request quota stop with any durably published partial work."""

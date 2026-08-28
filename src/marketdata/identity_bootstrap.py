@@ -10,14 +10,14 @@ silently assigned to either instrument.
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any, Protocol
 from uuid import NAMESPACE_URL, uuid5
 
-from marketdata.errors import BudgetExhausted
+from marketdata.errors import QUOTA_STOP_REASONS, BudgetExhausted
 from marketdata.locking import data_directory_locked
 from marketdata.scheduler import (
     DEFAULT_BUDGET_POLICY,
@@ -32,7 +32,9 @@ US_ASSET_TYPES = frozenset({"Stock", "ETF"})
 
 
 class IdentityBootstrapClient(Protocol):
-    def supported_tickers(self) -> list[dict[str, str]]: ...
+    def supported_tickers(
+        self, tickers: Collection[str] | None = None
+    ) -> list[dict[str, str]]: ...
 
     def ticker_metadata(self, ticker: str) -> dict[str, Any]: ...
 
@@ -49,13 +51,20 @@ class IdentityBootstrapResult:
     stop_reason: str | None = None
 
     @property
+    def quota_stopped(self) -> bool:
+        return self.stop_reason in QUOTA_STOP_REASONS
+
+    @property
+    def partial(self) -> bool:
+        return bool(self.blocked or self.overlaps or self.failed)
+
+    @property
+    def operational_failure(self) -> bool:
+        return self.stop_reason is not None and not self.quota_stopped
+
+    @property
     def ok(self) -> bool:
-        return (
-            not self.blocked
-            and not self.overlaps
-            and not self.failed
-            and self.stop_reason is None
-        )
+        return not self.partial and not self.operational_failure
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -67,6 +76,9 @@ class IdentityBootstrapResult:
             "failed": dict(sorted(self.failed.items())),
             "registered_episodes": self.registered_episodes,
             "stop_reason": self.stop_reason,
+            "quota_stopped": self.quota_stopped,
+            "partial": self.partial,
+            "operational_failure": self.operational_failure,
             "ok": self.ok,
         }
 
@@ -93,7 +105,7 @@ def bootstrap_eod_identities(
     result = IdentityBootstrapResult(requested=len(normalized))
     requested = set(normalized)
     grouped: dict[str, list[dict[str, str]]] = defaultdict(list)
-    for row in client.supported_tickers():
+    for row in client.supported_tickers(requested):
         ticker = (row.get("ticker") or "").strip().upper()
         if ticker not in requested or not _in_scope(row):
             continue
@@ -130,6 +142,7 @@ def bootstrap_eod_identities(
     if clock is not None:
         observer_kwargs["clock"] = clock
     observer = PersistentAttemptObserver(meta, **observer_kwargs)
+    identity_changed = False
     with _observed_metadata_client(client, observer) as metered:
         for position, (ticker, archives) in enumerate(candidates, start=1):
             try:
@@ -154,17 +167,22 @@ def bootstrap_eod_identities(
                         parsed, start=1
                     ):
                         if instrument_id not in superseded:
-                            meta.prune_archive_episode_envelope(
-                                instrument_id, ticker, start, end
+                            identity_changed = (
+                                meta.prune_archive_episode_envelope(
+                                    instrument_id, ticker, start, end
+                                )
+                                or identity_changed
                             )
                             episode = episode_rows.get(instrument_id)
                             if (
                                 episode is not None
                                 and episode["basis"] == "archive_record"
+                                and episode["episode_ordinal"] != ordinal
                             ):
                                 meta.set_identity_episode_ordinal(
                                     instrument_id, ordinal
                                 )
+                                identity_changed = True
                     result.skipped.append(ticker)
                     continue
                 if len(parsed) == 1:
@@ -174,6 +192,7 @@ def bootstrap_eod_identities(
                         continue
                     if requires_metadata_upgrade:
                         meta.remove_uncovered_archive_episode(instrument_id)
+                        identity_changed = True
                     metadata = metered.ticker_metadata(ticker)
                     _validate_metadata(ticker, archive, metadata)
                     evidence = _metadata_evidence(archive, metadata)
@@ -189,6 +208,7 @@ def bootstrap_eod_identities(
                         ordinal=1,
                         confidence="metadata_validated",
                     )
+                    identity_changed = True
                     meta.prune_archive_episode_envelope(
                         instrument_id, ticker, start, end
                     )
@@ -223,6 +243,7 @@ def bootstrap_eod_identities(
                             ordinal=ordinal,
                             confidence="archive_bound",
                         )
+                        identity_changed = True
                         meta.prune_archive_episode_envelope(
                             instrument_id, ticker, start, end
                         )
@@ -236,8 +257,9 @@ def bootstrap_eod_identities(
             finally:
                 if progress is not None:
                     progress(position, len(candidates))
-    for year in meta.universe_years():
-        meta.resolve_universe(year)
+    if identity_changed:
+        for year in meta.universe_years():
+            meta.resolve_universe(year)
     return result
 
 
@@ -246,8 +268,10 @@ class _ObservedMetadataClient:
         self._client = client
         self._observer = observer
 
-    def supported_tickers(self) -> list[dict[str, str]]:
-        return self._client.supported_tickers()
+    def supported_tickers(
+        self, tickers: Collection[str] | None = None
+    ) -> list[dict[str, str]]:
+        return self._client.supported_tickers(tickers)
 
     def ticker_metadata(self, ticker: str) -> dict[str, Any]:
         reservation = self._observer.before_attempt(f"/tiingo/daily/{ticker.lower()}")

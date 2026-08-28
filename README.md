@@ -109,9 +109,23 @@ runs the unfinished breadth-first sweep and exits cleanly at a quota boundary;
 its atomic status is written to
 `data/operations/phase1-eod-episodes-v3-status.json`. Exit 1 is accepted by the
 service because unresolved identity ranges remain visible while validated peers
-make progress; the JSON retains blocked and failed details. For this personal
-deployment that bounded status plus the nonzero service result is the required
-failure signal; wiring email later is optional.
+make progress; the JSON retains blocked and failed details. Coordinator
+failures receive up to three two-minute retries. For this personal deployment
+that bounded status plus the nonzero service result is the required failure
+signal; wiring email later is optional.
+
+The nightly current-EOD timer runs at 23:30 UTC Monday through Friday. Its
+single locked command first refreshes exact EOD identity evidence for the latest
+universe, then collects bars, so a new session is never requested through stale
+snapshot boundaries. It atomically replaces
+`data/operations/current-eod-status.json` with start/end timestamps, request and
+observed-byte counts, outcome counts, and at most 100 details per diagnostic
+category. Per-symbol fail-closed identity and vendor failures use exit 1 and are
+accepted by the service; quota stops are clean. Coordinator, configuration,
+locking, and status-publication failures use exit 2 and receive up to three
+two-minute retries before the user service remains failed. Manual forensic runs
+can still use `--summary-json` for the complete segment report instead of the
+bounded `--status-json` record.
 
 On this server the templates were installed under
 `~/.config/systemd/user/`, the timer was enabled, and user lingering was
@@ -119,9 +133,11 @@ enabled so it continues after logout. Reinstall changed templates with:
 
 ```bash
 install -Dm0644 -t ~/.config/systemd/user \
-  deploy/systemd/market-data-phase1-eod.*
+  deploy/systemd/market-data-phase1-eod.* \
+  deploy/systemd/market-data-current-eod.*
 systemctl --user daemon-reload
 systemctl --user enable --now market-data-phase1-eod.timer
+systemctl --user enable --now market-data-current-eod.timer
 loginctl enable-linger "$USER"
 ```
 
@@ -288,9 +304,10 @@ structured quality/gating layer are implemented, as are durable request-budget
 accounting, current-first breadth-first history scheduling, and shared process
 locking. The phase-1 seed EOD pass fetched 282 additional histories, and the
 live D-023 repair now represents 62 reused symbols as 125 inferred episodes;
-an aligned EOD job remains scheduled for honest blockers. Nightly current
-updates and phase-1 hourly identity/backfill remain; external failure
-notification is optional for this personal deployment.
+an aligned EOD job remains scheduled for honest blockers, and a bounded-status
+nightly current-EOD timer is installed. Two actual post-market timer runs and
+phase-1 hourly identity/backfill remain; external failure notification is
+optional for this personal deployment.
 M1 closed on
 2026-08-27 after its controlled EOD/IEX canary passed. Production ingestion is
 permitted only for validated segments; unresolved work remains fail-closed and

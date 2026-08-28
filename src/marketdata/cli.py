@@ -5,8 +5,10 @@ from __future__ import annotations
 import logging
 import sqlite3
 import sys
+from contextlib import nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import click
 import duckdb
@@ -15,7 +17,10 @@ import polars as pl
 from marketdata import universe as universe_mod
 from marketdata.config import Config, load_config
 from marketdata.identity import DATASET_KEYS
-from marketdata.identity_bootstrap import bootstrap_eod_identities
+from marketdata.identity_bootstrap import (
+    IdentityBootstrapResult,
+    bootstrap_eod_identities,
+)
 from marketdata.identity_episodes import (
     DEFAULT_EPISODE_GAP_SESSIONS,
     MIN_EPISODE_GAP_SESSIONS,
@@ -27,6 +32,7 @@ from marketdata.ingest import (
     DEFAULT_INTRADAY_FREQ,
     IngestResult,
 )
+from marketdata.locking import DataDirectoryLock
 from marketdata.migration import (
     _write_json_atomic,
     default_migration_report_path,
@@ -50,7 +56,7 @@ from marketdata.scheduler import (
 )
 from marketdata.store import BarStore, MetaStore
 from marketdata.store.bars import INTRADAY_FREQS
-from marketdata.tiingo import TiingoClient
+from marketdata.tiingo import TiingoClient, TiingoError
 
 _DATA_OPERATION_ERRORS = (
     OSError,
@@ -60,14 +66,28 @@ _DATA_OPERATION_ERRORS = (
     duckdb.Error,
     pl.exceptions.PolarsError,
 )
+_STATUS_DETAIL_LIMIT = 100
 
 
 def _client(config: Config) -> TiingoClient:
     if not config.tiingo_token:
-        raise click.ClickException(
-            "TIINGO_API_TOKEN is not set (put it in .env or the environment)"
-        )
+        message = "TIINGO_API_TOKEN is not set (put it in .env or the environment)"
+        raise click.ClickException(message)
     return TiingoClient(config.tiingo_token)
+
+
+def _operational_client(config: Config) -> TiingoClient:
+    """Build a client while making configuration failure status-reportable."""
+    try:
+        return _client(config)
+    except click.ClickException as exc:
+        raise TiingoError(exc.format_message()) from exc
+
+
+class _IngestOperationalError(click.ClickException):
+    """Operational ingestion failure, distinct from an identity-only partial."""
+
+    exit_code = 2
 
 
 def _require_ingestion_ready(meta: MetaStore) -> None:
@@ -104,7 +124,7 @@ def _finish_ingest(
         payload = scheduler.to_dict() if scheduler is not None else result.to_dict()
         if episode_repair is not None:
             payload["episode_repair"] = episode_repair.to_dict()
-        _write_json_atomic(payload, Path(summary_json))
+        _write_ingest_json(payload, summary_json)
     if result.failed:
         click.echo("Failed segments: " + ", ".join(sorted(result.failed)), err=True)
     if result.blocked:
@@ -112,12 +132,17 @@ def _finish_ingest(
             "Identity-blocked segments: " + ", ".join(sorted(result.blocked)),
             err=True,
         )
-    if not result.ok:
+    if result.partial:
         raise click.exceptions.Exit(1)
 
 
 def _finish_ingestion_cycle(
-    cycle: IngestionCycleResult, summary_json: str | None
+    cycle: IngestionCycleResult,
+    summary_json: str | None,
+    *,
+    status_json: str | None = None,
+    operation: dict[str, Any] | None = None,
+    identity_bootstrap: IdentityBootstrapResult | None = None,
 ) -> None:
     result = cycle.current
     click.echo(f"Done: {result.summary()}")
@@ -126,7 +151,18 @@ def _finish_ingestion_cycle(
         qualifier = " stopped cleanly" if clean else " stopped"
         click.echo(f"Current collection{qualifier}: {cycle.stop_reason}")
     if summary_json:
-        _write_json_atomic(cycle.to_dict(), Path(summary_json))
+        payload = cycle.to_dict()
+        if operation is not None:
+            payload["operation"] = operation
+        if identity_bootstrap is not None:
+            payload["identity_bootstrap"] = identity_bootstrap.to_dict()
+            payload["ok"] = payload["ok"] and identity_bootstrap.ok
+        _write_ingest_json(payload, summary_json)
+    if status_json:
+        _write_ingest_json(
+            _bounded_current_status(cycle, operation, identity_bootstrap),
+            status_json,
+        )
     if result.failed:
         click.echo("Failed segments: " + ", ".join(sorted(result.failed)), err=True)
     if result.blocked:
@@ -134,17 +170,112 @@ def _finish_ingestion_cycle(
             "Identity-blocked segments: " + ", ".join(sorted(result.blocked)),
             err=True,
         )
-    if not result.ok:
+    if identity_bootstrap is not None and identity_bootstrap.operational_failure:
+        raise _IngestOperationalError("scheduled current collection failed")
+    if cycle.partial or (identity_bootstrap is not None and identity_bootstrap.partial):
         raise click.exceptions.Exit(1)
 
 
-def _raise_ingest_error(exc: Exception, summary_json: str | None) -> None:
+def _operation_record(started_at: datetime, client: Any | None) -> dict[str, Any]:
+    """Return bounded run telemetry for the replace-in-place status record."""
+    return {
+        "kind": "current_eod_update",
+        "started_at": started_at.isoformat(),
+        "finished_at": datetime.now(UTC).isoformat(),
+        "request_attempts": int(getattr(client, "request_count", 0)),
+        "observed_response_bytes": int(getattr(client, "response_bytes", 0)),
+    }
+
+
+def _bounded_details(values: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    selected = dict(sorted(values.items())[:_STATUS_DETAIL_LIMIT])
+    return selected, len(values) - len(selected)
+
+
+def _bounded_result(payload: dict[str, Any]) -> dict[str, Any]:
+    """Bound details while deriving every field from a canonical serializer."""
+    result: dict[str, Any] = {}
+    counts: dict[str, int] = {}
+    omitted_details: dict[str, int] = {}
+    for name, value in payload.items():
+        if isinstance(value, list):
+            counts[name] = len(value)
+        elif isinstance(value, dict):
+            details, omitted = _bounded_details(value)
+            counts[name] = len(value)
+            result[name] = details
+            omitted_details[name] = omitted
+        elif isinstance(value, int) and not isinstance(value, bool):
+            counts[name] = value
+        else:
+            result[name] = value
+    result["counts"] = counts
+    result["omitted_details"] = omitted_details
+    return result
+
+
+def _bounded_current_status(
+    cycle: IngestionCycleResult,
+    operation: dict[str, Any] | None,
+    identity_bootstrap: IdentityBootstrapResult | None,
+) -> dict[str, Any]:
+    canonical_cycle = cycle.to_dict()
+    payload: dict[str, Any] = {
+        "operation": operation,
+        "current": _bounded_result(canonical_cycle["current"]),
+        "stop_reason": canonical_cycle["stop_reason"],
+        "ok": canonical_cycle["ok"],
+    }
+    if identity_bootstrap is not None:
+        payload["identity_bootstrap"] = _bounded_result(identity_bootstrap.to_dict())
+        payload["ok"] = payload["ok"] and identity_bootstrap.ok
+    return payload
+
+
+def _write_ingest_json(payload: dict[str, Any], path: str) -> None:
+    """Publish an ingestion report or fail with the operational exit code."""
+    try:
+        _write_json_atomic(payload, Path(path))
+    except (OSError, TypeError, ValueError) as exc:
+        raise _IngestOperationalError(
+            f"could not write ingestion report {path}: {exc}"
+        ) from exc
+
+
+def _raise_ingest_error(
+    exc: Exception,
+    summary_json: str | None,
+    *,
+    operational: bool = False,
+    operation: dict[str, Any] | None = None,
+) -> None:
     if summary_json:
-        _write_json_atomic(
-            {"ok": False, "error": str(exc), "failed": {}, "blocked": {}},
-            Path(summary_json),
-        )
-    raise click.ClickException(str(exc)) from exc
+        diagnostic = str(exc)
+        if len(diagnostic) > 1_000:
+            diagnostic = diagnostic[:997] + "..."
+        payload = {
+            "ok": False,
+            "error": diagnostic,
+            "failed": {},
+            "blocked": {},
+        }
+        if operation is not None:
+            payload["operation"] = operation
+        _write_ingest_json(payload, summary_json)
+    error_type = _IngestOperationalError if operational else click.ClickException
+    raise error_type(str(exc)) from exc
+
+
+def _echo_identity_bootstrap(result: IdentityBootstrapResult) -> None:
+    click.echo(
+        "Identity bootstrap: "
+        f"{len(result.validated)} validated, {len(result.skipped)} already valid, "
+        f"{result.registered_episodes} episodes registered, "
+        f"{len(result.overlaps)} overlap-blocked, "
+        f"{len(result.blocked)} blocked, {len(result.failed)} failed"
+    )
+    if result.stop_reason:
+        click.echo(f"Identity bootstrap stopped: {result.stop_reason}", err=True)
 
 
 def _validate_cli_range(start, end, summary_json: str | None) -> None:
@@ -400,22 +531,19 @@ def identity_bootstrap_eod_cmd(
 
         try:
             result = bootstrap_eod_identities(
-                _client(config), meta, ticker_list, progress=progress
+                _operational_client(config),
+                meta,
+                ticker_list,
+                progress=progress,
             )
         except _DATA_OPERATION_ERRORS as exc:
-            _raise_ingest_error(exc, summary_json)
+            _raise_ingest_error(exc, summary_json, operational=True)
     if summary_json:
-        _write_json_atomic(result.to_dict(), Path(summary_json))
-    click.echo(
-        "Identity bootstrap: "
-        f"{len(result.validated)} validated, {len(result.skipped)} already valid, "
-        f"{result.registered_episodes} episodes registered, "
-        f"{len(result.overlaps)} overlap-blocked, "
-        f"{len(result.blocked)} blocked, {len(result.failed)} failed"
-    )
-    if result.stop_reason:
-        click.echo(f"Identity bootstrap stopped: {result.stop_reason}", err=True)
-    if not result.ok:
+        _write_ingest_json(result.to_dict(), summary_json)
+    _echo_identity_bootstrap(result)
+    if result.operational_failure:
+        raise _IngestOperationalError("identity bootstrap failed")
+    if result.partial:
         raise click.exceptions.Exit(1)
 
 
@@ -457,9 +585,9 @@ def identity_repair_eod_episodes_cmd(
                 apply=apply,
             )
     except _DATA_OPERATION_ERRORS as exc:
-        _raise_ingest_error(exc, summary_json)
+        _raise_ingest_error(exc, summary_json, operational=True)
     if summary_json:
-        _write_json_atomic(report.to_dict(), Path(summary_json))
+        _write_ingest_json(report.to_dict(), summary_json)
     verb = "Applied" if report.applied else "Planned"
     click.echo(
         f"{verb} EOD episode repair: {report.split_sources} source histories, "
@@ -537,10 +665,10 @@ def backfill_eod_cmd(
             universe_year,
             summary_json=summary_json,
         )
-        client = _client(config)
         bars = BarStore(config.data_dir)
         click.echo(f"Backfilling EOD for {len(ticker_list)} tickers...")
         try:
+            client = _operational_client(config)
             recovered = recover_interrupted_eod_episode_repairs(bars, meta)
             if recovered:
                 click.echo(
@@ -566,7 +694,7 @@ def backfill_eod_cmd(
                 else None
             )
         except _DATA_OPERATION_ERRORS as exc:
-            _raise_ingest_error(exc, summary_json)
+            _raise_ingest_error(exc, summary_json, operational=True)
     _finish_ingest(result, summary_json, scheduler, episode_repair)
 
 
@@ -633,10 +761,10 @@ def backfill_intraday_cmd(
             universe_year,
             summary_json=summary_json,
         )
-        client = _client(config)
         dataset_key = f"intraday_{freq}"
         click.echo(f"Backfilling {freq} bars for {len(ticker_list)} tickers...")
         try:
+            client = _operational_client(config)
             scheduler = run_history_request(
                 client,
                 BarStore(config.data_dir),
@@ -652,7 +780,7 @@ def backfill_intraday_cmd(
             )
             result = scheduler.ingest
         except _DATA_OPERATION_ERRORS as exc:
-            _raise_ingest_error(exc, summary_json)
+            _raise_ingest_error(exc, summary_json, operational=True)
     _finish_ingest(result, summary_json, scheduler)
 
 
@@ -678,38 +806,99 @@ def backfill_cancel_cmd(config: Config, job_id: str) -> None:
     help="Update every ticker from every year's universe, not just the latest",
 )
 @click.option(
+    "--refresh-identities",
+    is_flag=True,
+    help="Refresh EOD identity evidence for the update cohort before collection",
+)
+@click.option(
     "--summary-json",
     type=click.Path(),
     default=None,
     help="Write a machine-readable result summary to this file",
 )
+@click.option(
+    "--status-json",
+    type=click.Path(),
+    default=None,
+    help="Write a bounded operational status record to this file",
+)
 @click.pass_obj
-def update(config, tickers, tickers_file, universe_year, all_universes, summary_json):
+def update(
+    config,
+    tickers,
+    tickers_file,
+    universe_year,
+    all_universes,
+    refresh_identities,
+    summary_json,
+    status_json,
+):
     """Incremental identity-validated EOD update."""
-    config.ensure_dirs()
-    with MetaStore(config.meta_path) as meta:
-        _require_ingestion_ready(meta)
-        ticker_list = _resolve_tickers(
-            meta,
-            tickers,
-            tickers_file,
-            universe_year,
-            default_scope="all" if all_universes else "latest",
-            summary_json=summary_json,
+    if summary_json and status_json:
+        raise click.UsageError(
+            "--summary-json and --status-json are mutually exclusive"
         )
-        click.echo(f"Updating EOD for {len(ticker_list)} tickers...")
-        try:
-            cycle = run_ingestion_cycle(
-                _client(config),
-                BarStore(config.data_dir),
+    report_json = status_json or summary_json
+    started_at = datetime.now(UTC)
+    client = None
+    identity_result = None
+    try:
+        config.ensure_dirs()
+        with MetaStore(config.meta_path) as meta:
+            _require_ingestion_ready(meta)
+            ticker_list = _resolve_tickers(
                 meta,
-                current_tickers=ticker_list,
-                current_datasets=["eod"],
-                history_job_id=None,
+                tickers,
+                tickers_file,
+                universe_year,
+                default_scope="all" if all_universes else "latest",
+                summary_json=report_json,
             )
-        except _DATA_OPERATION_ERRORS as exc:
-            _raise_ingest_error(exc, summary_json)
-    _finish_ingestion_cycle(cycle, summary_json)
+            client = _operational_client(config)
+            bars = BarStore(config.data_dir)
+            operation_lock = (
+                DataDirectoryLock(
+                    config.data_dir, operation="ingest:scheduled-eod-update"
+                )
+                if refresh_identities
+                else nullcontext()
+            )
+            with operation_lock:
+                if refresh_identities:
+                    identity_result = bootstrap_eod_identities(
+                        client, meta, ticker_list
+                    )
+                    _echo_identity_bootstrap(identity_result)
+                click.echo(f"Updating EOD for {len(ticker_list)} tickers...")
+                cycle = run_ingestion_cycle(
+                    client,
+                    bars,
+                    meta,
+                    current_tickers=ticker_list,
+                    current_datasets=["eod"],
+                    history_job_id=None,
+                )
+    except click.ClickException as exc:
+        _raise_ingest_error(
+            RuntimeError(exc.format_message()),
+            report_json,
+            operational=True,
+            operation=_operation_record(started_at, client),
+        )
+    except _DATA_OPERATION_ERRORS as exc:
+        _raise_ingest_error(
+            exc,
+            report_json,
+            operational=True,
+            operation=_operation_record(started_at, client),
+        )
+    _finish_ingestion_cycle(
+        cycle,
+        summary_json,
+        status_json=status_json,
+        operation=_operation_record(started_at, client),
+        identity_bootstrap=identity_result,
+    )
 
 
 @main.command("reconcile")

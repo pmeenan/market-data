@@ -284,8 +284,13 @@ Scope:
   additional histories with no failures. D-023 then repaired 62 covered broad
   histories into 125 inferred episodes; the final scan has zero structural or
   OHLC errors. An aligned 15-minute user-systemd EOD job retains the unresolved
-  ranges. Nightly current updates and independently validated hourly
-  identities/backfill remain.
+  ranges. A weekday 23:30 UTC user-systemd current-EOD job is now installed and
+  enabled; it refreshes latest-universe EOD identity evidence and writes a
+  bounded atomic status before returning exit 1 for per-symbol identity/vendor
+  exclusions, exit 0 for quota stops, or retryable exit 2 for coordinator,
+  configuration, lock, and report-publication failure. Both scheduled services
+  retry exit 2 up to three times at two-minute intervals. Independently
+  validated hourly identities/backfill remain.
 
 Exit criteria:
 
@@ -314,6 +319,11 @@ Exit criteria:
 - [ ] Two consecutive scheduled current-update runs complete on the target server;
   an induced failure returns nonzero and records a bounded diagnostic visible
   through the user-systemd result and status JSON.
+  The installed service completed two consecutive controlled pre-publication
+  runs on 2026-08-28, and induced lock contention produced systemd exit 2 plus
+  a 506-byte diagnostic status before a healthy rerun restored the standing
+  4.9 KB status. The first two actual timer-triggered post-market runs remain,
+  so this criterion stays unchecked. `make check` passes with 188 tests.
 - [ ] Phase 1 is running through the persisted scheduler, its coverage and budget
   state survive restart, and `make check` passes.
   Seed EOD made its safe persisted pass on 2026-08-28 (282 fetched, zero

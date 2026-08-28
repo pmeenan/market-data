@@ -43,7 +43,7 @@ Status legend: `confirmed` · `proposed` · `rejected (D-NNN)`
 | Feature | Status | Notes |
 | --- | --- | --- |
 | CLI for ingestion/maintenance + importable Python library | confirmed | Built |
-| Nightly cron update | confirmed | `market-data update` exists; systemd wiring plus a bounded nonzero status is M2, while external notification is optional for the personal deployment |
+| Nightly cron update | confirmed | The target server has an enabled weekday current-EOD user-systemd timer. Its locked identity-refresh/update pass writes a bounded status, treats per-symbol exclusions as partial, and retries coordinator failures; two actual post-market timer runs remain an M2 exit check. External notification is optional for the personal deployment |
 | Web UI for coverage browsing and backtest results | proposed | Triage 2026-08-26: owner deliberately keeps this proposed; revisit after the first study runs end-to-end (M3). Server has a public IP if wanted |
 | Realtime/streaming layer | proposed | Triage 2026-08-26: owner deliberately keeps this proposed; revisit after M3. Research-only per D-007 either way |
 | Live/automated trade execution | rejected (D-007) | Research tool only |

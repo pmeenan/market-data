@@ -18,7 +18,7 @@ from typing import Any, Protocol
 from uuid import uuid4
 
 from marketdata.calendar import plan_intraday_requests, weekend_only
-from marketdata.errors import BudgetExhausted
+from marketdata.errors import QUOTA_STOP_REASONS, BudgetExhausted
 from marketdata.identity import DATASET_KEYS
 from marketdata.ingest import (
     IngestResult,
@@ -95,12 +95,7 @@ class SchedulerRunResult:
 
     @property
     def quota_stopped(self) -> bool:
-        return self.stop_reason in {
-            "hourly_request_limit",
-            "daily_request_limit",
-            "rolling_total_byte_limit",
-            "rolling_historical_byte_limit",
-        }
+        return self.stop_reason in QUOTA_STOP_REASONS
 
     def to_dict(self) -> dict[str, Any]:
         return self.ingest.to_dict() | {
@@ -128,8 +123,14 @@ class IngestionCycleResult:
     stop_reason: str | None = None
 
     @property
+    def partial(self) -> bool:
+        return self.current.partial or (
+            self.history is not None and self.history.ingest.partial
+        )
+
+    @property
     def ok(self) -> bool:
-        return self.current.ok and (self.history is None or self.history.ingest.ok)
+        return not self.partial
 
     def to_dict(self) -> dict[str, Any]:
         return {

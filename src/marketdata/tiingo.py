@@ -14,6 +14,7 @@ import json
 import logging
 import time
 import zipfile
+from collections.abc import Collection
 from datetime import UTC, date, datetime
 from email.utils import parsedate_to_datetime
 from typing import Any, Protocol
@@ -350,11 +351,15 @@ class TiingoClient:
     def ticker_metadata(self, ticker: str) -> dict[str, Any]:
         return self._get_json(f"/tiingo/daily/{ticker.lower()}")
 
-    def supported_tickers(self) -> list[dict[str, str]]:
+    def supported_tickers(
+        self, tickers: Collection[str] | None = None
+    ) -> list[dict[str, str]]:
         """Download and parse Tiingo's full supported-tickers list.
 
         Returns rows with keys: ticker, exchange, assetType, priceCurrency,
-        startDate, endDate. No API token quota is consumed.
+        startDate, endDate. When ``tickers`` is provided, unrelated rows are
+        discarded while streaming the archive instead of being materialized.
+        No API token quota is consumed.
         """
         resp = requests.get(SUPPORTED_TICKERS_URL, timeout=120)
         resp.raise_for_status()
@@ -362,7 +367,15 @@ class TiingoClient:
             name = zf.namelist()[0]
             with zf.open(name) as f:
                 text = io.TextIOWrapper(f, encoding="utf-8")
-                return list(csv.DictReader(text))
+                reader = csv.DictReader(text)
+                if tickers is None:
+                    return list(reader)
+                requested = {ticker.strip().upper() for ticker in tickers}
+                return [
+                    row
+                    for row in reader
+                    if (row.get("ticker") or "").strip().upper() in requested
+                ]
 
 
 def _transferred_bytes(resp: requests.Response, *, complete: bool) -> int | None:

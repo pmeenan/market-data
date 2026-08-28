@@ -139,7 +139,7 @@ def test_identity_bootstrap_command_validates_safe_universe_record(
     class IdentityClient:
         response_bytes = 0
 
-        def supported_tickers(self):
+        def supported_tickers(self, tickers=None):
             holder = json.loads((data_dir / ".market-data.lock").read_text())
             assert holder["operation"] == "identity:bootstrap-eod"
             return [archive]
@@ -199,7 +199,7 @@ def test_identity_bootstrap_fails_before_mutation_when_data_lock_is_held(
         meta.set_universe(2024, [{"ticker": "SAFE", "rank": 1}])
 
     class IdentityClient:
-        def supported_tickers(self):
+        def supported_tickers(self, tickers=None):
             raise AssertionError("bootstrap transport started under contention")
 
     monkeypatch.setattr(cli_mod, "_client", lambda config: IdentityClient())
@@ -220,7 +220,7 @@ def test_identity_bootstrap_fails_before_mutation_when_data_lock_is_held(
             ],
         )
 
-    assert result.exit_code == 1
+    assert result.exit_code == 2
     assert "data directory is busy" in result.output
     assert json.loads(summary.read_text())["ok"] is False
     with MetaStore(data_dir / "meta.db") as meta:
@@ -352,6 +352,264 @@ def test_update_defaults_to_latest_universe(tmp_path, monkeypatch):
     assert {call[0] for call in client.eod_calls} == {"NEW"}
 
 
+def test_scheduled_update_refreshes_latest_identity_and_records_run_telemetry(
+    tmp_path, monkeypatch
+):
+    from marketdata.store import MetaStore
+
+    today = date.today()
+    archive = {
+        "ticker": "SAFE",
+        "exchange": "NASDAQ",
+        "assetType": "Stock",
+        "priceCurrency": "USD",
+        "startDate": "2020-01-02",
+        "endDate": today.isoformat(),
+    }
+
+    class ScheduledClient(FakeTiingo):
+        def __init__(self):
+            super().__init__({"SAFE": [eod_row(today)]})
+            self.metadata_calls = []
+            self.request_count = 0
+            self.response_bytes = 0
+
+        def supported_tickers(self, tickers=None):
+            return [archive]
+
+        def ticker_metadata(self, ticker):
+            self.metadata_calls.append(ticker)
+            self.request_count += 1
+            self.response_bytes += 7
+            return {
+                "ticker": ticker,
+                "exchangeCode": "NASDAQ",
+                "startDate": archive["startDate"],
+                "endDate": archive["endDate"],
+                "name": "Safe Incorporated",
+                "description": "fixture",
+            }
+
+        def eod(self, ticker, start=None, end=None):
+            self.request_count += 1
+            self.response_bytes += 11
+            return super().eod(ticker, start, end)
+
+    data_dir = tmp_path / "data"
+    summary = tmp_path / "current-status.json"
+    client = ScheduledClient()
+    monkeypatch.setattr(cli_mod, "_client", lambda config: client)
+    with MetaStore(data_dir / "meta.db") as meta:
+        meta.activate_canonical_generation()
+        meta.set_universe(2025, [{"ticker": "OLD", "rank": 1}])
+        meta.set_universe(2026, [{"ticker": "SAFE", "rank": 1}])
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "--data-dir",
+            str(data_dir),
+            "update",
+            "--refresh-identities",
+            "--status-json",
+            str(summary),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert client.metadata_calls == ["SAFE"]
+    assert [call[0] for call in client.eod_calls] == ["SAFE"]
+    payload = json.loads(summary.read_text())
+    assert payload["ok"] is True
+    assert payload["identity_bootstrap"]["counts"]["validated"] == 1
+    assert payload["current"]["counts"]["fetched"] == 1
+    assert "segments" not in payload["current"]
+    assert payload["operation"]["kind"] == "current_eod_update"
+    assert payload["operation"]["request_attempts"] == 2
+    assert payload["operation"]["observed_response_bytes"] == 18
+    assert payload["operation"]["started_at"] <= payload["operation"]["finished_at"]
+
+
+def test_update_per_symbol_vendor_failure_is_partial(tmp_path, monkeypatch):
+    from marketdata.store import MetaStore
+
+    data_dir = tmp_path / "data"
+    summary = tmp_path / "current-status.json"
+    with MetaStore(data_dir / "meta.db") as meta:
+        meta.activate_canonical_generation()
+        meta.upsert_instrument("apple-id")
+        meta.add_instrument_alias("apple-id", "AAPL", date(2024, 1, 1))
+        meta.add_vendor_identifier(
+            "apple-id",
+            "eod",
+            "ticker",
+            "AAPL",
+            date(2024, 1, 1),
+            date.max,
+            validation_state="validated",
+        )
+    monkeypatch.setattr(cli_mod, "_client", _fake_client({}, fail={"AAPL"}))
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "--data-dir",
+            str(data_dir),
+            "update",
+            "-t",
+            "AAPL",
+            "--summary-json",
+            str(summary),
+        ],
+    )
+
+    assert result.exit_code == 1
+    payload = json.loads(summary.read_text())
+    assert payload["ok"] is False
+    assert payload["current"]["failed"]
+    assert payload["operation"]["finished_at"]
+
+
+def test_bounded_current_status_caps_diagnostic_details():
+    from marketdata.ingest import IngestResult
+    from marketdata.scheduler import IngestionCycleResult
+
+    failures = {f"instrument-{index:03d}": "failed" for index in range(105)}
+    payload = cli_mod._bounded_current_status(
+        IngestionCycleResult(current=IngestResult(failed=failures)),
+        operation=None,
+        identity_bootstrap=None,
+    )
+
+    assert payload["current"]["counts"]["failed"] == 105
+    assert len(payload["current"]["failed"]) == 100
+    assert payload["current"]["omitted_details"]["failed"] == 5
+
+
+def test_update_precondition_failure_uses_operational_exit_and_status(tmp_path):
+    data_dir = tmp_path / "data"
+    status = tmp_path / "current-status.json"
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "--data-dir",
+            str(data_dir),
+            "update",
+            "--status-json",
+            str(status),
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "migrate the warehouse to v2 first" in result.output
+    payload = json.loads(status.read_text())
+    assert payload["ok"] is False
+    assert payload["operation"]["kind"] == "current_eod_update"
+
+
+def test_update_missing_universe_uses_operational_exit_and_status(tmp_path):
+    from marketdata.store import MetaStore
+
+    data_dir = tmp_path / "data"
+    status = tmp_path / "current-status.json"
+    with MetaStore(data_dir / "meta.db") as meta:
+        meta.activate_canonical_generation()
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "--data-dir",
+            str(data_dir),
+            "update",
+            "--status-json",
+            str(status),
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "No tickers specified and no universe exists yet" in result.output
+    assert json.loads(status.read_text())["ok"] is False
+
+
+def test_update_identity_quota_pause_is_clean(tmp_path, monkeypatch):
+    from marketdata.identity_bootstrap import IdentityBootstrapResult
+    from marketdata.scheduler import IngestionCycleResult
+    from marketdata.store import MetaStore
+
+    data_dir = tmp_path / "data"
+    status = tmp_path / "current-status.json"
+    with MetaStore(data_dir / "meta.db") as meta:
+        meta.activate_canonical_generation()
+        meta.set_universe(2026, [{"ticker": "SAFE", "rank": 1}])
+    monkeypatch.setattr(cli_mod, "_client", _fake_client({}))
+    monkeypatch.setattr(
+        cli_mod,
+        "bootstrap_eod_identities",
+        lambda client, meta, tickers: IdentityBootstrapResult(
+            requested=1, stop_reason="hourly_request_limit"
+        ),
+    )
+    monkeypatch.setattr(
+        cli_mod,
+        "run_ingestion_cycle",
+        lambda *args, **kwargs: IngestionCycleResult(),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "--data-dir",
+            str(data_dir),
+            "update",
+            "--refresh-identities",
+            "--status-json",
+            str(status),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    identity = json.loads(status.read_text())["identity_bootstrap"]
+    assert identity["quota_stopped"] is True
+    assert identity["ok"] is True
+
+
+def test_update_status_write_failure_uses_operational_exit(tmp_path, monkeypatch):
+    from marketdata.scheduler import IngestionCycleResult
+    from marketdata.store import MetaStore
+
+    data_dir = tmp_path / "data"
+    with MetaStore(data_dir / "meta.db") as meta:
+        meta.activate_canonical_generation()
+    monkeypatch.setattr(cli_mod, "_client", _fake_client({}))
+    monkeypatch.setattr(
+        cli_mod,
+        "run_ingestion_cycle",
+        lambda *args, **kwargs: IngestionCycleResult(),
+    )
+    monkeypatch.setattr(
+        cli_mod,
+        "_write_json_atomic",
+        lambda payload, path: (_ for _ in ()).throw(OSError("disk full")),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "--data-dir",
+            str(data_dir),
+            "update",
+            "-t",
+            "SAFE",
+            "--status-json",
+            str(tmp_path / "status.json"),
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "could not write ingestion report" in result.output
+
+
 def test_update_reports_budget_pause_as_clean_resumable_stop(tmp_path, monkeypatch):
     from marketdata.errors import BudgetExhausted
     from marketdata.store import MetaStore
@@ -476,7 +734,7 @@ def test_mutation_lock_contention_is_nonzero_and_machine_readable(
             ],
         )
 
-    assert update_result.exit_code == 1
+    assert update_result.exit_code == 2
     assert "data directory is busy" in update_result.output
     payload = json.loads(summary.read_text())
     assert payload["ok"] is False
@@ -485,7 +743,7 @@ def test_mutation_lock_contention_is_nonzero_and_machine_readable(
     assert not client.eod_calls
     assert reconcile_result.exit_code == 1
     assert "data directory is busy" in reconcile_result.output
-    assert backfill_result.exit_code == 1
+    assert backfill_result.exit_code == 2
     assert json.loads(backfill_summary.read_text())["ok"] is False
     assert cancel_result.exit_code == 0, cancel_result.output
     with MetaStore(data_dir / "meta.db") as meta:
