@@ -22,6 +22,36 @@ Newest first. RE-numbers are never reused.
 
 ---
 
+## RE-009: A recent empty EOD range can poll indefinitely at a phase gate  (2026-08-29, status: open)
+
+**Environment:** D-027 program scheduler, EOD phase-2 terminal sweep, Tiingo
+CSV, five-day empty-response publication lag.
+
+**Repro/measurement:** The sole remaining safe phase-2 range was the
+archive-bounded `DSPC@2021-05-19` episode ending 2026-08-26. On 2026-08-29,
+21 complete requests produced no coverage; 20 responses were the normal
+94-byte header-only CSV. Each completed sweep retried that same range, recorded
+`coverage did not advance`, and left the job active.
+
+**Observed:** Once all peers were terminal, every program invocation spent
+about four minutes scanning the 23,759-target cohort, made one DSPC request,
+then waited for the five-minute timer cadence. API usage appeared stationary
+and phase 3 could not start, even though the range would become eligible for
+verified-empty coverage when the publication lag expired.
+
+**Expected:** A no-progress result whose only blocker is the deterministic
+publication-lag date should persist a not-before checkpoint, or otherwise stop
+without polling the full cohort and phase gate on every timer invocation.
+
+**Impact/workaround:** The operator may accept the exact range as a terminal
+exclusion after reviewing its repeated complete responses; this must retain no
+coverage claim and a durable reason. The 2026-08-29 live workaround did so for
+DSPC after taking an integrity-checked SQLite backup, allowing phase 2 to become
+terminal and phase-3 identity preparation to begin. A general scheduler fix
+remains open.
+
+---
+
 ## RE-008: Empty IEX CSV omits the implicit date column  (2026-08-28, status: worked-around)
 
 **Environment:** Authenticated Tiingo historical IEX REST endpoint with

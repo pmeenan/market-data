@@ -297,8 +297,11 @@ Scope:
   identity preparation, and admits only registered later-phase jobs after every
   declared predecessor is terminal. The program and current-update services
   retry exit 2 up to three times at two-minute intervals. The live coordinator
-  is enabled, has frozen 23,078 supported-US instruments, and is advancing
-  phase-2 EOD identity batches on its five-minute cadence.
+  is enabled, froze 23,078 supported-US instruments, and completed phase 2 with
+  accepted exclusions. Its sole final safe range, a recent DSPC episode with
+  repeated responses that produced no coverage, was operator-terminalized
+  without claiming coverage so the program could begin phase-3 five-minute
+  identity preparation before month end.
 
 Exit criteria:
 
@@ -442,8 +445,9 @@ Scope:
   D-027 now persists the four ordered components, rejects missing or ad hoc
   predecessors, freezes the vendor archive behind phase 2, and batches identity
   and history turns through one systemd driver. Phase 1 is terminal with
-  exclusions; the enabled live driver froze 23,078 phase-2 instruments and is
-  advancing their EOD identity batches. The remaining phase-2/3 transfer and
+  exclusions; the enabled live driver froze 23,078 phase-2 instruments,
+  completed their safe EOD work with accepted exclusions, and began phase-3
+  five-minute identity preparation. The remaining phase-3 transfer and
   ongoing-current expansion keep this item open. Before enabling that current
   expansion, measure its end-to-end duty cycle and choose a batch/schedule that
   meets nightly freshness without exceeding the durable hourly, daily, or byte

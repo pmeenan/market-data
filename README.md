@@ -365,10 +365,11 @@ locking. The terminal phase-1 jobs fetched 282 additional EOD histories,
 represent 62 reused symbols as 125 inferred episodes, and validated 4,316
 exact-frequency hourly IEX segments while retaining honest exclusions. The
 enabled D-027 program timer has replaced both fixed phase-1 timers, frozen an
-immutable 23,078-instrument supported-US phase-2 cohort, and begun batched EOD
-identity preparation. A bounded-status nightly current-EOD timer is installed;
-two actual post-market timer runs remain. External failure notification is
-optional for this personal deployment.
+immutable 23,078-instrument supported-US phase-2 cohort, completed its safe EOD
+work with accepted exclusions, and begun phase-3 five-minute identity
+preparation. A bounded-status nightly current-EOD timer is installed; two
+actual post-market timer runs remain. External failure notification is optional
+for this personal deployment.
 M1 closed on
 2026-08-27 after its controlled EOD/IEX canary passed. Production ingestion is
 permitted only for validated segments; unresolved work remains fail-closed and
