@@ -1,0 +1,25 @@
+[Unit]
+Description=market-data ordered historical backfill program
+Documentation=file://%h/src/market-data/README.md
+ConditionPathExists=%h/src/market-data/data/meta.db
+StartLimitIntervalSec=10min
+StartLimitBurst=4
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/src/market-data
+Environment=PYTHONUNBUFFERED=1
+ExecStart=%h/src/market-data/.venv/bin/market-data --data-dir %h/src/market-data/data backfill program-step --program-id main-v1 --identity-batch-size 250 --max-units 500 --status-json %h/src/market-data/data/operations/backfill-program-v1-status.json
+# Durable identity exclusions use exit 1 while safe peers and later phases advance.
+# Coordinator/configuration/locking failures use exit 2 and receive bounded retries.
+SuccessExitStatus=1
+Restart=on-failure
+RestartSec=2min
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=infinity
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=%h/src/market-data/data
+RestrictSUIDSGID=true

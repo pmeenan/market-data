@@ -11,6 +11,7 @@ coverage is instrument-keyed and uses exact dataset keys.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import sqlite3
@@ -36,7 +37,7 @@ from marketdata.research_layout import (
     normalize_relative_data_path,
 )
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 _SCHEMA_V1 = """
 CREATE TABLE IF NOT EXISTS tickers (
@@ -427,6 +428,101 @@ BEGIN
 END;
 """
 
+_SCHEMA_V7 = """
+CREATE TABLE IF NOT EXISTS backfill_programs (
+    program_id       TEXT PRIMARY KEY,
+    definition_hash  TEXT NOT NULL,
+    status           TEXT NOT NULL,
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL,
+    CHECK (length(trim(program_id)) BETWEEN 1 AND 128),
+    CHECK (length(definition_hash) = 64),
+    CHECK (status IN ('active', 'complete', 'complete_with_exclusions'))
+);
+
+CREATE TABLE IF NOT EXISTS backfill_program_components (
+    program_id       TEXT NOT NULL REFERENCES backfill_programs(program_id)
+                     ON DELETE CASCADE,
+    component_key    TEXT NOT NULL,
+    component_ordinal INTEGER NOT NULL,
+    phase            INTEGER NOT NULL,
+    dataset_key      TEXT NOT NULL,
+    scope_key        TEXT NOT NULL,
+    range_start      TEXT NOT NULL,
+    range_end        TEXT NOT NULL,
+    job_id           TEXT NOT NULL UNIQUE,
+    identity_status  TEXT NOT NULL DEFAULT 'pending',
+    identity_cursor  INTEGER NOT NULL DEFAULT 0,
+    state            TEXT NOT NULL DEFAULT 'pending',
+    last_stop_reason TEXT,
+    updated_at       TEXT NOT NULL,
+    PRIMARY KEY (program_id, component_key),
+    UNIQUE (program_id, component_ordinal),
+    CHECK (length(trim(component_key)) > 0),
+    CHECK (component_ordinal >= 0),
+    CHECK (phase IN (1, 2, 3)),
+    CHECK (dataset_key IN ('eod', 'intraday_1hour', 'intraday_5min')),
+    CHECK (length(trim(scope_key)) > 0),
+    CHECK (range_start <= range_end),
+    CHECK (length(trim(job_id)) BETWEEN 1 AND 128),
+    CHECK (identity_status IN ('pending', 'prepared')),
+    CHECK (identity_cursor >= 0),
+    CHECK (state IN ('pending', 'preparing', 'active', 'complete', 'blocked'))
+);
+CREATE INDEX IF NOT EXISTS backfill_program_components_phase
+    ON backfill_program_components (program_id, phase, component_ordinal);
+
+CREATE TABLE IF NOT EXISTS backfill_program_scopes (
+    program_id       TEXT NOT NULL REFERENCES backfill_programs(program_id)
+                     ON DELETE CASCADE,
+    scope_key        TEXT NOT NULL,
+    source_kind      TEXT NOT NULL,
+    cohort_hash      TEXT NOT NULL,
+    ticker_count     INTEGER NOT NULL,
+    created_at       TEXT NOT NULL,
+    PRIMARY KEY (program_id, scope_key),
+    CHECK (length(trim(scope_key)) > 0),
+    CHECK (source_kind IN ('seed_universes', 'tiingo_supported_us')),
+    CHECK (length(cohort_hash) = 64),
+    CHECK (ticker_count > 0)
+);
+
+CREATE TABLE IF NOT EXISTS backfill_program_tickers (
+    program_id       TEXT NOT NULL,
+    scope_key        TEXT NOT NULL,
+    ticker_ordinal   INTEGER NOT NULL,
+    ticker           TEXT NOT NULL,
+    PRIMARY KEY (program_id, scope_key, ticker_ordinal),
+    UNIQUE (program_id, scope_key, ticker),
+    FOREIGN KEY (program_id, scope_key)
+        REFERENCES backfill_program_scopes(program_id, scope_key)
+        ON DELETE CASCADE,
+    CHECK (ticker_ordinal >= 0),
+    CHECK (length(trim(ticker)) > 0)
+);
+
+CREATE TABLE IF NOT EXISTS backfill_program_supported_records (
+    program_id       TEXT NOT NULL,
+    scope_key        TEXT NOT NULL,
+    record_ordinal   INTEGER NOT NULL,
+    ticker           TEXT NOT NULL,
+    exchange         TEXT NOT NULL,
+    asset_type       TEXT NOT NULL,
+    price_currency   TEXT NOT NULL,
+    start_date       TEXT NOT NULL,
+    end_date         TEXT NOT NULL,
+    PRIMARY KEY (program_id, scope_key, record_ordinal),
+    FOREIGN KEY (program_id, scope_key)
+        REFERENCES backfill_program_scopes(program_id, scope_key)
+        ON DELETE CASCADE,
+    CHECK (record_ordinal >= 0),
+    CHECK (length(trim(ticker)) > 0),
+    CHECK (start_date <= end_date)
+);
+CREATE INDEX IF NOT EXISTS backfill_program_supported_ticker
+    ON backfill_program_supported_records (program_id, scope_key, ticker);
+"""
+
 
 def _apply_v4_compatibility(con: sqlite3.Connection) -> None:
     """Fold pre-commit v4 working-tree variants into the numbered v5 migration."""
@@ -510,6 +606,11 @@ def _migrate(con: sqlite3.Connection) -> None:
             con.executescript(_SCHEMA_V6)
             con.execute("PRAGMA user_version = 6")
         version = 6
+    if version < 7:
+        with con:
+            con.executescript(_SCHEMA_V7)
+            con.execute("PRAGMA user_version = 7")
+        version = 7
     if version > SCHEMA_VERSION:
         raise RuntimeError(
             f"meta.db schema version {version} is newer than this code "
@@ -1935,6 +2036,429 @@ class MetaStore:
             )
         return ordered
 
+    # ---- durable backfill program --------------------------------------
+
+    def create_backfill_program(
+        self,
+        *,
+        program_id: str,
+        definition_hash: str,
+        components: list[Mapping[str, Any]],
+    ) -> None:
+        """Create one immutable ordered phase definition.
+
+        Component progress and frozen cohorts are mutable operational state,
+        but the ordered phase/dataset/range/job declaration is not. This keeps
+        a later deployment from silently changing what a predecessor meant.
+        """
+        normalized_id = program_id.strip()
+        if not normalized_id or len(normalized_id) > 128:
+            raise ValueError("backfill program_id must contain 1..128 characters")
+        if len(definition_hash) != 64:
+            raise ValueError("backfill program definition hash must be SHA-256")
+        if not components:
+            raise ValueError("backfill program must declare at least one component")
+        existing = self.backfill_program(normalized_id)
+        if existing is not None:
+            if str(existing["definition_hash"]) != definition_hash:
+                raise ValueError(
+                    f"backfill program {normalized_id!r} already has a different "
+                    "definition"
+                )
+            return
+        ordinals: set[int] = set()
+        keys: set[str] = set()
+        jobs: set[str] = set()
+        rows: list[tuple[Any, ...]] = []
+        now = _now()
+        for component in components:
+            key = str(component["component_key"]).strip()
+            ordinal = int(component["component_ordinal"])
+            phase = int(component["phase"])
+            dataset_key = require_dataset_key(str(component["dataset_key"]))
+            scope_key = str(component["scope_key"]).strip()
+            start = component["start"]
+            end = component["end"]
+            job_id = str(component["job_id"]).strip()
+            if not isinstance(start, date) or not isinstance(end, date):
+                raise ValueError("backfill program ranges must be dates")
+            if start > end:
+                raise ValueError("backfill program start must not be after end")
+            if phase not in {1, 2, 3}:
+                raise ValueError("backfill program phase must be 1, 2, or 3")
+            if not key or not scope_key or not job_id or len(job_id) > 128:
+                raise ValueError("backfill program component fields must not be blank")
+            if key in keys or ordinal in ordinals or job_id in jobs:
+                raise ValueError("backfill program component keys must be unique")
+            keys.add(key)
+            ordinals.add(ordinal)
+            jobs.add(job_id)
+            rows.append(
+                (
+                    normalized_id,
+                    key,
+                    ordinal,
+                    phase,
+                    dataset_key,
+                    scope_key,
+                    start.isoformat(),
+                    end.isoformat(),
+                    job_id,
+                    now,
+                )
+            )
+        with self._con:
+            self._con.execute(
+                """INSERT INTO backfill_programs
+                       (program_id, definition_hash, status, created_at, updated_at)
+                   VALUES (?, ?, 'active', ?, ?)""",
+                (normalized_id, definition_hash, now, now),
+            )
+            self._con.executemany(
+                """INSERT INTO backfill_program_components
+                       (program_id, component_key, component_ordinal, phase,
+                        dataset_key, scope_key, range_start, range_end, job_id,
+                        updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                rows,
+            )
+
+    def backfill_program(self, program_id: str) -> sqlite3.Row | None:
+        return self._con.execute(
+            "SELECT * FROM backfill_programs WHERE program_id = ?",
+            (program_id.strip(),),
+        ).fetchone()
+
+    def backfill_programs(self) -> list[sqlite3.Row]:
+        return self._con.execute(
+            "SELECT * FROM backfill_programs ORDER BY created_at, program_id"
+        ).fetchall()
+
+    def backfill_program_components(self, program_id: str) -> list[sqlite3.Row]:
+        return self._con.execute(
+            """SELECT * FROM backfill_program_components
+               WHERE program_id = ? ORDER BY component_ordinal""",
+            (program_id.strip(),),
+        ).fetchall()
+
+    def backfill_program_component(
+        self, program_id: str, component_key: str
+    ) -> sqlite3.Row | None:
+        return self._con.execute(
+            """SELECT * FROM backfill_program_components
+               WHERE program_id = ? AND component_key = ?""",
+            (program_id.strip(), component_key.strip()),
+        ).fetchone()
+
+    def backfill_program_component_for_job(self, job_id: str) -> sqlite3.Row | None:
+        return self._con.execute(
+            """SELECT * FROM backfill_program_components WHERE job_id = ?""",
+            (job_id,),
+        ).fetchone()
+
+    def freeze_backfill_program_scope(
+        self,
+        *,
+        program_id: str,
+        scope_key: str,
+        source_kind: str,
+        tickers: Collection[str],
+        supported_records: Collection[Mapping[str, Any]] = (),
+    ) -> sqlite3.Row:
+        """Persist the first cohort snapshot and leave it immutable on reruns."""
+        existing = self.backfill_program_scope(program_id, scope_key)
+        if existing is not None:
+            return existing
+        if self.backfill_program(program_id) is None:
+            raise ValueError(f"unknown backfill program {program_id!r}")
+        if source_kind not in {"seed_universes", "tiingo_supported_us"}:
+            raise ValueError(f"invalid backfill scope source {source_kind!r}")
+        normalized_tickers = sorted(
+            {ticker.strip().upper() for ticker in tickers if ticker.strip()}
+        )
+        if not normalized_tickers:
+            raise ValueError("backfill program scope must not be empty")
+        normalized_ticker_set = set(normalized_tickers)
+        records = sorted(
+            (
+                {
+                    "ticker": str(row.get("ticker") or "").strip().upper(),
+                    "exchange": str(row.get("exchange") or "").strip(),
+                    "assetType": str(row.get("assetType") or "").strip(),
+                    "priceCurrency": str(row.get("priceCurrency") or "").strip(),
+                    "startDate": str(row.get("startDate") or "").strip(),
+                    "endDate": str(row.get("endDate") or "").strip(),
+                }
+                for row in supported_records
+            ),
+            key=lambda row: (
+                row["ticker"],
+                row["startDate"],
+                row["endDate"],
+                row["exchange"],
+                row["assetType"],
+                row["priceCurrency"],
+            ),
+        )
+        if source_kind == "tiingo_supported_us":
+            if not records or any(
+                not row["ticker"]
+                or not row["startDate"]
+                or not row["endDate"]
+                or row["ticker"] not in normalized_ticker_set
+                for row in records
+            ):
+                raise ValueError(
+                    "supported-ticker scope requires valid archive records"
+                )
+        elif records:
+            raise ValueError("seed-universe scope must not contain supported records")
+        snapshot = {"tickers": normalized_tickers, "supported_records": records}
+        cohort_hash = hashlib.sha256(canonical_json(snapshot).encode()).hexdigest()
+        now = _now()
+        with self._con:
+            self._con.execute(
+                """INSERT INTO backfill_program_scopes
+                       (program_id, scope_key, source_kind, cohort_hash,
+                        ticker_count, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    program_id,
+                    scope_key,
+                    source_kind,
+                    cohort_hash,
+                    len(normalized_tickers),
+                    now,
+                ),
+            )
+            self._con.executemany(
+                """INSERT INTO backfill_program_tickers
+                       (program_id, scope_key, ticker_ordinal, ticker)
+                   VALUES (?, ?, ?, ?)""",
+                [
+                    (program_id, scope_key, ordinal, ticker)
+                    for ordinal, ticker in enumerate(normalized_tickers)
+                ],
+            )
+            self._con.executemany(
+                """INSERT INTO backfill_program_supported_records
+                       (program_id, scope_key, record_ordinal, ticker, exchange,
+                        asset_type, price_currency, start_date, end_date)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                [
+                    (
+                        program_id,
+                        scope_key,
+                        ordinal,
+                        row["ticker"],
+                        row["exchange"],
+                        row["assetType"],
+                        row["priceCurrency"],
+                        row["startDate"],
+                        row["endDate"],
+                    )
+                    for ordinal, row in enumerate(records)
+                ],
+            )
+        scope = self.backfill_program_scope(program_id, scope_key)
+        assert scope is not None
+        return scope
+
+    def backfill_program_scope(
+        self, program_id: str, scope_key: str
+    ) -> sqlite3.Row | None:
+        return self._con.execute(
+            """SELECT * FROM backfill_program_scopes
+               WHERE program_id = ? AND scope_key = ?""",
+            (program_id.strip(), scope_key.strip()),
+        ).fetchone()
+
+    def backfill_program_tickers(self, program_id: str, scope_key: str) -> list[str]:
+        rows = self._con.execute(
+            """SELECT ticker FROM backfill_program_tickers
+               WHERE program_id = ? AND scope_key = ?
+               ORDER BY ticker_ordinal""",
+            (program_id.strip(), scope_key.strip()),
+        ).fetchall()
+        return [str(row["ticker"]) for row in rows]
+
+    def backfill_program_supported_records(
+        self,
+        program_id: str,
+        scope_key: str,
+        tickers: Collection[str] | None = None,
+    ) -> list[dict[str, str]]:
+        parameters: list[Any] = [program_id.strip(), scope_key.strip()]
+        predicate = ""
+        if tickers is not None:
+            normalized = sorted(
+                {ticker.strip().upper() for ticker in tickers if ticker.strip()}
+            )
+            if not normalized:
+                return []
+            placeholders = ",".join("?" for _ in normalized)
+            predicate = f" AND ticker IN ({placeholders})"
+            parameters.extend(normalized)
+        rows = self._con.execute(
+            """SELECT ticker, exchange, asset_type, price_currency,
+                      start_date, end_date
+                 FROM backfill_program_supported_records
+                WHERE program_id = ? AND scope_key = ?"""
+            + predicate
+            + " ORDER BY record_ordinal",
+            parameters,
+        ).fetchall()
+        return [
+            {
+                "ticker": str(row["ticker"]),
+                "exchange": str(row["exchange"]),
+                "assetType": str(row["asset_type"]),
+                "priceCurrency": str(row["price_currency"]),
+                "startDate": str(row["start_date"]),
+                "endDate": str(row["end_date"]),
+            }
+            for row in rows
+        ]
+
+    def advance_backfill_program_identity(
+        self,
+        *,
+        program_id: str,
+        component_key: str,
+        cursor: int,
+        prepared: bool,
+        stop_reason: str | None,
+    ) -> None:
+        component = self.backfill_program_component(program_id, component_key)
+        if component is None:
+            raise ValueError(
+                f"unknown backfill program component {program_id!r}/{component_key!r}"
+            )
+        scope = self.backfill_program_scope(program_id, str(component["scope_key"]))
+        if scope is None:
+            raise ValueError("backfill program component has no frozen scope")
+        if cursor < int(component["identity_cursor"]) or cursor > int(
+            scope["ticker_count"]
+        ):
+            raise ValueError("backfill identity cursor must advance within its scope")
+        if prepared and cursor != int(scope["ticker_count"]):
+            raise ValueError("prepared identity must cover the complete frozen scope")
+        with self._con:
+            self._con.execute(
+                """UPDATE backfill_program_components
+                   SET identity_status = ?, identity_cursor = ?, state = ?,
+                       last_stop_reason = ?, updated_at = ?
+                   WHERE program_id = ? AND component_key = ?""",
+                (
+                    "prepared" if prepared else "pending",
+                    cursor,
+                    "pending" if prepared else "preparing",
+                    stop_reason,
+                    _now(),
+                    program_id,
+                    component_key,
+                ),
+            )
+
+    def set_backfill_program_component_state(
+        self,
+        *,
+        program_id: str,
+        component_key: str,
+        state: str,
+        stop_reason: str | None = None,
+    ) -> None:
+        if state not in {"pending", "preparing", "active", "complete", "blocked"}:
+            raise ValueError(f"invalid backfill component state {state!r}")
+        with self._con:
+            changed = self._con.execute(
+                """UPDATE backfill_program_components
+                   SET state = ?, last_stop_reason = ?, updated_at = ?
+                   WHERE program_id = ? AND component_key = ?""",
+                (state, stop_reason, _now(), program_id, component_key),
+            ).rowcount
+        if changed != 1:
+            raise ValueError(
+                f"unknown backfill program component {program_id!r}/{component_key!r}"
+            )
+
+    def set_backfill_program_status(self, program_id: str, status: str) -> None:
+        if status not in {"active", "complete", "complete_with_exclusions"}:
+            raise ValueError(f"invalid backfill program status {status!r}")
+        with self._con:
+            changed = self._con.execute(
+                """UPDATE backfill_programs SET status = ?, updated_at = ?
+                   WHERE program_id = ?""",
+                (status, _now(), program_id),
+            ).rowcount
+        if changed != 1:
+            raise ValueError(f"unknown backfill program {program_id!r}")
+
+    def backfill_program_prerequisite_stop_reason(
+        self,
+        job_id: str,
+        phase: int,
+        *,
+        request_hash: str | None = None,
+    ) -> str | None:
+        """Return a fail-closed program gate for phase-2/3 history jobs."""
+        if phase == 1:
+            return None
+        if phase not in {2, 3}:
+            raise ValueError("history phase must be 1, 2, or 3")
+        component = self.backfill_program_component_for_job(job_id)
+        if component is None or int(component["phase"]) != phase:
+            return "phase_program_required"
+        scope = self.backfill_program_scope(
+            str(component["program_id"]), str(component["scope_key"])
+        )
+        if scope is None:
+            return "phase_scope_not_frozen"
+        if str(component["identity_status"]) != "prepared":
+            return "phase_identity_not_prepared"
+        rows = self.backfill_program_components(str(component["program_id"]))
+        lower = [row for row in rows if int(row["phase"]) < phase]
+        if not lower:
+            return "phase_predecessor_missing"
+        if any(str(row["state"]) not in {"complete", "blocked"} for row in lower):
+            return "phase_predecessor_active"
+        expected_payload = {
+            "dataset_key": str(component["dataset_key"]),
+            "tickers": self.backfill_program_tickers(
+                str(component["program_id"]), str(component["scope_key"])
+            ),
+            "start": str(component["range_start"]),
+            "end": str(component["range_end"]),
+            "phase": phase,
+            "force": False,
+        }
+        expected_hash = hashlib.sha256(
+            canonical_json(expected_payload).encode()
+        ).hexdigest()
+        if request_hash is not None and request_hash != expected_hash:
+            return "phase_program_request_mismatch"
+        job = self.history_job(job_id)
+        if job is not None:
+            actual = (
+                int(job["phase"]),
+                str(job["dataset_key"]),
+                str(job["range_start"]),
+                str(job["range_end"]),
+                str(job["request_hash"]),
+                bool(job["force"]),
+            )
+            expected = (
+                phase,
+                str(component["dataset_key"]),
+                str(component["range_start"]),
+                str(component["range_end"]),
+                expected_hash,
+                False,
+            )
+            if actual != expected:
+                return "phase_program_request_mismatch"
+        return None
+
     # ---- durable request accounting ------------------------------------
 
     def reserve_request_attempt(
@@ -2330,18 +2854,6 @@ class MetaStore:
                 if row is None:
                     raise ValueError(f"unknown history job {job_id!r}")
                 raise ValueError(f"history job {job_id!r} is already {row['status']}")
-
-    def active_lower_phase_jobs(self, phase: int) -> list[str]:
-        if phase not in {1, 2, 3}:
-            raise ValueError("history phase must be 1, 2, or 3")
-        rows = self._con.execute(
-            """SELECT job_id FROM history_jobs
-               WHERE phase IS NOT NULL AND phase < ? AND status = 'active'
-                 AND cancelled = 0
-               ORDER BY phase, dataset_key, job_id""",
-            (phase,),
-        ).fetchall()
-        return [str(row["job_id"]) for row in rows]
 
     def checkpoint_history_turn(
         self,

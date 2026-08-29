@@ -45,6 +45,44 @@ US_EXCHANGES = frozenset({"NYSE", "NASDAQ", "NYSE ARCA", "AMEX", "BATS"})
 US_ASSET_TYPES = frozenset({"Stock", "ETF"})
 
 
+def supported_us_stock_etf_records(
+    rows: Sequence[Mapping[str, str]],
+) -> list[dict[str, str]]:
+    """Return a deterministic all-history US stock/ETF archive snapshot."""
+    normalized: dict[tuple[str, str, str, str, str, str], dict[str, str]] = {}
+    for row in rows:
+        if not _in_scope(row):
+            continue
+        ticker = str(row.get("ticker") or "").strip().upper()
+        start = str(row.get("startDate") or "").strip()
+        end = str(row.get("endDate") or "").strip()
+        try:
+            start_date = date.fromisoformat(start)
+            end_date = date.fromisoformat(end)
+        except ValueError:
+            continue
+        if not ticker or start_date > end_date:
+            continue
+        record = {
+            "ticker": ticker,
+            "exchange": str(row.get("exchange") or "").strip(),
+            "assetType": str(row.get("assetType") or "").strip(),
+            "priceCurrency": str(row.get("priceCurrency") or "").strip(),
+            "startDate": start,
+            "endDate": end,
+        }
+        key = (
+            record["ticker"],
+            record["exchange"],
+            record["assetType"],
+            record["priceCurrency"],
+            record["startDate"],
+            record["endDate"],
+        )
+        normalized[key] = record
+    return [normalized[key] for key in sorted(normalized)]
+
+
 class IdentityBootstrapClient(Protocol):
     def supported_tickers(
         self, tickers: Collection[str] | None = None

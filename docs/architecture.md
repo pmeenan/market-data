@@ -222,6 +222,12 @@ Identity and ingestion metadata:
   interrupted responses retain the larger reservation, while an orderly
   transport failure before any response exists settles to the known zero-byte
   body. A crashed/unsettled attempt always retains its reservation.
+- backfill-program state: one immutable ordered component declaration, frozen
+  seed and Tiingo-supported US stock/ETF scopes (including the exact archive
+  rows behind the latter), designated history job ids, and a per-component
+  identity cursor. Program state distinguishes a missing predecessor from a
+  terminal predecessor with accepted exclusions; phase-2/3 jobs outside the
+  declaration fail closed.
 
 Research metadata follows D-016:
 
@@ -365,6 +371,16 @@ turn begins.
 Responses are capped while streaming; an undeclared oversized body is charged,
 checkpointed as a durable range blocker, and is not downloaded again on every
 automatic resume.
+
+The production D-027 driver owns phase advancement above individual history
+jobs. Each invocation performs one bounded action: freeze a missing scope,
+prepare one identity batch, or run a bounded prefix of the current component's
+breadth-first sweep. Phase 2 uses one persisted Tiingo supported-tickers
+snapshot rather than the seed-universe CLI default; phase 3 cannot reuse hourly
+identity evidence. A component is admitted only after its complete frozen
+scope has exact-dataset identity classifications, and every declared lower
+component is terminal. `blocked` is terminal with exclusions, while a missing,
+active, or cancelled designated predecessor is not completion.
 
 ## Query, calendar, and quality contracts
 

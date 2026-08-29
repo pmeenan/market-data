@@ -56,7 +56,9 @@ job and completes at most its current breadth-first sweep.
 Each eligible stable instrument gets one maximum-safe request unit before any
 peer deepens; `--max-units` can stop even earlier, and `--job-id` names an
 explicit rerunnable job. `--phase 1|2|3` applies D-011's dataset and predecessor
-gates. An omitted `--end` is frozen when the job is first created, so the same
+gates. Production phase-2/3 jobs must also be designated by a durable D-027
+program; a missing predecessor or an ad hoc later-phase job fails closed. An
+omitted `--end` is frozen when the job is first created, so the same
 command still resolves to that job on later days. Re-run an active job to
 continue the next sweep. Terminal ranges remain dormant on routine timer and
 manual invocations; after repairing or reviewing their evidence,
@@ -137,17 +139,25 @@ market-data identity repair-eod-episodes --apply \
   --summary-json data/operations/eod-episode-repair-applied.json
 ```
 
-The target server resumes the frozen, post-repair phase-1 seed EOD job every 15
-minutes and the independently validated seed hourly job every 30 minutes with
-the user-systemd templates in `deploy/systemd/`. Each invocation runs one
-unfinished breadth-first sweep and exits cleanly at a quota boundary. Atomic
-status is written to `data/operations/phase1-eod-episodes-v3-status.json` and
-`data/operations/phase1-hourly-v1-status.json`. Exit 1 is accepted because
-unresolved identity ranges remain visible while validated peers make progress;
-the JSON retains blocked and failed details. Coordinator failures receive up
-to three two-minute retries. For this personal deployment that bounded status
-plus the nonzero service result is the required failure signal; wiring email
-later is optional.
+The target server uses one D-027 user-systemd program timer instead of fixed
+per-phase timers. The one-time initialization adopts the exact terminal phase-1
+jobs and freezes the seed scope:
+
+```bash
+market-data backfill program-init
+```
+
+Each `program-step` invocation then performs one bounded durable action: freeze
+the phase-2 Tiingo-supported US stock/ETF archive scope, prepare at most 250
+identities, or advance at most 500 historical instrument turns. Phase 2 cannot
+fall back to the 5,403-ticker seed CLI default, and phase 3 cannot begin until
+phase 2 is terminal and the complete seed cohort has independent five-minute
+identity classifications. Inspect without API calls or durable mutation using
+`market-data backfill program-status`. The timer atomically writes bounded
+status to `data/operations/backfill-program-v1-status.json`; exit 1 represents
+durable per-symbol exclusions, while coordinator failures receive up to three
+two-minute retries. Current collection retains its independent priority and
+budget.
 
 The nightly current-EOD timer runs at 23:30 UTC Monday through Friday. Its
 single locked command first refreshes exact EOD identity evidence for the latest
@@ -168,12 +178,12 @@ enabled so it continues after logout. Reinstall changed templates with:
 
 ```bash
 install -Dm0644 -t ~/.config/systemd/user \
-  deploy/systemd/market-data-phase1-eod.* \
-  deploy/systemd/market-data-phase1-hourly.* \
+  deploy/systemd/market-data-backfill-program.* \
   deploy/systemd/market-data-current-eod.*
 systemctl --user daemon-reload
-systemctl --user enable --now market-data-phase1-eod.timer
-systemctl --user enable --now market-data-phase1-hourly.timer
+systemctl --user disable --now \
+  market-data-phase1-eod.timer market-data-phase1-hourly.timer
+systemctl --user enable --now market-data-backfill-program.timer
 systemctl --user enable --now market-data-current-eod.timer
 loginctl enable-linger "$USER"
 ```
@@ -350,18 +360,18 @@ study)** are in progress. M2's
 cap-safe intraday request planner, XNYS calendar/session-label surface, and
 structured quality/gating layer are implemented, as are durable request-budget
 accounting, current-first breadth-first history scheduling, and shared process
-locking. The phase-1 seed EOD pass fetched 282 additional histories, and the
-live D-023 repair now represents 62 reused symbols as 125 inferred episodes;
-an aligned EOD job remains scheduled for honest blockers. Exact-frequency IEX
-probes validated 4,316 hourly segments while retaining empty, overlapping, and
-missing-alias exclusions, and the phase-1 hourly backfill is now scheduled. A
-bounded-status nightly current-EOD timer is installed; two actual post-market
-timer runs remain. External failure notification is optional for this personal
-deployment.
+locking. The terminal phase-1 jobs fetched 282 additional EOD histories,
+represent 62 reused symbols as 125 inferred episodes, and validated 4,316
+exact-frequency hourly IEX segments while retaining honest exclusions. The
+enabled D-027 program timer has replaced both fixed phase-1 timers, frozen an
+immutable 23,078-instrument supported-US phase-2 cohort, and begun batched EOD
+identity preparation. A bounded-status nightly current-EOD timer is installed;
+two actual post-market timer runs remain. External failure notification is
+optional for this personal deployment.
 M1 closed on
 2026-08-27 after its controlled EOD/IEX canary passed. Production ingestion is
 permitted only for validated segments; unresolved work remains fail-closed and
-visible. M3's immutable schema-v6 result catalog, input manifests/fingerprints,
+visible. M3's immutable result catalog, input manifests/fingerprints,
 strict compatible-result loading, and explicit interrupted-run reconciliation
 are implemented; the event runner and first study are next.
 

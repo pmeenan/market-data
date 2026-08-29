@@ -123,13 +123,14 @@ study)** are in progress. Cap-safe
 next-session IEX planning and the XNYS session-label surface are implemented;
 structured quality findings, consumer-declared gates, durable request budgets,
 current-first breadth-first scheduling, and shared data-directory mutation
-locking are also implemented. The phase-1 seed EOD backfill is running through
-an aligned user-systemd timer after fetching 282 additional histories and
-repairing 62 reused symbols into 125 inferred episodes. Exact-frequency probes
-validated 4,316 hourly IEX segments, and a restart-tested phase-1 hourly
-user-systemd backfill is running. A bounded-status nightly current-EOD timer is
-installed; two actual post-market runs remain. External failure notification is
-optional for this personal deployment.
+locking are also implemented. The terminal phase-1 seed jobs fetched 282 EOD
+histories, repaired 62 reused symbols into 125 inferred episodes, and validated
+4,316 exact-frequency hourly IEX segments. D-027's enabled program timer has
+replaced both fixed phase-1 timers, frozen an immutable 23,078-instrument
+supported-US phase-2 cohort, and begun its batched EOD identity preparation. A
+bounded-status nightly current-EOD timer is installed; two actual post-market
+runs remain. External failure notification is optional for this personal
+deployment.
 M1 closed on 2026-08-27. Production ingestion is permitted only for validated
 request segments; unresolved work remains fail-closed. M3's D-016 result
 catalog, immutable artifact publication, input fingerprints, and compatible

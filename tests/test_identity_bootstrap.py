@@ -12,6 +12,7 @@ from marketdata.identity_bootstrap import (
     _instrument_id,
     bootstrap_eod_identities,
     bootstrap_intraday_identities,
+    supported_us_stock_etf_records,
 )
 from marketdata.scheduler import BudgetPolicy
 from marketdata.store import MetaStore
@@ -112,6 +113,17 @@ def _metadata(row, **overrides):
     }
     result.update(overrides)
     return result
+
+
+def test_supported_snapshot_retains_currency_variants_deterministically():
+    usd = _archive("DUAL")
+    unspecified = usd | {"priceCurrency": ""}
+
+    forward = supported_us_stock_etf_records([usd, unspecified, usd])
+    reverse = supported_us_stock_etf_records([unspecified, usd, unspecified])
+
+    assert forward == reverse
+    assert [row["priceCurrency"] for row in forward] == ["", "USD"]
 
 
 def test_bootstrap_validates_metadata_and_archive_bounded_reused_episodes(tmp_path):

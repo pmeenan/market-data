@@ -13,8 +13,17 @@ from typing import Any
 import click
 import duckdb
 import polars as pl
+import requests
 
 from marketdata import universe as universe_mod
+from marketdata.backfill_program import (
+    DEFAULT_PHASE1_EOD_JOB_ID,
+    DEFAULT_PHASE1_HOURLY_JOB_ID,
+    DEFAULT_PROGRAM_ID,
+    BackfillProgramStepResult,
+    initialize_default_backfill_program,
+    run_backfill_program_step,
+)
 from marketdata.calendar import max_intraday_probe_sessions
 from marketdata.config import Config, load_config
 from marketdata.identity import DATASET_KEYS
@@ -69,6 +78,7 @@ _DATA_OPERATION_ERRORS = (
     sqlite3.Error,
     duckdb.Error,
     pl.exceptions.PolarsError,
+    requests.RequestException,
     TiingoError,
 )
 _STATUS_DETAIL_LIMIT = 100
@@ -234,6 +244,15 @@ def _bounded_current_status(
     if identity_bootstrap is not None:
         payload["identity_bootstrap"] = _bounded_result(identity_bootstrap.to_dict())
         payload["ok"] = payload["ok"] and identity_bootstrap.ok
+    return payload
+
+
+def _bounded_program_status(result: BackfillProgramStepResult) -> dict[str, Any]:
+    payload = result.to_dict()
+    if payload["identity"] is not None:
+        payload["identity"] = _bounded_result(payload["identity"])
+    if payload["history"] is not None:
+        payload["history"] = _bounded_result(payload["history"])
     return payload
 
 
@@ -921,6 +940,151 @@ def backfill_cancel_cmd(config: Config, job_id: str) -> None:
     click.echo(f"Cancelled history job {job_id}")
 
 
+@backfill.command("program-init")
+@click.option("--program-id", default=DEFAULT_PROGRAM_ID, show_default=True)
+@click.option(
+    "--phase1-eod-job-id",
+    default=DEFAULT_PHASE1_EOD_JOB_ID,
+    show_default=True,
+)
+@click.option(
+    "--phase1-hourly-job-id",
+    default=DEFAULT_PHASE1_HOURLY_JOB_ID,
+    show_default=True,
+)
+@click.pass_obj
+def backfill_program_init_cmd(
+    config: Config,
+    program_id: str,
+    phase1_eod_job_id: str,
+    phase1_hourly_job_id: str,
+) -> None:
+    """Adopt terminal phase 1 and initialize the ordered backfill program."""
+    _require_initialized_warehouse(config)
+    try:
+        with MetaStore(config.meta_path) as meta:
+            _require_ingestion_ready(meta)
+            initialize_default_backfill_program(
+                meta,
+                program_id=program_id,
+                phase1_eod_job_id=phase1_eod_job_id,
+                phase1_hourly_job_id=phase1_hourly_job_id,
+            )
+            program = meta.backfill_program(program_id)
+            components = meta.backfill_program_components(program_id)
+    except _DATA_OPERATION_ERRORS as exc:
+        raise _IngestOperationalError(str(exc)) from exc
+    assert program is not None
+    click.echo(
+        f"Backfill program {program_id}: {program['status']}; "
+        f"{len(components)} ordered components"
+    )
+
+
+@backfill.command("program-step")
+@click.option("--program-id", default=DEFAULT_PROGRAM_ID, show_default=True)
+@click.option(
+    "--identity-batch-size",
+    type=click.IntRange(min=1),
+    default=250,
+    show_default=True,
+)
+@click.option(
+    "--max-units",
+    type=click.IntRange(min=1),
+    default=500,
+    show_default=True,
+    help="Maximum historical instrument turns after preparation is complete",
+)
+@click.option(
+    "--status-json",
+    type=click.Path(),
+    default=None,
+    help="Write a bounded replace-in-place program status record",
+)
+@click.pass_obj
+def backfill_program_step_cmd(
+    config: Config,
+    program_id: str,
+    identity_batch_size: int,
+    max_units: int,
+    status_json: str | None,
+) -> None:
+    """Advance one bounded preparation batch or historical sweep prefix."""
+    _require_initialized_warehouse(config)
+    try:
+        with MetaStore(config.meta_path) as meta:
+            _require_ingestion_ready(meta)
+            client = _operational_client(config)
+            result = run_backfill_program_step(
+                client,
+                BarStore(config.data_dir),
+                meta,
+                program_id=program_id,
+                identity_batch_size=identity_batch_size,
+                max_history_units=max_units,
+            )
+    except _DATA_OPERATION_ERRORS as exc:
+        _raise_ingest_error(exc, status_json, operational=True)
+    click.echo(
+        f"Backfill program {program_id}: {result.program_status}; "
+        f"action={result.action}"
+    )
+    if result.component_key is not None:
+        click.echo(
+            f"Component {result.component_key}: phase {result.phase} "
+            f"{result.dataset_key}; state={result.component_state}"
+        )
+    if result.identity_cursor is not None and result.cohort_count is not None:
+        click.echo(
+            f"Identity preparation: {result.identity_cursor}/{result.cohort_count}"
+        )
+    if result.history is not None:
+        click.echo(
+            f"History {result.history.job_id}: {result.history.job_status}; "
+            f"{result.history.attempted_units} attempted, "
+            f"{result.history.advanced_units} advanced"
+        )
+    if result.stop_reason:
+        click.echo(f"Program step stopped: {result.stop_reason}")
+    if status_json:
+        _write_ingest_json(_bounded_program_status(result), status_json)
+    if result.partial:
+        raise click.exceptions.Exit(1)
+
+
+@backfill.command("program-status")
+@click.option("--program-id", default=DEFAULT_PROGRAM_ID, show_default=True)
+@click.pass_obj
+def backfill_program_status_cmd(config: Config, program_id: str) -> None:
+    """Show persisted backfill-program state without API calls or mutation."""
+    _require_initialized_warehouse(config)
+    try:
+        with MetaStore(config.meta_path) as meta:
+            program = meta.backfill_program(program_id)
+            if program is None:
+                raise click.ClickException(f"unknown backfill program {program_id!r}")
+            components = meta.backfill_program_components(program_id)
+            scopes = {
+                str(row["scope_key"]): meta.backfill_program_scope(
+                    program_id, str(row["scope_key"])
+                )
+                for row in components
+            }
+    except _DATA_OPERATION_ERRORS as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Backfill program {program_id}: {program['status']}")
+    for component in components:
+        scope = scopes[str(component["scope_key"])]
+        cohort = int(scope["ticker_count"]) if scope is not None else 0
+        click.echo(
+            f"  {component['component_key']}: phase {component['phase']} "
+            f"{component['dataset_key']} {component['state']}; "
+            f"identity={component['identity_status']} "
+            f"{component['identity_cursor']}/{cohort}; job={component['job_id']}"
+        )
+
+
 @main.command()
 @_with_ticker_opts
 @click.option(
@@ -1282,6 +1446,25 @@ def status(config: Config) -> None:
         if cov:
             oldest_edge = min(last for _, last in cov.values())
             click.echo(f"Oldest EOD coverage edge: {oldest_edge}")
+        for program in meta.backfill_programs():
+            components = meta.backfill_program_components(str(program["program_id"]))
+            current = next(
+                (
+                    row
+                    for row in components
+                    if str(row["state"]) not in {"complete", "blocked"}
+                ),
+                None,
+            )
+            position = (
+                "terminal"
+                if current is None
+                else f"{current['component_key']} ({current['state']})"
+            )
+            click.echo(
+                f"Backfill program {program['program_id']}: {program['status']}; "
+                f"current={position}"
+            )
         now = datetime.now(UTC)
         usage = meta.request_usage(
             now=now, rolling_days=DEFAULT_BUDGET_POLICY.rolling_days

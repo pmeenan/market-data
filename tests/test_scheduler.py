@@ -7,6 +7,7 @@ from datetime import UTC, date, datetime, timedelta
 import pytest
 
 import marketdata.scheduler as scheduler_mod
+from marketdata.backfill_program import sync_backfill_program
 from marketdata.locking import LOCK_FILE_NAME
 from marketdata.scheduler import (
     BudgetExhausted,
@@ -117,6 +118,49 @@ def _same_bucket_ids() -> tuple[str, str]:
             return seen[bucket], instrument_id
         seen[bucket] = instrument_id
     raise AssertionError("could not find a deterministic bucket collision")
+
+
+def _register_two_phase_program(meta, start, end, phase1_job, phase2_job):
+    meta.create_backfill_program(
+        program_id="test-program",
+        definition_hash="a" * 64,
+        components=[
+            {
+                "component_key": "phase1",
+                "component_ordinal": 10,
+                "phase": 1,
+                "dataset_key": "intraday_1hour",
+                "scope_key": "seed",
+                "start": start,
+                "end": end,
+                "job_id": phase1_job,
+            },
+            {
+                "component_key": "phase2",
+                "component_ordinal": 20,
+                "phase": 2,
+                "dataset_key": "eod",
+                "scope_key": "all",
+                "start": start,
+                "end": end,
+                "job_id": phase2_job,
+            },
+        ],
+    )
+    for scope_key in ("seed", "all"):
+        meta.freeze_backfill_program_scope(
+            program_id="test-program",
+            scope_key=scope_key,
+            source_kind="seed_universes",
+            tickers=["A"],
+        )
+    meta.advance_backfill_program_identity(
+        program_id="test-program",
+        component_key="phase2",
+        cursor=1,
+        prepared=True,
+        stop_reason=None,
+    )
 
 
 def test_scheduler_resumes_unvisited_remainder_before_any_target_deepens(tmp_path):
@@ -523,10 +567,12 @@ def test_terminal_identity_blocker_does_not_hold_later_phase_forever(tmp_path):
             start=start,
             end=end,
         )
+        _register_two_phase_program(meta, start, end, "blocked-phase-1", "phase-2")
 
         blocked = run_history_sweep(
             FakeIntraday(), BarStore(data_dir), meta, "blocked-phase-1"
         )
+        sync_backfill_program(meta, "test-program")
         later = run_history_sweep(FakeIntraday(), BarStore(data_dir), meta, "phase-2")
 
         assert blocked.job_status == "blocked"
@@ -847,6 +893,8 @@ def test_later_phase_cannot_run_while_an_earlier_phase_is_active(tmp_path):
             start=start,
             end=end,
         )
+        _register_two_phase_program(meta, start, end, "phase-1-hourly", "phase-2-eod")
+        sync_backfill_program(meta, "test-program")
         client = FakeIntraday()
         result = run_history_sweep(client, BarStore(data_dir), meta, "phase-2-eod")
 

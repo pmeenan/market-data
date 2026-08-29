@@ -29,6 +29,76 @@ def test_backfill_help_makes_terminal_retries_explicit():
     assert "--retry-blocked" in intraday.output
 
 
+def test_backfill_program_commands_expose_bounded_turn_controls():
+    runner = CliRunner()
+
+    step = runner.invoke(main, ["backfill", "program-step", "--help"])
+    initialize = runner.invoke(main, ["backfill", "program-init", "--help"])
+
+    assert step.exit_code == initialize.exit_code == 0
+    assert "--identity-batch-size" in step.output
+    assert "--max-units" in step.output
+    assert "--status-json" in step.output
+    assert "--phase1-eod-job-id" in initialize.output
+
+
+def test_backfill_program_status_is_read_only_under_mutation_lock(tmp_path):
+    from marketdata.store import MetaStore
+
+    data_dir = tmp_path / "data"
+    with MetaStore(data_dir / "meta.db") as meta:
+        meta.activate_canonical_generation()
+        meta.create_backfill_program(
+            program_id="status-test",
+            definition_hash="a" * 64,
+            components=[
+                {
+                    "component_key": "phase1",
+                    "component_ordinal": 10,
+                    "phase": 1,
+                    "dataset_key": "eod",
+                    "scope_key": "seed",
+                    "start": date(2024, 1, 1),
+                    "end": date(2024, 1, 31),
+                    "job_id": "status-phase1",
+                }
+            ],
+        )
+        meta.freeze_backfill_program_scope(
+            program_id="status-test",
+            scope_key="seed",
+            source_kind="seed_universes",
+            tickers=["AAPL"],
+        )
+        before = (
+            meta.backfill_program("status-test")["updated_at"],
+            meta.backfill_program_component("status-test", "phase1")["updated_at"],
+        )
+
+    with _external_lock(data_dir):
+        result = CliRunner().invoke(
+            main,
+            [
+                "--data-dir",
+                str(data_dir),
+                "backfill",
+                "program-status",
+                "--program-id",
+                "status-test",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "Backfill program status-test: active" in result.output
+    assert "identity=pending 0/1" in result.output
+    with MetaStore(data_dir / "meta.db") as meta:
+        after = (
+            meta.backfill_program("status-test")["updated_at"],
+            meta.backfill_program_component("status-test", "phase1")["updated_at"],
+        )
+    assert after == before
+
+
 def test_status_headroom_includes_next_request_reservation(tmp_path, monkeypatch):
     from datetime import UTC, datetime
 
@@ -919,7 +989,7 @@ def test_mutation_lock_contention_is_nonzero_and_machine_readable(
         assert meta.history_job("cancel-during-lock")["cancelled"] == 1
 
 
-def test_backfill_cancel_releases_phase_gate_without_deleting_audit_state(tmp_path):
+def test_backfill_cancel_keeps_audit_state(tmp_path):
     from marketdata.scheduler import initialize_history_job
     from marketdata.store import MetaStore
 
@@ -949,7 +1019,6 @@ def test_backfill_cancel_releases_phase_gate_without_deleting_audit_state(tmp_pa
     with MetaStore(data_dir / "meta.db") as meta:
         assert meta.history_job("obsolete-phase-1")["status"] == "blocked"
         assert meta.history_job("obsolete-phase-1")["cancelled"] == 1
-        assert meta.active_lower_phase_jobs(2) == []
 
 
 def test_reconcile_command(tmp_path, monkeypatch):

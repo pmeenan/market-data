@@ -284,17 +284,21 @@ Scope:
   failures as explicit fail-closed work. The safe EOD pass fetched 282
   additional histories with no failures. D-023 then repaired 62 covered broad
   histories into 125 inferred episodes; the final scan has zero structural or
-  OHLC errors. An aligned 15-minute user-systemd EOD job retains the unresolved
-  ranges. A weekday 23:30 UTC user-systemd current-EOD job is now installed and
+  OHLC errors. A weekday 23:30 UTC user-systemd current-EOD job is installed and
   enabled; it refreshes latest-universe EOD identity evidence and writes a
   bounded atomic status before returning exit 1 for per-symbol identity/vendor
   exclusions, exit 0 for quota stops, or retryable exit 2 for coordinator,
   configuration, lock, and report-publication failure. D-024's independently
   metered hourly bootstrap then validated 4,316 exact-frequency IEX segments;
   399 empty probes, 111 alias-overlap spans, 666 missing-alias tickers, and 274
-  pre-IEX tickers remain explicit exclusions. A 30-minute user-systemd hourly
-  job now resumes the frozen phase-1 cohort. All three scheduled services retry
-  exit 2 up to three times at two-minute intervals.
+  pre-IEX tickers remain explicit exclusions. D-027's schema-v7 ordered program
+  then replaced the two fixed phase-1 timers: it adopts those exact terminal
+  jobs, freezes a full supported-US phase-2 scope, batches dataset-specific
+  identity preparation, and admits only registered later-phase jobs after every
+  declared predecessor is terminal. The program and current-update services
+  retry exit 2 up to three times at two-minute intervals. The live coordinator
+  is enabled, has frozen 23,078 supported-US instruments, and is advancing
+  phase-2 EOD identity batches on its five-minute cadence.
 
 Exit criteria:
 
@@ -341,7 +345,7 @@ Exit criteria:
   4.9 KB status. The first two actual timer-triggered post-market runs remain,
   so this criterion stays unchecked. The scheduler/status checkpoint passed
   `make check` with 188 tests before the phase-1 bootstrap work landed.
-- [x] Phase 1 is running through the persisted scheduler, its coverage and budget
+- [x] Phase 1 ran through the persisted scheduler, its coverage and budget
   state survive restart, and `make check` passes.
   Seed EOD made its safe persisted pass on 2026-08-28 (282 fetched, zero
   failed), survived cancellation/restart during review, and now resumes an
@@ -350,8 +354,9 @@ Exit criteria:
   cursor 41; the interrupted request retained its conservative reservation and
   claimed no coverage. Restarting the same job resumed past cursor 59 and 52
   covered instruments, proving persisted cohort, coverage, and budget state
-  survive the process boundary. The timer remains enabled and the full
-  `make check` passes.
+  survive the process boundary. Both components are now terminal with durable
+  exclusions and have been adopted by D-027; the replacement program's offline
+  restart/scope/ordering fixtures pass in the 229-test full `make check`.
 
 ## M3 — First persisted study, end to end  `in progress`
 
@@ -424,6 +429,12 @@ Scope:
   phase 3 (seed five-minute history back to 2016-12-12). Begin forward-only
   all-ticker current five-minute collection no later than phase 3, as required
   by D-013.
+  D-027 now persists the four ordered components, rejects missing or ad hoc
+  predecessors, freezes the vendor archive behind phase 2, and batches identity
+  and history turns through one systemd driver. Phase 1 is terminal with
+  exclusions; the enabled live driver froze 23,078 phase-2 instruments and is
+  advancing their EOD identity batches. The remaining phase-2/3 transfer and
+  ongoing-current expansion keep this item open.
 - [ ] Extend the gap study with exchange-calendar-filtered five-minute observations
   for the opening half-hour and other session-relative windows. Retain direct
   hourly results as their own vendor-frequency checkpoints; do not relabel them

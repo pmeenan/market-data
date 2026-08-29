@@ -374,6 +374,23 @@ def resolve_history_job(
         if existing is not None
         else date.today()
     )
+    if phase is not None and phase > 1:
+        request_payload = _history_request_payload(
+            dataset_key,
+            tickers,
+            start,
+            frozen_end,
+            phase=phase,
+            force=force,
+        )
+        request_hash = hashlib.sha256(
+            canonical_json(request_payload).encode()
+        ).hexdigest()
+        stop_reason = meta.backfill_program_prerequisite_stop_reason(
+            durable_job_id, phase, request_hash=request_hash
+        )
+        if stop_reason is not None:
+            raise ValueError(f"history phase {phase} is not admitted: {stop_reason}")
     initialize_history_job(
         meta,
         job_id=durable_job_id,
@@ -669,10 +686,11 @@ def run_history_sweep(
             sweep_started=started_sweep,
             sweep_ended=started_sweep,
         )
-        if job["phase"] is not None:
-            predecessors = meta.active_lower_phase_jobs(int(job["phase"]))
-            if predecessors:
-                report.stop_reason = "phase_predecessor_active"
+        if job["phase"] is not None and int(job["phase"]) > 1:
+            report.stop_reason = meta.backfill_program_prerequisite_stop_reason(
+                job_id, int(job["phase"])
+            )
+            if report.stop_reason is not None:
                 return report
         if job["status"] != "active":
             _add_static_blockers(meta, job_id, report.ingest)
@@ -731,9 +749,12 @@ def _run_history_turn(
     report.sweep_ended = int(job["sweep"])
     if report.job_status != "active":
         return False
-    if job["phase"] is not None and meta.active_lower_phase_jobs(int(job["phase"])):
-        report.stop_reason = "phase_predecessor_active"
-        return False
+    if job["phase"] is not None and int(job["phase"]) > 1:
+        report.stop_reason = meta.backfill_program_prerequisite_stop_reason(
+            job_id, int(job["phase"])
+        )
+        if report.stop_reason is not None:
+            return False
 
     cursor = int(job["cursor"])
     target = targets[cursor]

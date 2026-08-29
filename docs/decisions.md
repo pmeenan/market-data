@@ -25,6 +25,47 @@ Decision / Context / Consequences / Reopen if
 
 ---
 
+## D-027: One durable program owns ordered phase advancement  (2026-08-29, status: accepted, amends D-011, D-020, D-024, and D-026)
+
+**Decision:** The production historical program declares its required
+phase/dataset components, immutable job ids, request ranges, and frozen cohort
+scopes in SQLite. Phase 1 adopts the exact seed EOD and hourly jobs already
+run; phase 2 freezes one full Tiingo supported-tickers snapshot filtered to US
+stocks/ETFs; phase 3 reuses the frozen seed scope. A missing phase or an
+unregistered phase-2/3 job never satisfies ordering. Every designated lower
+component must be terminal `complete` or non-cancelled `blocked`; D-026's
+accepted exclusions still release the next phase.
+
+One user-systemd driver invokes a bounded program step rather than fixed
+per-phase jobs. It freezes a missing scope, advances a persisted identity
+cursor over a bounded ticker batch, or resumes a bounded history sweep prefix.
+Exact-dataset identity preparation must cover the full frozen cohort before
+its job is created. The all-ticker archive snapshot is stored once so retries
+cannot drift with a later vendor download, and five-minute probes remain
+independent from hourly evidence under D-024.
+
+**Context:** The phase-1 timers correctly reached terminal blockers but kept
+rerunning those fixed job ids. The scheduler enforced ordering only against
+lower-phase jobs that happened to exist and remain active, so it neither
+created phase 2 nor prevented a missing phase 2 from being mistaken for no
+predecessor. Phase 2 also needs a broader vendor cohort than the CLI's default
+seed-universe scope, while phase 3 starts with no five-minute identity evidence.
+
+**Consequences:** Schema v7 adds program components, scopes, ticker membership,
+the frozen supported-list records, and an identity preparation cursor. Direct
+phase-2/3 history jobs must be registered to a program. Preparation and
+history remain idempotent, budgeted, and restartable; batching yields the
+shared lock between services. The obsolete phase-1 timers are replaced by the
+program timer, whose bounded status identifies the current component and
+action without logging every exclusion.
+
+**Reopen if:** The program gains independent vendor accounts or concurrently
+scheduled phase branches, Tiingo supplies a durable security master that
+supersedes the frozen archive, or a workflow engine replaces the single-server
+SQLite/systemd coordinator while preserving the same ordering and audit trail.
+
+---
+
 ## D-026: Study eligibility is local-window and decision-time causal  (2026-08-29, status: accepted, amends D-010, D-015, D-020, and D-024)
 
 **Decision:** Event studies decide eligibility for each instrument at each

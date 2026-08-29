@@ -5,12 +5,12 @@ from marketdata.identity import ACTIVE_ALIAS_END
 from marketdata.store.meta import MetaStore
 
 
-def test_schema_v6_migration_is_durable_and_reopenable(tmp_path):
+def test_schema_v7_migration_is_durable_and_reopenable(tmp_path):
     path = tmp_path / "meta.db"
     with MetaStore(path):
         pass
     with sqlite3.connect(path) as con:
-        assert con.execute("PRAGMA user_version").fetchone()[0] == 6
+        assert con.execute("PRAGMA user_version").fetchone()[0] == 7
     with MetaStore(path) as meta:
         assert meta.research_runs() == []
 
@@ -211,7 +211,7 @@ def test_migration_from_v0(tmp_path):
         }
         assert "watermarks" not in tables
         assert "coverage" in tables
-        assert meta._con.execute("PRAGMA user_version").fetchone()[0] == 6
+        assert meta._con.execute("PRAGMA user_version").fetchone()[0] == 7
         assert "ticker_coverage_v1" in tables
 
 
@@ -237,7 +237,7 @@ def test_migration_from_v1_preserves_existing_universe(tmp_path):
 
     with MetaStore(path) as meta:
         assert [row["ticker"] for row in meta.universe(2025)] == ["AAPL"]
-        assert meta._con.execute("PRAGMA user_version").fetchone()[0] == 6
+        assert meta._con.execute("PRAGMA user_version").fetchone()[0] == 7
         assert (
             meta._con.execute(
                 "SELECT COUNT(*) FROM sqlite_master WHERE name = 'instruments'"
