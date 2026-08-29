@@ -48,13 +48,33 @@ def test_research_run_ids_are_normalized_across_lifecycle_calls(tmp_path):
         assert meta.research_run(" padded-run ")["status"] == "succeeded"
 
 
-def test_research_run_selection_checks_sqlite_variable_limit(tmp_path):
-    import pytest
-
+def test_research_run_selection_chunks_across_sqlite_variable_limit(tmp_path):
     with MetaStore(tmp_path / "meta.db") as meta:
+        for ordinal in range(4):
+            run_id = f"run-{ordinal}"
+            meta.create_research_run(
+                run_id=run_id,
+                study_name="fixture-study",
+                study_schema_version=1,
+                parameters={},
+            )
+            meta.succeed_research_run(
+                run_id=run_id,
+                input_fingerprint=str(ordinal) * 64,
+                observation_path=f"results/fixture-study/{run_id}/observations.parquet",
+                manifest_path=f"results/fixture-study/{run_id}/input_files.parquet",
+                observation_count=0,
+                metrics=[],
+            )
         meta._con.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 3)
-        with pytest.raises(ValueError, match="at most 3"):
-            meta.select_research_artifacts(["one", "two", "three", "four"])
+        rows = meta.select_research_artifacts(["run-3", "run-1", "run-0", "run-2"])
+
+    assert [row["run_id"] for row in rows] == [
+        "run-3",
+        "run-1",
+        "run-0",
+        "run-2",
+    ]
 
 
 def test_inflight_schema_v4_gets_additive_scheduler_columns(tmp_path):

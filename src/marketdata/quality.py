@@ -174,8 +174,14 @@ def check_quality(
     start: date | str | None = None,
     end: date | str | None = None,
     zero_volume_run_length: int = DEFAULT_ZERO_VOLUME_RUN_LENGTH,
+    empty_row_checks_are_run: bool = False,
 ) -> QualityReport:
-    """Scan canonical stored bars and return structured, non-repairing findings."""
+    """Scan canonical bars and return structured, non-repairing findings.
+
+    ``empty_row_checks_are_run`` is for consumers whose explicit empty scope
+    makes row predicates vacuously complete. Coverage/subject checks retain
+    their ordinary fail-closed behavior.
+    """
     normalized_datasets = _normalize_dataset_keys(dataset_keys)
     normalized_ids = _normalize_instrument_ids(instrument_ids)
     start_date = _as_date(start)
@@ -227,7 +233,11 @@ def check_quality(
                     zero_volume_run_length,
                 )
                 for spec in _CHECK_SPECS:
-                    if dataset_key not in spec.datasets or not _eligible(spec, context):
+                    if dataset_key not in spec.datasets:
+                        continue
+                    if not _eligible(spec, context):
+                        if empty_row_checks_are_run and spec.requirement == "rows":
+                            checks_run_by_dataset[dataset_key].add(spec.check)
                         continue
                     findings.extend(spec.runner(context))
                     checks_run_by_dataset[dataset_key].add(spec.check)
@@ -1016,4 +1026,7 @@ _CHECK_SPECS: tuple[_CheckSpec, ...] = (
     ),
 )
 QUALITY_CHECKS: tuple[QualityCheck, ...] = tuple(spec.check for spec in _CHECK_SPECS)
+NONLOCAL_EVENT_GATE_CHECKS: tuple[QualityCheck, ...] = tuple(
+    spec.check for spec in _CHECK_SPECS if spec.requirement != "rows"
+)
 _CHECK_ORDER = {check: index for index, check in enumerate(QUALITY_CHECKS)}

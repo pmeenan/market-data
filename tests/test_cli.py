@@ -161,6 +161,80 @@ def test_research_reconcile_cli_is_dry_run_unless_apply_is_explicit(tmp_path):
         assert meta.research_run("abandoned")["status"] == "failed"
 
 
+def test_research_run_cli_dispatches_json_to_the_library_boundary(
+    tmp_path, monkeypatch
+):
+    from marketdata.research import PublishedResearchRun
+    from marketdata.store import MetaStore
+
+    data_dir = tmp_path / "data"
+    with MetaStore(data_dir / "meta.db") as meta:
+        meta.activate_canonical_generation()
+    seen = {}
+
+    def run(config, study_name, parameters):
+        seen.update(
+            data_dir=config.data_dir,
+            study_name=study_name,
+            parameters=parameters,
+        )
+        return PublishedResearchRun(
+            run_id="fixture-run",
+            study_name=study_name,
+            study_schema_version=1,
+            input_fingerprint="a" * 64,
+            observation_count=7,
+            observation_path=data_dir / "observations.parquet",
+            manifest_path=data_dir / "input_files.parquet",
+        )
+
+    monkeypatch.setattr(cli_mod, "run_registered_event_study", run)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "--data-dir",
+            str(data_dir),
+            "research-run",
+            "gap-recovery",
+            "--parameters-json",
+            '{"gap_threshold":-0.05,"enabled":true}',
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert seen == {
+        "data_dir": data_dir,
+        "study_name": "gap-recovery",
+        "parameters": {"gap_threshold": -0.05, "enabled": True},
+    }
+    assert "7 observations" in result.output
+    assert "no portfolio or order simulation" in result.output
+
+
+def test_research_run_cli_rejects_non_object_parameters(tmp_path):
+    from marketdata.store import MetaStore
+
+    data_dir = tmp_path / "data"
+    with MetaStore(data_dir / "meta.db") as meta:
+        meta.activate_canonical_generation()
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "--data-dir",
+            str(data_dir),
+            "research-run",
+            "gap-recovery",
+            "--parameters-json",
+            "[]",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "must decode to a JSON object" in result.output
+
+
 @contextmanager
 def _external_lock(data_dir):
     script = """

@@ -15,7 +15,7 @@ import hashlib
 import json
 import math
 import sqlite3
-from collections.abc import Collection, Mapping
+from collections.abc import Collection, Mapping, Sequence
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -776,6 +776,38 @@ class MetaStore:
             (instrument_id,),
         ).fetchall()
 
+    def instrument_aliases_for_instruments(
+        self, instrument_ids: Collection[str]
+    ) -> list[sqlite3.Row]:
+        """Return alias envelopes for an explicit stable-instrument cohort."""
+        selected = tuple(
+            sorted(
+                {
+                    instrument_id.strip()
+                    for instrument_id in instrument_ids
+                    if instrument_id.strip()
+                }
+            )
+        )
+        if not selected:
+            return []
+        rows = _select_in_chunks(
+            self._con,
+            """SELECT instrument_id, ticker, start_date, end_date
+                 FROM instrument_aliases
+                WHERE instrument_id IN ({placeholders})""",
+            selected,
+        )
+        return sorted(
+            rows,
+            key=lambda row: (
+                str(row["instrument_id"]),
+                str(row["start_date"]),
+                str(row["end_date"]),
+                str(row["ticker"]),
+            ),
+        )
+
     def identity_aliases(self, tickers: Collection[str]) -> list[sqlite3.Row]:
         """Return stable alias envelopes for a normalized ticker cohort."""
         normalized = sorted(
@@ -783,16 +815,23 @@ class MetaStore:
         )
         if not normalized:
             return []
-        placeholders = ",".join("?" for _ in normalized)
-        return self._con.execute(
-            f"""SELECT a.instrument_id, a.ticker, a.exchange, a.asset_type,
-                       a.start_date, a.end_date, a.evidence AS alias_evidence
-                  FROM instrument_aliases AS a
-                 WHERE a.ticker IN ({placeholders})
-                 ORDER BY a.ticker, a.start_date, a.end_date, a.instrument_id,
-                          a.alias_id""",
+        rows = _select_in_chunks(
+            self._con,
+            """SELECT a.instrument_id, a.ticker, a.exchange, a.asset_type,
+                      a.start_date, a.end_date, a.evidence AS alias_evidence
+                 FROM instrument_aliases AS a
+                WHERE a.ticker IN ({placeholders})""",
             normalized,
-        ).fetchall()
+        )
+        return sorted(
+            rows,
+            key=lambda row: (
+                str(row["ticker"]),
+                str(row["start_date"]),
+                str(row["end_date"]),
+                str(row["instrument_id"]),
+            ),
+        )
 
     def record_identity_episode(
         self,
@@ -2005,17 +2044,11 @@ class MetaStore:
         selected = tuple(dict.fromkeys(_research_run_id(run_id) for run_id in run_ids))
         if not selected:
             raise ValueError("at least one run_id is required")
-        variable_limit = self._con.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER)
-        if len(selected) > variable_limit:
-            raise ValueError(
-                f"at most {variable_limit} research run_ids may be selected"
-            )
-        placeholders = ",".join("?" for _ in selected)
-        rows = self._con.execute(
-            f"""SELECT * FROM research_runs
-                WHERE run_id IN ({placeholders})""",
+        rows = _select_in_chunks(
+            self._con,
+            "SELECT * FROM research_runs WHERE run_id IN ({placeholders})",
             selected,
-        ).fetchall()
+        )
         by_id = {str(row["run_id"]): row for row in rows}
         missing = sorted(set(selected) - by_id.keys())
         if missing:
@@ -2925,6 +2958,25 @@ def _utc_timestamp(value: datetime) -> str:
     if value.tzinfo is None:
         raise ValueError("timestamps must be timezone-aware")
     return value.astimezone(UTC).isoformat(timespec="microseconds")
+
+
+def _select_in_chunks(
+    con: sqlite3.Connection, query: str, values: Sequence[Any]
+) -> list[sqlite3.Row]:
+    """Execute one single-column IN query without exceeding SQLite's limit."""
+    if "{placeholders}" not in query:
+        raise ValueError("chunked IN query lacks the placeholders marker")
+    variable_limit = con.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER)
+    rows: list[sqlite3.Row] = []
+    for offset in range(0, len(values), variable_limit):
+        chunk = values[offset : offset + variable_limit]
+        placeholders = ",".join("?" for _ in chunk)
+        rows.extend(
+            con.execute(
+                query.format(placeholders=placeholders), tuple(chunk)
+            ).fetchall()
+        )
+    return rows
 
 
 def _now() -> str:

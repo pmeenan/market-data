@@ -8,7 +8,7 @@ and to select/label regular-session bars for research.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from functools import lru_cache
 
 import exchange_calendars as xcals
@@ -172,6 +172,50 @@ def label_intraday_sessions(frame: pl.DataFrame, *, freq: str) -> pl.DataFrame:
     return labelled.filter(valid).with_columns(
         pl.lit(_BAR_LABEL_SEMANTICS[freq]).alias("bar_label_semantics")
     )
+
+
+def expected_intraday_labels(
+    start: datetime, end: datetime, *, freq: str
+) -> pl.DataFrame:
+    """Enumerate exact regular-session labels in one inclusive UTC span."""
+    require_intraday_freq(freq)
+    if start.tzinfo is None or end.tzinfo is None:
+        raise ValueError("intraday label bounds must be timezone-aware")
+    start = start.astimezone(UTC)
+    end = end.astimezone(UTC)
+    if start > end:
+        raise ValueError("intraday label start must not be after end")
+    schedule = session_schedule(start.date(), end.date())
+    schema = {"ts": pl.Datetime("us", "UTC")}
+    if schedule.is_empty():
+        return pl.DataFrame(schema=schema)
+
+    bar_minutes = _BAR_MINUTES[freq]
+    if freq == "1hour":
+        first_label = pl.datetime(
+            pl.col("session_date").dt.year(),
+            pl.col("session_date").dt.month(),
+            pl.col("session_date").dt.day(),
+            hour=10,
+            time_zone="America/New_York",
+        ).dt.convert_time_zone("UTC")
+    else:
+        first_label = pl.col("session_open")
+    labels = (
+        schedule.with_columns(first_label.alias("first_label"))
+        .select(
+            pl.datetime_ranges(
+                "first_label",
+                pl.col("session_close") - pl.duration(minutes=bar_minutes),
+                interval=f"{bar_minutes}m",
+                closed="both",
+            ).alias("ts")
+        )
+        .explode("ts", empty_as_null=True)
+        .filter(pl.col("ts").is_between(start, end, closed="both"))
+        .sort("ts")
+    )
+    return labels.cast(schema)
 
 
 def plan_intraday_requests(

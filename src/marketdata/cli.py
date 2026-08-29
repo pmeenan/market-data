@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 import sys
@@ -58,7 +59,10 @@ from marketdata.quality import (
     evaluate_quality,
 )
 from marketdata.reconcile import reconcile_active
-from marketdata.research import reconcile_research_state
+from marketdata.research import (
+    reconcile_research_state,
+    run_registered_event_study,
+)
 from marketdata.scheduler import (
     DEFAULT_BUDGET_POLICY,
     IngestionCycleResult,
@@ -1275,6 +1279,36 @@ def research_reconcile_cmd(config: Config, apply: bool) -> None:
         )
     elif report.stale_running_run_ids or report.orphan_directories:
         raise click.exceptions.Exit(1)
+
+
+@main.command("research-run")
+@click.argument("study_name")
+@click.option(
+    "--parameters-json",
+    default="{}",
+    show_default=True,
+    help="Study parameters as one JSON object",
+)
+@click.pass_obj
+def research_run_cmd(config: Config, study_name: str, parameters_json: str) -> None:
+    """Run one registered vectorized event study and publish its artifacts."""
+    _require_initialized_warehouse(config)
+    try:
+        parameters = json.loads(parameters_json)
+    except json.JSONDecodeError as exc:
+        raise click.ClickException(f"invalid --parameters-json: {exc.msg}") from exc
+    if not isinstance(parameters, dict):
+        raise click.ClickException("--parameters-json must decode to a JSON object")
+    try:
+        published = run_registered_event_study(config, study_name, parameters)
+    except _DATA_OPERATION_ERRORS as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(
+        f"Published event study {published.study_name}: run {published.run_id}, "
+        f"{published.observation_count} observations"
+    )
+    click.echo(f"Input fingerprint: {published.input_fingerprint}")
+    click.echo("Semantics: event observations only; no portfolio or order simulation")
 
 
 # ---- inspection ----------------------------------------------------------

@@ -133,8 +133,9 @@ runs remain. External failure notification is optional for this personal
 deployment.
 M1 closed on 2026-08-27. Production ingestion is permitted only for validated
 request segments; unresolved work remains fail-closed. M3's D-016 result
-catalog, immutable artifact publication, input fingerprints, and compatible
-DuckDB loading are implemented, with explicit interrupted-run reconciliation;
-the event runner and first study are next. See [docs/plan.md](docs/plan.md).
+catalog, immutable artifact publication, input fingerprints, compatible DuckDB
+loading, explicit interrupted-run reconciliation, and D-015/D-026 local-window
+event runner are implemented; the coarse gap-recovery study is next. See
+[docs/plan.md](docs/plan.md).
 Keep this paragraph short and current when plan.md milestone status changes
 (rule 4).

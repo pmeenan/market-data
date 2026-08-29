@@ -137,6 +137,7 @@ def test_research_publication_catalogs_typed_metadata_and_manifest(tmp_path):
     assert manifest["input_patterns_json"].unique().to_list() == [
         '["bars/eod/bucket=*/bars.parquet"]'
     ]
+    assert manifest["input_metadata_json"].unique().to_list() == ["{}"]
     assert manifest["relative_path"].to_list()[0].startswith("bars/eod/bucket=")
     assert manifest["first_date"].to_list() == [date(2024, 1, 2)]
     assert manifest["last_date"].to_list() == [date(2024, 1, 3)]
@@ -173,6 +174,7 @@ def test_input_fingerprint_ignores_mtime_and_detects_content_changes(tmp_path):
     BarStore(tmp_path).publish_eod({"apple-id": _eod("AAPL", days=3)})
     changed = verify_research_input_fingerprint(config, published.run_id)
     assert not changed.matches
+    assert not changed.metadata_changed
     assert changed.added_files == ()
     assert changed.changed_files == (input_path.relative_to(tmp_path).as_posix(),)
 

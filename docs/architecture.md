@@ -260,14 +260,16 @@ The library-level study runner acquires the data-directory process lock, then
 expands its input globs once into an explicit sorted path list. That exact list
 is passed to DuckDB and written to `input_files.parquet` with each relative
 path, content digest, size, relevant date bounds, and the canonical declared
-glob set. Every declared glob must match; recursive patterns retain their
-recursive semantics. The aggregate fingerprint hashes both the declared
-patterns and canonical (`relative path`, `content digest`) pairs, so a
-byte-identical restore does not change it merely because filesystem mtimes did.
-Verification re-expands the recorded patterns and detects added or missing
-matching files as well as changed content. The lock is held through the scan,
-fingerprint, and result publication. The first implementation need not retain a
-copy of input bars.
+glob set. Its canonical `input_metadata_json` also snapshots alias envelopes
+for the stable instruments present in an event run's explicit selection files.
+Every declared glob must match; recursive patterns retain their recursive
+semantics. The aggregate fingerprint hashes the patterns, metadata snapshot,
+and canonical (`relative path`, `content digest`) pairs, so a byte-identical
+restore does not change it merely because filesystem mtimes did. Verification
+re-expands the recorded patterns and rereads the recorded identity cohort to
+detect added, missing, or changed files and changed alias evidence. The lock is
+held through the scan, fingerprint, and result publication. The first
+implementation need not retain a copy of input bars.
 
 The reproducibility guarantee is D-016's: exact re-execution against an old
 input vintage is promised only while the recorded input fingerprint matches.
@@ -432,12 +434,29 @@ bypasses its lock or publication contract. Its execution path is:
    metrics. Benchmark-relative values use stored comparison series such as
    SPY with the same session and adjustment conventions. Selected events with
    missing later checkpoints remain in the observations with an explicit
-   outcome status. Audit metrics separate selected/evaluable events from
-   lookback, identity, quality, and missing-outcome exclusions.
+   outcome status. Audit metrics separate selected events into mutually
+   exclusive evaluable/missing-outcome outcomes and retain lookback, identity,
+   and calendar exclusions; declared quality gates block the whole run.
 5. Write observations and the input manifest to temporary files, validate
    their schemas/counts, and atomically rename them into the run directory.
 6. In one SQLite transaction, insert metrics and mark the run `succeeded`
    with its paths, count, and fingerprint.
+
+The runner gives candidate builders and selectors DuckDB views for declared
+selection datasets only; selectors may filter that audited frame but cannot
+alter its schema or values, and outcome-dataset views open afterward. Each
+candidate declares typed local window bounds. Completed EOD lookbacks end
+before the event date; an event-day open is an explicit decision feature, not a
+completed EOD bar. Intraday labels must finish by the decision timestamp. The
+shared audit requires every expected XNYS EOD or exact-frequency intraday label
+in those bounds, plus a valid decision session and identity envelope; a window
+with zero expected labels is a declaration error rather than a data gap.
+Full-history missing-session and terminal coverage summaries cannot be
+declared blocking gates for this local eligibility decision. Row checks over
+an explicitly empty candidate/dataset scope pass vacuously, while other unrun
+checks still fail closed. Result validation requires every selected event to
+retain at least one labeled observation with an explicit `evaluable` or
+`missing_outcome` status.
 
 On error, the run is marked `failed` with a bounded diagnostic and temporary
 files are removed. A crash can leave a `running` row or an unreferenced final

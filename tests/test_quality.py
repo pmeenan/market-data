@@ -221,6 +221,12 @@ def test_empty_scope_does_not_claim_checks_ran_or_pass_a_declared_gate(tmp_path)
         instrument_ids=[],
     )
     warehouse = check_quality(config, dataset_keys=["eod"])
+    vacuous_rows = check_quality(
+        config,
+        dataset_keys=["eod"],
+        instrument_ids=[],
+        empty_row_checks_are_run=True,
+    )
     gate = evaluate_quality(
         filtered,
         ["ohlc_invariants", "coverage_delisting_summary"],
@@ -228,6 +234,9 @@ def test_empty_scope_does_not_claim_checks_ran_or_pass_a_declared_gate(tmp_path)
 
     assert filtered.checks_run == ()
     assert warehouse.checks_run == ()
+    assert "ohlc_invariants" in vacuous_rows.checks_run
+    assert "coverage_delisting_summary" not in vacuous_rows.checks_run
+    assert evaluate_quality(vacuous_rows, ["ohlc_invariants"]).passed
     assert not gate.passed
     assert gate.checks_not_run == (
         "ohlc_invariants",

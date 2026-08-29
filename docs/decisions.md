@@ -66,7 +66,7 @@ SQLite/systemd coordinator while preserving the same ordering and audit trail.
 
 ---
 
-## D-026: Study eligibility is local-window and decision-time causal  (2026-08-29, status: accepted, amends D-010, D-015, D-020, and D-024)
+## D-026: Study eligibility is local-window and decision-time causal  (2026-08-29, status: accepted, clarified 2026-08-29; amends D-010, D-015, D-020, and D-024)
 
 **Decision:** Event studies decide eligibility for each instrument at each
 decision timestamp from only the data available through that timestamp. A study
@@ -83,8 +83,13 @@ selected, an event remains in the study population even if a later checkpoint
 is unavailable. Its outcome is recorded as unavailable with a reason rather
 than silently dropping the event; event counts distinguish selected,
 evaluable, missing-outcome, lookback-incomplete, identity-excluded, and
-quality-excluded cases. No future alias end, coverage state, or returned bar
-may retroactively decide whether the candidate existed at the decision time.
+calendar-excluded cases. Evaluable and missing-outcome are mutually exclusive
+event categories: any missing declared checkpoint puts the event in the latter
+while per-observation counts retain the mixed detail. Declared data-quality
+gates apply to the run as a whole and block publication on failure; they are
+not presented as a nonexistent per-event exclusion path. No future alias end,
+coverage state, or returned bar may retroactively decide whether the candidate
+existed at the decision time.
 
 Terminal history ranges and static identity exclusions remain durable and
 visible, but they are accepted exclusions rather than unfinished work that
@@ -102,10 +107,13 @@ bias; high-price/liquidity filters reduce ordinary delisting exposure but do
 not eliminate halts, acquisitions, or vendor omissions.
 
 **Consequences:** M3's runner owns a reusable local-window eligibility audit and
-persists exclusion/outcome-status counts with each run. Study features never
-group across listing episodes by ticker alone. Phase completion means every
-safe target is covered and every remaining target is durably classified; it
-does not mean every identity edge was resolved. D-020's blocked terminal state
+persists exclusion/outcome-status counts plus the declared run-level quality
+gate outcome with each successful run. A row-based quality check over an
+explicitly empty event scope is vacuously checked; incompatible, coverage-, and
+subject-scoped checks do not gain that treatment. Study features never group
+across listing episodes by ticker alone. Phase completion means every safe
+target is covered and every remaining target is durably classified; it does
+not mean every identity edge was resolved. D-020's blocked terminal state
 continues to satisfy predecessor gates, while retries require explicit operator
 intent.
 
@@ -583,10 +591,14 @@ to the relocatable data root.
 The library-level study runner holds the data-directory process lock from
 input selection through result publication. It requires every declared input
 glob to match, expands them once, and passes that explicit file list to both
-DuckDB and the manifest builder. The manifest retains the canonical glob set;
-the aggregate fingerprint hashes those patterns plus canonical (relative path,
-content digest) pairs, not filesystem mtimes, so a byte-identical restore
-preserves the fingerprint while a newly matching file invalidates it.
+DuckDB and the manifest builder. The manifest retains the canonical glob set
+and any canonical small metadata snapshot used by selection. The aggregate
+fingerprint hashes those patterns, canonical (relative path, content digest)
+pairs, and the metadata snapshot, not filesystem mtimes. Event runs snapshot
+alias envelopes for every instrument present in their explicit selection-bar
+files, including the absence of an alias; verification rereads that exact
+cohort. A byte-identical restore preserves the fingerprint, while a newly
+matching file or changed selection identity invalidates it.
 
 Result publication is append-only and failure-safe. Parquet artifacts are
 written and validated under temporary names, renamed into place, then the

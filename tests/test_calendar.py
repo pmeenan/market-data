@@ -7,6 +7,7 @@ import polars as pl
 import marketdata.calendar as market_calendar
 from marketdata.calendar import (
     IEX_ROW_CAP,
+    expected_intraday_labels,
     label_intraday_sessions,
     next_session_after,
     plan_intraday_requests,
@@ -109,6 +110,26 @@ def test_direct_hourly_labels_are_whole_clock_hours_not_open_anchored():
     ]
     assert labelled["minutes_from_open"].to_list() == [330, 30, 150]
     assert labelled["bar_label_semantics"].unique().to_list() == ["clock_hour_start"]
+
+
+def test_expected_intraday_labels_share_frequency_and_half_day_semantics():
+    hourly = expected_intraday_labels(
+        _utc("2024-03-11T13:30:00Z"),
+        _utc("2024-03-11T20:00:00Z"),
+        freq="1hour",
+    )
+    half_day = expected_intraday_labels(
+        _utc("2025-11-28T14:30:00Z"),
+        _utc("2025-11-28T18:00:00Z"),
+        freq="5min",
+    )
+
+    assert hourly["ts"].to_list() == [
+        _utc(f"2024-03-11T{hour:02d}:00:00Z") for hour in range(14, 20)
+    ]
+    assert half_day.height == 42
+    assert half_day["ts"].min() == _utc("2025-11-28T14:30:00Z")
+    assert half_day["ts"].max() == _utc("2025-11-28T17:55:00Z")
 
 
 def test_both_intraday_plans_tile_ranges_with_next_session_lookahead_under_cap():

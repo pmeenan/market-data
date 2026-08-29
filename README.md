@@ -81,10 +81,11 @@ exclude the event. Outcome availability is evaluated only after selection, so
 a missing future checkpoint is retained and reported rather than used to
 remove the candidate retroactively (D-026).
 
-Cataloged research publication records every required input glob and its
-expanded files. Fingerprint verification detects new, missing, or changed
-matching files. Interrupted `running` rows and unowned result directories are
-reported without mutation by default; cleanup requires an explicit apply:
+Cataloged research publication records every required input glob, its expanded
+files, and the alias-envelope snapshot used by event selection. Fingerprint
+verification detects new, missing, or changed matching files and changed
+selection identity. Interrupted `running` rows and unowned result directories
+are reported without mutation by default; cleanup requires an explicit apply:
 
 ```bash
 market-data research-reconcile
@@ -339,7 +340,7 @@ src/marketdata/
   bar_fields.py              shared Tiingo bar-field contract
   calendar.py                XNYS sessions, IEX request bounds, bar labels
   quality.py                 structured checks + consumer-declared gates
-  research.py                locked, cataloged result publication/recovery
+  research.py                vectorized event runner + cataloged publication
   research_layout.py         shared safe result-layout contract
   scheduler.py               durable budgets + breadth-first history sweeps
   identity.py               fail-closed identity resolution result contracts
@@ -371,9 +372,10 @@ optional for this personal deployment.
 M1 closed on
 2026-08-27 after its controlled EOD/IEX canary passed. Production ingestion is
 permitted only for validated segments; unresolved work remains fail-closed and
-visible. M3's immutable result catalog, input manifests/fingerprints,
-strict compatible-result loading, and explicit interrupted-run reconciliation
-are implemented; the event runner and first study are next.
+visible. M3's immutable result catalog, input manifests/fingerprints, strict
+compatible-result loading, explicit interrupted-run reconciliation, and
+local-window vectorized event runner/CLI boundary are implemented; the coarse
+gap-recovery study is next.
 
 ## Start here
 

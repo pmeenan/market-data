@@ -378,7 +378,7 @@ Scope:
   without depending on mtimes. DuckDB loads only explicit, compatible
   `succeeded` paths and rejects missing, mismatched, failed, cross-version, or
   same-version schema-drift selections while ignoring orphan files.
-- [ ] Implement the library-level D-015 vectorized event runner and a CLI entry
+- [x] Implement the library-level D-015 vectorized event runner and a CLI entry
   point. It selects candidates from stored bars (not universe membership),
   holds the shared lock through publication, applies declared calendar/quality
   gates, and never claims portfolio/order semantics. Per D-026, the reusable
@@ -387,6 +387,16 @@ Scope:
   exclusions, not global study gates or reasons to reject a locally complete
   event. Future outcome availability never changes selection, and selected
   events with missing checkpoints remain explicitly counted.
+  Completed 2026-08-29: `run_event_study` exposes only explicit selection-bar
+  views until a calendar-, identity-, and local-window eligibility audit has
+  frozen the selected event frame; outcome views open afterward. The runner
+  rejects full-history coverage findings as local study gates, records its
+  declared gate/window contract plus shared audit counts, fingerprints the
+  selection cohort's alias evidence, keeps selectors filter-only, and requires
+  every selected event to retain explicit observations while its aggregate
+  outcome is classified mutually exclusively as evaluable or missing-outcome.
+  Registered focused studies share the `research-run` CLI boundary, which
+  labels its output as event evidence without portfolio/order semantics.
 - [ ] Implement the coarse gap-recovery study using adjusted EOD prior close/open
   inputs and Tiingo's direct clock-hour checkpoints from 10:00 onward. Include
   stored SPY benchmark-relative evaluation and label the absent 09:30–09:59
@@ -434,7 +444,15 @@ Scope:
   and history turns through one systemd driver. Phase 1 is terminal with
   exclusions; the enabled live driver froze 23,078 phase-2 instruments and is
   advancing their EOD identity batches. The remaining phase-2/3 transfer and
-  ongoing-current expansion keep this item open.
+  ongoing-current expansion keep this item open. Before enabling that current
+  expansion, measure its end-to-end duty cycle and choose a batch/schedule that
+  meets nightly freshness without exceeding the durable hourly, daily, or byte
+  budgets. Do not automatically reuse the historical program timer's
+  500-turn-plus-five-minute-idle throttle: it limits useful throughput to less
+  than 6,000 calls/hour even before runtime, and the live phase-2 EOD transfer
+  sustained about 4,000--4,500 calls/hour. Historical five-minute work remains
+  bandwidth-window-bound, so increasing its request rate is not itself a
+  completion requirement.
 - [ ] Extend the gap study with exchange-calendar-filtered five-minute observations
   for the opening half-hour and other session-relative windows. Retain direct
   hourly results as their own vendor-frequency checkpoints; do not relabel them
