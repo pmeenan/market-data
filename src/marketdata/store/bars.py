@@ -526,9 +526,24 @@ def require_canonical_generation(bars: BarStore, generation: str) -> None:
         raise RuntimeError("instrument-owned APIs require the v2 storage generation")
 
 
-def atomic_write_parquet(df: pl.DataFrame, path: Path) -> None:
+def atomic_write_parquet(
+    df: pl.DataFrame, path: Path, *, validate: bool = False
+) -> None:
     """Write one Parquet file through the project's atomic replacement path."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".parquet.tmp")
-    df.write_parquet(tmp, compression="zstd")
-    tmp.replace(path)
+    try:
+        df.write_parquet(tmp, compression="zstd")
+        if validate:
+            written_schema = pl.scan_parquet(tmp, glob=False).collect_schema()
+            written_height = (
+                pl.scan_parquet(tmp, glob=False)
+                .select(pl.len().alias("rows"))
+                .collect()["rows"]
+                .item()
+            )
+            if written_schema != df.schema or written_height != df.height:
+                raise RuntimeError(f"Parquet artifact validation failed: {path.name}")
+        tmp.replace(path)
+    finally:
+        tmp.unlink(missing_ok=True)

@@ -253,17 +253,22 @@ return remain tidy columns. A run has one internally consistent schema;
 The library-level study runner acquires the data-directory process lock, then
 expands its input globs once into an explicit sorted path list. That exact list
 is passed to DuckDB and written to `input_files.parquet` with each relative
-path, content digest, size, and relevant date bounds. The aggregate fingerprint
-hashes only the canonical (`relative path`, `content digest`) pairs, so a
+path, content digest, size, relevant date bounds, and the canonical declared
+glob set. Every declared glob must match; recursive patterns retain their
+recursive semantics. The aggregate fingerprint hashes both the declared
+patterns and canonical (`relative path`, `content digest`) pairs, so a
 byte-identical restore does not change it merely because filesystem mtimes did.
-The lock is held through the scan, fingerprint, and result publication. The
-first implementation need not retain a copy of input bars.
+Verification re-expands the recorded patterns and detects added or missing
+matching files as well as changed content. The lock is held through the scan,
+fingerprint, and result publication. The first implementation need not retain a
+copy of input bars.
 
 The reproducibility guarantee is D-016's: exact re-execution against an old
 input vintage is promised only while the recorded input fingerprint matches.
-The fingerprint covers the explicit files read, so changes elsewhere in the
-archive do not affect that answer. Persisted observations and metrics remain
-inspectable even when the fingerprint no longer matches.
+The fingerprint covers the declared selection and explicit files read, so
+changes outside those patterns do not affect that answer. Persisted
+observations and metrics remain inspectable even when the fingerprint no longer
+matches.
 
 The warehouse remains correction-aware rather than versioned. If a future
 study must remain rerunnable after its input fingerprint changes, it requires
@@ -272,9 +277,10 @@ immutable input snapshots or a new dataset-versioning decision.
 Result loading never globs the results directory. A query helper first reads
 explicit artifact paths from `succeeded` catalog rows, verifies that the
 selected runs have one study and schema version, and only then gives that path
-list to DuckDB with union-by-name. This excludes orphan/failed files before
-schema binding and prevents cross-version type drift from breaking unrelated
-runs. `run_id` joins the observations to parameters and metrics in attached
+list to DuckDB. Every selected artifact must have the exact same ordered schema;
+column drift without a schema-version change fails before the common bar query
+surface is built. This excludes orphan/failed files and prevents silent null
+padding. `run_id` joins the observations to parameters and metrics in attached
 read-only SQLite.
 
 ## Identity and ingestion flow
@@ -337,16 +343,19 @@ D-020). A quota stop publishes and checkpoints any completed prefix of a bucket
 batch, then resumes the unfinished sweep. Failed and identity-blocked units
 retain their own frontier but count as attempted turns, so they do not stall
 safe peers. When only terminal identity blockers remain, the job becomes
-`blocked` and no longer holds a later phase; explicitly rerunning the same job
-reactivates those ranges after evidence is repaired. Every authenticated attempt reserves request and byte budget
-durably before transport, including each retry. It then records encoded
+`blocked` and no longer holds a later phase. Routine invocations leave those
+ranges dormant; `--retry-blocked` reactivates them only after evidence is
+repaired or reviewed. Every authenticated attempt reserves request and byte
+budget durably before transport, including each retry. It then records encoded
 response-body bytes from the raw transport, including retry bodies, partial
 reads where the HTTP stack exposes their count, and responses that later fail
 validation. Current cycles complete every declared current dataset before
-history can run, while the separate 30 GB rolling history ceiling preserves at
-least 10 GB beneath the 40 GB rolling total ceiling. RE-006's vendor billing
-basis remains undocumented, so the rolling window and response reservation are
-deliberately stricter than an assumed calendar-month/observed-byte ledger.
+history can run. Historical admission uses total rolling usage: its 30 GB
+ceiling rises in equal daily steps to 39 GB over the final seven UTC calendar
+days, releasing only reserve current work has not consumed, while current work
+retains the 40 GB rolling total ceiling. RE-006's vendor billing basis remains
+undocumented, so the rolling window and response reservation are deliberately
+stricter than an assumed calendar-month/observed-byte ledger.
 Each durable historical turn holds D-022's mutation lock through planning,
 transport, publication, and checkpoint, then yields it before the next turn.
 Cancellation is a concurrent SQLite control signal; an in-flight turn may
@@ -396,14 +405,19 @@ bypasses its lock or publication contract. Its execution path is:
 
 1. Acquire the data-directory process lock, register a `running` run, and
    canonicalize parameters.
-2. Resolve the explicit input-file list and select candidate instruments from
-   stored bars, never from universe membership. Apply calendar and required
-   quality gates.
+2. Resolve the explicit input-file list and select candidate events from stored
+   bars, never from universe membership. Per D-026, eligibility uses only the
+   declared contiguous selection/lookback window through the decision
+   timestamp; remote history and later outcome-bar availability are not
+   eligibility inputs. Apply calendar and required quality gates.
 3. Use DuckDB for cross-file scans, joins, window functions, and large
    filters; pass tidy frames to polars for study-specific transformations.
 4. Produce an `instrument_id`-keyed event/observation frame and shared summary
    metrics. Benchmark-relative values use stored comparison series such as
-   SPY with the same session and adjustment conventions.
+   SPY with the same session and adjustment conventions. Selected events with
+   missing later checkpoints remain in the observations with an explicit
+   outcome status. Audit metrics separate selected/evaluable events from
+   lookback, identity, quality, and missing-outcome exclusions.
 5. Write observations and the input manifest to temporary files, validate
    their schemas/counts, and atomically rename them into the run directory.
 6. In one SQLite transaction, insert metrics and mark the run `succeeded`
@@ -412,7 +426,10 @@ bypasses its lock or publication contract. Its execution path is:
 On error, the run is marked `failed` with a bounded diagnostic and temporary
 files are removed. A crash can leave a `running` row or an unreferenced final
 file, but neither is selected by successful catalog-based result loading; a
-maintenance command can report and reconcile those artifacts.
+dry-run `research-reconcile` command reports them under the shared lock.
+`research-reconcile --apply` explicitly marks abandoned rows failed and removes
+their partial/unowned directories; no automatic cleanup can delete result
+artifacts.
 
 Ingestion and research must not mutate/read the same files concurrently in
 the initial single-user implementation. The mutation coordinators and the

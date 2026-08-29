@@ -5,6 +5,58 @@ from marketdata.identity import ACTIVE_ALIAS_END
 from marketdata.store.meta import MetaStore
 
 
+def test_schema_v6_migration_is_durable_and_reopenable(tmp_path):
+    path = tmp_path / "meta.db"
+    with MetaStore(path):
+        pass
+    with sqlite3.connect(path) as con:
+        assert con.execute("PRAGMA user_version").fetchone()[0] == 6
+    with MetaStore(path) as meta:
+        assert meta.research_runs() == []
+
+
+def test_research_parameter_names_are_unique_after_trimming(tmp_path):
+    import pytest
+
+    with MetaStore(tmp_path / "meta.db") as meta:
+        with pytest.raises(ValueError, match="unique after trimming"):
+            meta.create_research_run(
+                run_id="duplicate-parameters",
+                study_name="fixture-study",
+                study_schema_version=1,
+                parameters={"threshold": 1, " threshold": 2},
+            )
+        assert meta.research_runs() == []
+
+
+def test_research_run_ids_are_normalized_across_lifecycle_calls(tmp_path):
+    with MetaStore(tmp_path / "meta.db") as meta:
+        meta.create_research_run(
+            run_id=" padded-run ",
+            study_name="fixture-study",
+            study_schema_version=1,
+            parameters={},
+        )
+        meta.succeed_research_run(
+            run_id=" padded-run ",
+            input_fingerprint="a" * 64,
+            observation_path="results/fixture-study/padded-run/observations.parquet",
+            manifest_path="results/fixture-study/padded-run/input_files.parquet",
+            observation_count=0,
+            metrics=[],
+        )
+        assert meta.research_run(" padded-run ")["status"] == "succeeded"
+
+
+def test_research_run_selection_checks_sqlite_variable_limit(tmp_path):
+    import pytest
+
+    with MetaStore(tmp_path / "meta.db") as meta:
+        meta._con.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 3)
+        with pytest.raises(ValueError, match="at most 3"):
+            meta.select_research_artifacts(["one", "two", "three", "four"])
+
+
 def test_inflight_schema_v4_gets_additive_scheduler_columns(tmp_path):
     path = tmp_path / "meta.db"
     con = sqlite3.connect(path)
@@ -159,7 +211,7 @@ def test_migration_from_v0(tmp_path):
         }
         assert "watermarks" not in tables
         assert "coverage" in tables
-        assert meta._con.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert meta._con.execute("PRAGMA user_version").fetchone()[0] == 6
         assert "ticker_coverage_v1" in tables
 
 
@@ -185,7 +237,7 @@ def test_migration_from_v1_preserves_existing_universe(tmp_path):
 
     with MetaStore(path) as meta:
         assert [row["ticker"] for row in meta.universe(2025)] == ["AAPL"]
-        assert meta._con.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert meta._con.execute("PRAGMA user_version").fetchone()[0] == 6
         assert (
             meta._con.execute(
                 "SELECT COUNT(*) FROM sqlite_master WHERE name = 'instruments'"

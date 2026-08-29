@@ -57,16 +57,36 @@ Each eligible stable instrument gets one maximum-safe request unit before any
 peer deepens; `--max-units` can stop even earlier, and `--job-id` names an
 explicit rerunnable job. `--phase 1|2|3` applies D-011's dataset and predecessor
 gates. An omitted `--end` is frozen when the job is first created, so the same
-command still resolves to that job on later days. Re-run it to continue the
-next sweep. Each `--force` invocation creates a fresh job; supply its printed
-`--job-id` to resume that exact force run. A superseded active/blocked job can
-be released from phase gating without erasing its audit trail with
+command still resolves to that job on later days. Re-run an active job to
+continue the next sweep. Terminal ranges remain dormant on routine timer and
+manual invocations; after repairing or reviewing their evidence,
+`--retry-blocked` explicitly reactivates them. Each `--force` invocation creates
+a fresh job; supply its printed `--job-id` to resume that exact force run. A
+superseded active/blocked job can be released from phase gating without erasing
+its audit trail with
 `market-data backfill cancel JOB_ID`:
 
 ```bash
 market-data backfill eod --phase 1 --start 2006-08-28
 market-data backfill intraday --phase 1 --freq 1hour \
   --start 2016-12-12 --max-units 500
+```
+
+Research eligibility is local to each event, not to an instrument's complete
+warehouse history. A study declares the contiguous lookback it needs through
+the decision timestamp; identity or coverage gaps outside that window do not
+exclude the event. Outcome availability is evaluated only after selection, so
+a missing future checkpoint is retained and reported rather than used to
+remove the candidate retroactively (D-026).
+
+Cataloged research publication records every required input glob and its
+expanded files. Fingerprint verification detects new, missing, or changed
+matching files. Interrupted `running` rows and unowned result directories are
+reported without mutation by default; cleanup requires an explicit apply:
+
+```bash
+market-data research-reconcile
+market-data research-reconcile --apply
 ```
 
 Before a new warehouse can ingest EOD, bootstrap conservative identity
@@ -166,13 +186,18 @@ Authenticated attempts reserve quota in SQLite before transport and settle to
 the encoded body bytes observed afterward; retries and rejected payloads count,
 and incomplete transfers retain their reservation. Because Tiingo does not
 publish its billing-byte basis or reset boundary, enforcement conservatively
-uses a 32-day rolling window and a 64 MB response allowance: history stops at
-30 GB while the 40 GB total ceiling preserves at least 10 GB for current work.
+uses a 32-day rolling window and a 64 MB response allowance. Historical work
+is admitted against total usage up to 30 GB normally; over the final seven UTC
+calendar days that ceiling rises daily through 31.5, 33, 34.5, 36, 37.5, and
+39 GB, releasing only reserve that current work has not consumed. Current work
+retains the separate 40 GB total ceiling.
 An orderly connection failure before any response exists settles at zero body
 bytes; crashes and partial bodies retain the full reservation. Responses are
 capped while streaming so an oversized undeclared body becomes a durable
 blocker rather than a repeating download.
-`market-data status` displays rolling observed and budgeted usage.
+`market-data status` displays rolling observed and budgeted usage plus the
+active historical admission ceiling and request-admissible headroom after the
+next 64 MB reservation.
 
 The ingestion primitives are idempotent and resumable: each
 (`instrument_id`, exact dataset key) pair tracks
@@ -295,12 +320,17 @@ data/                       (gitignored; set MARKET_DATA_DIR to relocate)
   meta.db                   SQLite: identities, generation, universes, coverage
   bars/eod/bucket=ab/bars.parquet
   bars/intraday/1hour/year=2025/bucket=ab/bars.parquet
+  results/STUDY/RUN_ID/
+    observations.parquet
+    input_files.parquet
   quarantine/v1-ticker-bars/
     migration-report.json  durable per-source migration outcome
 src/marketdata/
   bar_fields.py              shared Tiingo bar-field contract
   calendar.py                XNYS sessions, IEX request bounds, bar labels
   quality.py                 structured checks + consumer-declared gates
+  research.py                locked, cataloged result publication/recovery
+  research_layout.py         shared safe result-layout contract
   scheduler.py               durable budgets + breadth-first history sweeps
   identity.py               fail-closed identity resolution result contracts
   tiingo.py                 Tiingo REST client (CSV bars, retries, metering)
@@ -315,7 +345,8 @@ src/marketdata/
 
 ## Status
 
-Milestone **M2 (trustworthy scheduled ingestion)** is in progress. Its
+Milestones **M2 (trustworthy scheduled ingestion)** and **M3 (first persisted
+study)** are in progress. M2's
 cap-safe intraday request planner, XNYS calendar/session-label surface, and
 structured quality/gating layer are implemented, as are durable request-budget
 accounting, current-first breadth-first history scheduling, and shared process
@@ -330,7 +361,9 @@ deployment.
 M1 closed on
 2026-08-27 after its controlled EOD/IEX canary passed. Production ingestion is
 permitted only for validated segments; unresolved work remains fail-closed and
-visible. The research/backtesting layer begins in M3.
+visible. M3's immutable schema-v6 result catalog, input manifests/fingerprints,
+strict compatible-result loading, and explicit interrupted-run reconciliation
+are implemented; the event runner and first study are next.
 
 ## Start here
 

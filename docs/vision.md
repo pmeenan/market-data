@@ -27,8 +27,11 @@ opening half-hour and session-relative windows properly (D-012).
 
 - The morning gap-recovery hypothesis can be tested end-to-end — data → signal
   → summary statistics — from a single reproducible script, selecting tickers
-  from the stored data itself, with survivorship bias avoided by the dataset
-  including delisted tickers (D-010, D-011).
+  from the stored data itself. Eligibility requires only the declared
+  contiguous lookback through each decision timestamp; outcome availability
+  cannot retroactively remove a selected event (D-026). The broader dataset
+  still includes delisted tickers so exclusions remain measurable rather than
+  silently current-only (D-010, D-011).
 - For any seeded year, the universe and its full EOD history can be queried in
   interactive time (seconds, not minutes) on the Linux server.
 - A nightly cron `market-data update` keeps EOD data current to the most recent

@@ -31,6 +31,11 @@ review structure, and no verification-of-the-verification.
 - **Scratch files stay out of the tree.**
 - **Fix the docs the change makes wrong** (status paragraph, plan checkbox,
   affected doc) in the same change. Nothing more is owed.
+- **Treat live schema migrations as forward-only deployments.** Do not let a
+  timer or manual production command migrate `data/meta.db` with code that is
+  not ready for the human commit gate. Once a migration has run, do not stash
+  or revert its supporting code; older code is intentionally unable to open a
+  newer schema.
 
 ## Reviews happen on demand, not by default
 

@@ -12,6 +12,7 @@ coverage is instrument-keyed and uses exact dataset keys.
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from collections.abc import Collection, Mapping
 from datetime import UTC, date, datetime, timedelta
@@ -29,8 +30,13 @@ from marketdata.identity import (
     require_dataset_key,
     require_validation_state,
 )
+from marketdata.jsonutil import canonical_json
+from marketdata.research_layout import (
+    normalize_path_component,
+    normalize_relative_data_path,
+)
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 _SCHEMA_V1 = """
 CREATE TABLE IF NOT EXISTS tickers (
@@ -294,6 +300,133 @@ CREATE INDEX IF NOT EXISTS identity_episodes_ticker
     ON identity_episodes (ticker, dataset_key);
 """
 
+_SCHEMA_V6 = """
+CREATE TABLE IF NOT EXISTS research_runs (
+    run_id                TEXT PRIMARY KEY,
+    study_name            TEXT NOT NULL,
+    study_schema_version  INTEGER NOT NULL,
+    status                TEXT NOT NULL,
+    started_at            TEXT NOT NULL,
+    completed_at          TEXT,
+    source_revision       TEXT,
+    input_fingerprint     TEXT,
+    observation_path      TEXT UNIQUE,
+    manifest_path         TEXT UNIQUE,
+    observation_count     INTEGER,
+    error_summary         TEXT,
+    CHECK (length(trim(run_id)) > 0),
+    CHECK (length(trim(study_name)) > 0),
+    CHECK (study_schema_version >= 1),
+    CHECK (status IN ('running', 'succeeded', 'failed')),
+    CHECK (source_revision IS NULL OR length(source_revision) <= 256),
+    CHECK (input_fingerprint IS NULL OR length(input_fingerprint) = 64),
+    CHECK (observation_count IS NULL OR observation_count >= 0),
+    CHECK (error_summary IS NULL OR length(error_summary) <= 4096),
+    CHECK (
+        (status = 'running'
+         AND completed_at IS NULL
+         AND input_fingerprint IS NULL
+         AND observation_path IS NULL
+         AND manifest_path IS NULL
+         AND observation_count IS NULL
+         AND error_summary IS NULL)
+        OR
+        (status = 'succeeded'
+         AND completed_at IS NOT NULL
+         AND input_fingerprint IS NOT NULL
+         AND observation_path IS NOT NULL
+         AND manifest_path IS NOT NULL
+         AND observation_count IS NOT NULL
+         AND error_summary IS NULL)
+        OR
+        (status = 'failed'
+         AND completed_at IS NOT NULL
+         AND input_fingerprint IS NULL
+         AND observation_path IS NULL
+         AND manifest_path IS NULL
+         AND observation_count IS NULL
+         AND error_summary IS NOT NULL)
+    )
+);
+CREATE INDEX IF NOT EXISTS research_runs_study_status
+    ON research_runs (study_name, study_schema_version, status, started_at, run_id);
+
+CREATE TABLE IF NOT EXISTS research_parameters (
+    run_id      TEXT NOT NULL REFERENCES research_runs(run_id) ON DELETE CASCADE,
+    name        TEXT NOT NULL,
+    value_json  TEXT NOT NULL,
+    PRIMARY KEY (run_id, name),
+    CHECK (length(trim(name)) > 0)
+);
+
+CREATE TABLE IF NOT EXISTS research_metrics (
+    run_id           TEXT NOT NULL REFERENCES research_runs(run_id) ON DELETE CASCADE,
+    metric_name      TEXT NOT NULL,
+    dimensions_json  TEXT NOT NULL,
+    value            REAL NOT NULL,
+    unit             TEXT,
+    PRIMARY KEY (run_id, metric_name, dimensions_json),
+    CHECK (length(trim(metric_name)) > 0),
+    CHECK (unit IS NULL OR length(trim(unit)) > 0)
+);
+
+CREATE TRIGGER IF NOT EXISTS research_runs_succeeded_no_update
+BEFORE UPDATE ON research_runs
+WHEN OLD.status = 'succeeded'
+BEGIN
+    SELECT RAISE(ABORT, 'succeeded research runs are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS research_runs_succeeded_no_delete
+BEFORE DELETE ON research_runs
+WHEN OLD.status = 'succeeded'
+BEGIN
+    SELECT RAISE(ABORT, 'succeeded research runs are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS research_parameters_succeeded_no_insert
+BEFORE INSERT ON research_parameters
+WHEN (SELECT status FROM research_runs WHERE run_id = NEW.run_id) = 'succeeded'
+BEGIN
+    SELECT RAISE(ABORT, 'succeeded research runs are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS research_parameters_succeeded_no_update
+BEFORE UPDATE ON research_parameters
+WHEN (SELECT status FROM research_runs WHERE run_id = OLD.run_id) = 'succeeded'
+BEGIN
+    SELECT RAISE(ABORT, 'succeeded research runs are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS research_parameters_succeeded_no_delete
+BEFORE DELETE ON research_parameters
+WHEN (SELECT status FROM research_runs WHERE run_id = OLD.run_id) = 'succeeded'
+BEGIN
+    SELECT RAISE(ABORT, 'succeeded research runs are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS research_metrics_succeeded_no_insert
+BEFORE INSERT ON research_metrics
+WHEN (SELECT status FROM research_runs WHERE run_id = NEW.run_id) = 'succeeded'
+BEGIN
+    SELECT RAISE(ABORT, 'succeeded research runs are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS research_metrics_succeeded_no_update
+BEFORE UPDATE ON research_metrics
+WHEN (SELECT status FROM research_runs WHERE run_id = OLD.run_id) = 'succeeded'
+BEGIN
+    SELECT RAISE(ABORT, 'succeeded research runs are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS research_metrics_succeeded_no_delete
+BEFORE DELETE ON research_metrics
+WHEN (SELECT status FROM research_runs WHERE run_id = OLD.run_id) = 'succeeded'
+BEGIN
+    SELECT RAISE(ABORT, 'succeeded research runs are immutable');
+END;
+"""
+
 
 def _apply_v4_compatibility(con: sqlite3.Connection) -> None:
     """Fold pre-commit v4 working-tree variants into the numbered v5 migration."""
@@ -372,6 +505,11 @@ def _migrate(con: sqlite3.Connection) -> None:
             con.executescript(_SCHEMA_V5)
             con.execute("PRAGMA user_version = 5")
         version = 5
+    if version < 6:
+        with con:
+            con.executescript(_SCHEMA_V6)
+            con.execute("PRAGMA user_version = 6")
+        version = 6
     if version > SCHEMA_VERSION:
         raise RuntimeError(
             f"meta.db schema version {version} is newer than this code "
@@ -1570,6 +1708,233 @@ class MetaStore:
                 normalized,
             )
 
+    # ---- research result catalog ---------------------------------------
+
+    def create_research_run(
+        self,
+        *,
+        run_id: str,
+        study_name: str,
+        study_schema_version: int,
+        parameters: Mapping[str, Any],
+        source_revision: str | None = None,
+        started_at: datetime | None = None,
+    ) -> None:
+        """Register a new running research execution and typed parameters."""
+        run_id = _research_run_id(run_id)
+        study_name = normalize_path_component(study_name.strip(), "study_name")
+        if study_schema_version < 1:
+            raise ValueError("study_schema_version must be at least 1")
+        if source_revision is not None:
+            source_revision = source_revision.strip()
+            if not source_revision:
+                source_revision = None
+            elif len(source_revision) > 256:
+                raise ValueError("source_revision must not exceed 256 characters")
+        encoded_parameters: list[tuple[str, str, str]] = []
+        normalized_names: set[str] = set()
+        for name, value in parameters.items():
+            if not isinstance(name, str):
+                raise TypeError("research parameter names must be strings")
+            normalized_name = name.strip()
+            if not normalized_name:
+                raise ValueError("research parameter names must not be empty")
+            if normalized_name in normalized_names:
+                raise ValueError(
+                    "research parameter names must be unique after trimming"
+                )
+            normalized_names.add(normalized_name)
+            encoded_parameters.append((run_id, normalized_name, canonical_json(value)))
+        encoded_parameters.sort(key=lambda row: row[1])
+        timestamp = _utc_timestamp(started_at or datetime.now(UTC))
+        with self._con:
+            self._con.execute(
+                """INSERT INTO research_runs
+                       (run_id, study_name, study_schema_version, status,
+                        started_at, source_revision)
+                   VALUES (?, ?, ?, 'running', ?, ?)""",
+                (
+                    run_id,
+                    study_name,
+                    study_schema_version,
+                    timestamp,
+                    source_revision,
+                ),
+            )
+            self._con.executemany(
+                """INSERT INTO research_parameters (run_id, name, value_json)
+                   VALUES (?, ?, ?)""",
+                encoded_parameters,
+            )
+
+    def succeed_research_run(
+        self,
+        *,
+        run_id: str,
+        input_fingerprint: str,
+        observation_path: str,
+        manifest_path: str,
+        observation_count: int,
+        metrics: Collection[Mapping[str, Any]],
+        completed_at: datetime | None = None,
+    ) -> None:
+        """Atomically record tidy metrics and publish one successful run."""
+        if len(input_fingerprint) != 64 or any(
+            char not in "0123456789abcdef" for char in input_fingerprint
+        ):
+            raise ValueError("input_fingerprint must be a lowercase SHA-256 digest")
+        run_id = _research_run_id(run_id)
+        observation_path = normalize_relative_data_path(observation_path)
+        manifest_path = normalize_relative_data_path(manifest_path)
+        if observation_count < 0:
+            raise ValueError("observation_count must not be negative")
+        encoded_metrics: list[tuple[str, str, str, float, str | None]] = []
+        for metric in metrics:
+            name = str(metric["name"]).strip()
+            if not name:
+                raise ValueError("research metric names must not be empty")
+            raw_value = metric["value"]
+            if isinstance(raw_value, bool) or not isinstance(raw_value, (int, float)):
+                raise TypeError("research metric values must be numeric")
+            value = float(raw_value)
+            if not math.isfinite(value):
+                raise ValueError("research metric values must be finite")
+            dimensions = metric.get("dimensions", {})
+            if not isinstance(dimensions, Mapping):
+                raise TypeError("research metric dimensions must be a mapping")
+            unit_value = metric.get("unit")
+            unit = None if unit_value is None else str(unit_value).strip()
+            if unit_value is not None and not unit:
+                raise ValueError("research metric units must not be empty")
+            encoded_metrics.append(
+                (run_id, name, canonical_json(dict(dimensions)), value, unit)
+            )
+        if len({(row[1], row[2]) for row in encoded_metrics}) != len(encoded_metrics):
+            raise ValueError("research metrics must have unique name/dimensions pairs")
+        timestamp = _utc_timestamp(completed_at or datetime.now(UTC))
+        with self._con:
+            row = self._con.execute(
+                "SELECT status FROM research_runs WHERE run_id = ?", (run_id,)
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"unknown research run {run_id!r}")
+            if row["status"] != "running":
+                raise ValueError(f"research run {run_id!r} is already {row['status']}")
+            self._con.executemany(
+                """INSERT INTO research_metrics
+                       (run_id, metric_name, dimensions_json, value, unit)
+                   VALUES (?, ?, ?, ?, ?)""",
+                encoded_metrics,
+            )
+            updated = self._con.execute(
+                """UPDATE research_runs
+                   SET status = 'succeeded', completed_at = ?,
+                       input_fingerprint = ?, observation_path = ?,
+                       manifest_path = ?, observation_count = ?
+                   WHERE run_id = ? AND status = 'running'""",
+                (
+                    timestamp,
+                    input_fingerprint,
+                    observation_path,
+                    manifest_path,
+                    observation_count,
+                    run_id,
+                ),
+            )
+            if updated.rowcount != 1:
+                raise RuntimeError("research run changed while publishing")
+
+    def fail_research_run(
+        self,
+        run_id: str,
+        error_summary: str,
+        *,
+        completed_at: datetime | None = None,
+    ) -> None:
+        """Mark one running execution failed without attaching artifacts."""
+        run_id = _research_run_id(run_id)
+        error_summary = _bounded_utf8(error_summary.strip(), 4096)
+        if not error_summary:
+            error_summary = "research execution failed without a diagnostic"
+        timestamp = _utc_timestamp(completed_at or datetime.now(UTC))
+        with self._con:
+            updated = self._con.execute(
+                """UPDATE research_runs
+                   SET status = 'failed', completed_at = ?, error_summary = ?
+                   WHERE run_id = ? AND status = 'running'""",
+                (timestamp, error_summary, run_id),
+            )
+            if updated.rowcount != 1:
+                row = self.research_run(run_id)
+                if row is None:
+                    raise ValueError(f"unknown research run {run_id!r}")
+                raise ValueError(f"research run {run_id!r} is already {row['status']}")
+
+    def research_run(self, run_id: str) -> sqlite3.Row | None:
+        run_id = _research_run_id(run_id)
+        return self._con.execute(
+            "SELECT * FROM research_runs WHERE run_id = ?", (run_id,)
+        ).fetchone()
+
+    def research_runs(self) -> list[sqlite3.Row]:
+        return self._con.execute(
+            "SELECT * FROM research_runs ORDER BY started_at, run_id"
+        ).fetchall()
+
+    def research_parameters(self, run_id: str) -> dict[str, Any]:
+        run_id = _research_run_id(run_id)
+        rows = self._con.execute(
+            """SELECT name, value_json FROM research_parameters
+               WHERE run_id = ? ORDER BY name""",
+            (run_id,),
+        ).fetchall()
+        return {str(row["name"]): json.loads(row["value_json"]) for row in rows}
+
+    def research_metrics(self, run_id: str) -> list[sqlite3.Row]:
+        run_id = _research_run_id(run_id)
+        return self._con.execute(
+            """SELECT metric_name, dimensions_json, value, unit
+               FROM research_metrics WHERE run_id = ?
+               ORDER BY metric_name, dimensions_json""",
+            (run_id,),
+        ).fetchall()
+
+    def select_research_artifacts(self, run_ids: Collection[str]) -> list[sqlite3.Row]:
+        """Resolve explicit compatible succeeded runs without directory globs."""
+        selected = tuple(dict.fromkeys(_research_run_id(run_id) for run_id in run_ids))
+        if not selected:
+            raise ValueError("at least one run_id is required")
+        variable_limit = self._con.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER)
+        if len(selected) > variable_limit:
+            raise ValueError(
+                f"at most {variable_limit} research run_ids may be selected"
+            )
+        placeholders = ",".join("?" for _ in selected)
+        rows = self._con.execute(
+            f"""SELECT * FROM research_runs
+                WHERE run_id IN ({placeholders})""",
+            selected,
+        ).fetchall()
+        by_id = {str(row["run_id"]): row for row in rows}
+        missing = sorted(set(selected) - by_id.keys())
+        if missing:
+            raise ValueError(f"unknown research run_ids: {missing}")
+        ordered = [by_id[run_id] for run_id in selected]
+        unsuccessful = [
+            str(row["run_id"]) for row in ordered if row["status"] != "succeeded"
+        ]
+        if unsuccessful:
+            raise ValueError(f"research runs are not succeeded: {unsuccessful}")
+        versions = {
+            (str(row["study_name"]), int(row["study_schema_version"]))
+            for row in ordered
+        }
+        if len(versions) != 1:
+            raise ValueError(
+                "selected research runs must have one study and schema version"
+            )
+        return ordered
+
     # ---- durable request accounting ------------------------------------
 
     def reserve_request_attempt(
@@ -1582,11 +1947,13 @@ class MetaStore:
         hourly_request_limit: int,
         daily_request_limit: int,
         total_byte_limit: int,
-        historical_byte_limit: int,
+        historical_total_byte_limit: int,
         rolling_days: int,
     ) -> tuple[int | None, str | None]:
         """Atomically reserve one request or return its quota stop reason.
 
+        Historical admission compares total charged usage with the caller's
+        date-dependent ceiling; current attempts use only the total hard cap.
         Incomplete attempts retain ``reserved_bytes`` in the charged total.
         This intentionally overcounts an interrupted transfer rather than
         permitting a process crash to reopen budget that may have been spent.
@@ -1599,7 +1966,7 @@ class MetaStore:
             hourly_request_limit,
             daily_request_limit,
             total_byte_limit,
-            historical_byte_limit,
+            historical_total_byte_limit,
             rolling_days,
         )
         if any(value <= 0 for value in limits) or reserved_bytes < 0:
@@ -1617,8 +1984,8 @@ class MetaStore:
                 reason = "rolling_total_byte_limit"
             elif (
                 work_kind == "historical"
-                and usage["historical_charged_bytes"] + reserved_bytes
-                > historical_byte_limit
+                and usage["charged_bytes"] + reserved_bytes
+                > historical_total_byte_limit
             ):
                 reason = "rolling_historical_byte_limit"
             if reason is not None:
@@ -1671,11 +2038,13 @@ class MetaStore:
         hourly_request_limit: int,
         daily_request_limit: int,
         total_byte_limit: int,
-        historical_byte_limit: int,
+        historical_total_byte_limit: int,
         rolling_days: int,
     ) -> bool:
         """Conservative preflight used only to retain normal bucket batching.
 
+        The historical ceiling applies to total charged usage just as it does
+        for the authoritative per-attempt reservation below.
         Individual attempts still reserve atomically. A false result falls
         back to one target, where an exact quota stop can retain its cursor.
         """
@@ -1689,8 +2058,7 @@ class MetaStore:
             and usage["charged_bytes"] + reservation <= total_byte_limit
             and (
                 work_kind != "historical"
-                or usage["historical_charged_bytes"] + reservation
-                <= historical_byte_limit
+                or usage["charged_bytes"] + reservation <= historical_total_byte_limit
             )
         )
 
@@ -1702,7 +2070,6 @@ class MetaStore:
                 "requests",
                 "observed_bytes",
                 "charged_bytes",
-                "historical_charged_bytes",
                 "incomplete_attempts",
             )
         }
@@ -1731,9 +2098,6 @@ class MetaStore:
                       COUNT(*) AS requests,
                       COALESCE(SUM(observed_bytes), 0) AS observed_bytes,
                       COALESCE(SUM(charged_bytes), 0) AS charged_bytes,
-                      COALESCE(SUM(CASE WHEN work_kind = 'historical'
-                           THEN charged_bytes ELSE 0 END), 0)
-                           AS historical_charged_bytes,
                       COALESCE(SUM(CASE WHEN complete = 0 THEN 1 ELSE 0 END), 0)
                            AS incomplete_attempts
                FROM windowed""",
@@ -1932,7 +2296,7 @@ class MetaStore:
         )
 
     def reactivate_history_job(self, job_id: str) -> bool:
-        """Retry runtime-blocked ranges of an explicitly rerun job."""
+        """Retry runtime-blocked ranges after explicit operator approval."""
         job = self.history_job(job_id)
         if job is None or job["cancelled"]:
             return False
@@ -2047,7 +2411,7 @@ class MetaStore:
 
 def _utc_timestamp(value: datetime) -> str:
     if value.tzinfo is None:
-        raise ValueError("request accounting timestamps must be timezone-aware")
+        raise ValueError("timestamps must be timezone-aware")
     return value.astimezone(UTC).isoformat(timespec="microseconds")
 
 
@@ -2059,8 +2423,22 @@ def _evidence_json(evidence: Mapping[str, Any] | str | None) -> str:
     if evidence is None:
         return "{}"
     if isinstance(evidence, str):
-        return json.dumps({"note": evidence}, sort_keys=True, separators=(",", ":"))
-    return json.dumps(evidence, sort_keys=True, separators=(",", ":"))
+        return canonical_json({"note": evidence})
+    return canonical_json(evidence)
+
+
+def _bounded_utf8(value: str, byte_limit: int) -> str:
+    raw = value.encode("utf-8")
+    if len(raw) <= byte_limit:
+        return value
+    return raw[:byte_limit].decode("utf-8", errors="ignore")
+
+
+def _research_run_id(value: str) -> str:
+    normalized = value.strip()
+    if not normalized:
+        raise ValueError("run_id must not be empty")
+    return normalize_path_component(normalized, "run_id")
 
 
 def _normalize_identifier(

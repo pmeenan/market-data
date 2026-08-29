@@ -48,8 +48,9 @@ calibration: newly listed and delisted instruments have shorter histories,
 while the safe request overlap adds a little transfer. It validates D-011's
 40–75 GB estimate for seed-list 5-minute history and implies roughly 1.7
 Power-tier bandwidth months for that phase before EOD and operational
-overhead at the full vendor cap. D-013's 30 GB/month historical hard cap makes
-the operational minimum three billing windows.
+overhead at the full vendor cap. D-013's 30 GB base historical limit would make
+the operational minimum three billing windows; D-025's late-month release up
+to 39 GB can reduce that to two when current work leaves enough reserve unused.
 
 The nearly 9 years 9 months of available history is enough temporal depth for
 the first gap-recovery study (roughly 2,400 real sessions after calendar

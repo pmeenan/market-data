@@ -18,6 +18,79 @@ def _fake_client(history, fail=frozenset()):
     return lambda config: client
 
 
+def test_backfill_help_makes_terminal_retries_explicit():
+    runner = CliRunner()
+
+    eod = runner.invoke(main, ["backfill", "eod", "--help"])
+    intraday = runner.invoke(main, ["backfill", "intraday", "--help"])
+
+    assert eod.exit_code == intraday.exit_code == 0
+    assert "--retry-blocked" in eod.output
+    assert "--retry-blocked" in intraday.output
+
+
+def test_status_headroom_includes_next_request_reservation(tmp_path, monkeypatch):
+    from datetime import UTC, datetime
+
+    from marketdata.scheduler import BudgetPolicy, PersistentAttemptObserver
+    from marketdata.store import MetaStore
+
+    data_dir = tmp_path / "data"
+    policy = BudgetPolicy(
+        total_byte_limit=400,
+        historical_byte_limit=300,
+        response_reservation_bytes=100,
+    )
+    now = datetime.now(UTC)
+    with MetaStore(data_dir / "meta.db") as meta:
+        meta.activate_canonical_generation()
+        observer = PersistentAttemptObserver(
+            meta,
+            work_kind="current",
+            operation="status-fixture",
+            policy=policy,
+            clock=lambda: now,
+        )
+        attempt = observer.before_attempt()
+        observer.after_attempt(attempt, 250, complete=True)
+    monkeypatch.setattr(cli_mod, "DEFAULT_BUDGET_POLICY", policy)
+
+    result = CliRunner().invoke(main, ["--data-dir", str(data_dir), "status"])
+
+    assert result.exit_code == 0, result.output
+    assert "0 bytes available after the next 100-byte reservation" in result.output
+
+
+def test_research_reconcile_cli_is_dry_run_unless_apply_is_explicit(tmp_path):
+    from marketdata.store import MetaStore
+
+    data_dir = tmp_path / "data"
+    with MetaStore(data_dir / "meta.db") as meta:
+        meta.activate_canonical_generation()
+        meta.create_research_run(
+            run_id="abandoned",
+            study_name="fixture-study",
+            study_schema_version=1,
+            parameters={},
+        )
+    runner = CliRunner()
+
+    dry_run = runner.invoke(main, ["--data-dir", str(data_dir), "research-reconcile"])
+
+    assert dry_run.exit_code == 1
+    assert "1 abandoned running rows" in dry_run.output
+    with MetaStore(data_dir / "meta.db") as meta:
+        assert meta.research_run("abandoned")["status"] == "running"
+
+    applied = runner.invoke(
+        main, ["--data-dir", str(data_dir), "research-reconcile", "--apply"]
+    )
+
+    assert applied.exit_code == 0, applied.output
+    with MetaStore(data_dir / "meta.db") as meta:
+        assert meta.research_run("abandoned")["status"] == "failed"
+
+
 @contextmanager
 def _external_lock(data_dir):
     script = """

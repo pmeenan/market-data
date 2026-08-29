@@ -247,8 +247,9 @@ Scope:
   complete responses, including retries and later-rejected payloads; partial
   attempts and process crashes retain their conservative reservation, while
   orderly failures before any response settle to a known zero bytes. A 32-day rolling window and
-  64 MB per-response reservation enforce the 30 GB history and 40 GB total
-  ceilings without assuming an undocumented reset/billing basis. Manual and
+  64 MB per-response reservation enforce D-025's 30-to-39 GB late-month
+  historical admission ramp against total usage and the 40 GB current-work
+  ceiling without assuming an undocumented reset/billing basis. Manual and
   scheduled history share immutable stable-instrument cohorts, durable
   per-alias frontiers and sweep cursors, exact phase/dataset gates, and one
   maximum-safe request unit per eligible instrument per sweep; ready peers in
@@ -352,7 +353,7 @@ Exit criteria:
   survive the process boundary. The timer remains enabled and the full
   `make check` passes.
 
-## M3 — First persisted study, end to end  `pending`
+## M3 — First persisted study, end to end  `in progress`
 
 Goal: deliver the shortest honest research path while the metered backfill
 continues: the gap-recovery study from stored EOD/direct-hourly data through
@@ -360,13 +361,27 @@ queryable, immutable results.
 
 Scope:
 
-- [ ] Add the D-016 result catalog, typed/canonical parameters, tidy metrics,
+- [x] Add the D-016 result catalog, typed/canonical parameters, tidy metrics,
   immutable Parquet observations, explicit input-file manifests and content
   fingerprints, failure cleanup, and catalog-filtered DuckDB result loading.
+  Completed 2026-08-29: schema-v6 catalogs opaque immutable runs, canonical-JSON
+  parameters, and dimensioned numeric metrics; the shared-lock publication
+  primitive expands one explicit input vintage, records SHA-256 content and
+  date-bound manifests, validates and atomically publishes per-run Parquet,
+  and removes artifacts on handled failure. Fingerprint verification detects
+  added, missing, or changed files by re-expanding persisted input patterns,
+  without depending on mtimes. DuckDB loads only explicit, compatible
+  `succeeded` paths and rejects missing, mismatched, failed, cross-version, or
+  same-version schema-drift selections while ignoring orphan files.
 - [ ] Implement the library-level D-015 vectorized event runner and a CLI entry
   point. It selects candidates from stored bars (not universe membership),
   holds the shared lock through publication, applies declared calendar/quality
-  gates, and never claims portfolio/order semantics.
+  gates, and never claims portfolio/order semantics. Per D-026, the reusable
+  eligibility audit requires only each event's declared contiguous lookback
+  through its decision timestamp. Terminal ranges remain reported backfill
+  exclusions, not global study gates or reasons to reject a locally complete
+  event. Future outcome availability never changes selection, and selected
+  events with missing checkpoints remain explicitly counted.
 - [ ] Implement the coarse gap-recovery study using adjusted EOD prior close/open
   inputs and Tiingo's direct clock-hour checkpoints from 10:00 onward. Include
   stored SPY benchmark-relative evaluation and label the absent 09:30–09:59
@@ -374,8 +389,10 @@ Scope:
 - [ ] Provide one reproducible example notebook that calls the same library runner
   and loads the same published artifacts; notebooks do not contain a second
   execution or publication path.
-- [ ] Report stale `running` rows and orphaned result artifacts without selecting
-  or deleting them automatically.
+- [x] Report stale `running` rows and orphaned result artifacts without selecting
+  or deleting them automatically. Completed 2026-08-29: `research-reconcile`
+  defaults to a shared-lock dry run; `--apply` is the explicit recovery boundary
+  that marks abandoned rows failed and removes partial/unowned directories.
 
 Exit criteria:
 
@@ -387,8 +404,10 @@ Exit criteria:
   retries receive new ids, and input-fingerprint checks detect changed source
   files.
 - [ ] Event counts and returns match a small hand-calculated fixture, candidate
-  selection is demonstrably independent of universe membership, and quality
-  failures block publication as declared.
+  selection is demonstrably independent of universe membership and future-bar
+  availability, remote history gaps do not exclude a locally complete event,
+  missing outcomes remain auditable, and quality failures block publication as
+  declared.
 - [ ] The CLI output and notebook state the direct-hourly and IEX-volume limits;
   benchmark conventions match the event observations; `make check` passes.
 

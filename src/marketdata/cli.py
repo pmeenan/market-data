@@ -49,6 +49,7 @@ from marketdata.quality import (
     evaluate_quality,
 )
 from marketdata.reconcile import reconcile_active
+from marketdata.research import reconcile_research_state
 from marketdata.scheduler import (
     DEFAULT_BUDGET_POLICY,
     IngestionCycleResult,
@@ -724,6 +725,11 @@ def backfill() -> None:
     help="Durable scheduler job id (default: derived from this exact request)",
 )
 @click.option(
+    "--retry-blocked",
+    is_flag=True,
+    help="Explicitly reactivate terminal ranges after repairing their evidence",
+)
+@click.option(
     "--phase",
     type=click.IntRange(min=1, max=3),
     default=None,
@@ -756,6 +762,7 @@ def backfill_eod_cmd(
     end,
     force,
     job_id,
+    retry_blocked: bool,
     phase,
     max_units,
     summary_json,
@@ -793,6 +800,7 @@ def backfill_eod_cmd(
                 phase=phase,
                 force=force,
                 job_id=job_id,
+                retry_blocked=retry_blocked,
                 max_units=max_units,
             )
             result = scheduler.ingest
@@ -825,6 +833,11 @@ def backfill_eod_cmd(
     help="Durable scheduler job id (default: derived from this exact request)",
 )
 @click.option(
+    "--retry-blocked",
+    is_flag=True,
+    help="Explicitly reactivate terminal ranges after repairing their evidence",
+)
+@click.option(
     "--phase",
     type=click.IntRange(min=1, max=3),
     default=None,
@@ -853,6 +866,7 @@ def backfill_intraday_cmd(
     freq,
     force,
     job_id,
+    retry_blocked: bool,
     phase,
     max_units,
     summary_json,
@@ -884,6 +898,7 @@ def backfill_intraday_cmd(
                 phase=phase,
                 force=force,
                 job_id=job_id,
+                retry_blocked=retry_blocked,
                 max_units=max_units,
             )
             result = scheduler.ingest
@@ -1069,6 +1084,35 @@ def migrate_v2_bars_cmd(config: Config, report_path: Path | None) -> None:
         raise click.exceptions.Exit(1)
 
 
+@main.command("research-reconcile")
+@click.option(
+    "--apply/--dry-run",
+    default=False,
+    help="Mark abandoned runs failed and remove their/unowned artifacts",
+)
+@click.pass_obj
+def research_reconcile_cmd(config: Config, apply: bool) -> None:
+    """Report or explicitly repair interrupted research publication state."""
+    _require_initialized_warehouse(config)
+    try:
+        report = reconcile_research_state(config, apply=apply)
+    except _DATA_OPERATION_ERRORS as exc:
+        raise click.ClickException(str(exc)) from exc
+    verb = "Reconciled" if apply else "Found"
+    click.echo(
+        f"{verb} research state: "
+        f"{len(report.stale_running_run_ids)} abandoned running rows, "
+        f"{len(report.orphan_directories)} unowned artifact directories"
+    )
+    if apply:
+        click.echo(
+            f"Marked {len(report.failed_run_ids)} runs failed; "
+            f"removed {len(report.removed_directories)} directories"
+        )
+    elif report.stale_running_run_ids or report.orphan_directories:
+        raise click.exceptions.Exit(1)
+
+
 # ---- inspection ----------------------------------------------------------
 
 
@@ -1238,8 +1282,9 @@ def status(config: Config) -> None:
         if cov:
             oldest_edge = min(last for _, last in cov.values())
             click.echo(f"Oldest EOD coverage edge: {oldest_edge}")
+        now = datetime.now(UTC)
         usage = meta.request_usage(
-            now=datetime.now(UTC), rolling_days=DEFAULT_BUDGET_POLICY.rolling_days
+            now=now, rolling_days=DEFAULT_BUDGET_POLICY.rolling_days
         )
         if usage["requests"]:
             click.echo(
@@ -1248,6 +1293,19 @@ def status(config: Config) -> None:
                 f"{usage['observed_bytes']:,} observed bytes, "
                 f"{usage['charged_bytes']:,} budgeted bytes"
             )
+        historical_limit = DEFAULT_BUDGET_POLICY.historical_total_byte_limit(now)
+        historical_headroom = max(
+            0,
+            historical_limit
+            - usage["charged_bytes"]
+            - DEFAULT_BUDGET_POLICY.response_reservation_bytes,
+        )
+        click.echo(
+            "Historical admission ceiling: "
+            f"{historical_limit:,} total budgeted bytes, "
+            f"{historical_headroom:,} bytes available after the next "
+            f"{DEFAULT_BUDGET_POLICY.response_reservation_bytes:,}-byte reservation"
+        )
 
 
 @main.command()
@@ -1259,12 +1317,16 @@ def sql(config: Config, query: str) -> None:
     meta.*)."""
     from marketdata.query import connect
 
+    con = None
     try:
         con = connect(config)
         con.execute(query)
         click.echo(con.pl())
     except (RuntimeError, duckdb.Error) as exc:
         raise click.ClickException(str(exc)) from exc
+    finally:
+        if con is not None:
+            con.close()
 
 
 if __name__ == "__main__":

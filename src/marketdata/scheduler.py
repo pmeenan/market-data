@@ -9,7 +9,7 @@ attempt outcomes, and transport request/byte usage.
 from __future__ import annotations
 
 import hashlib
-import json
+from calendar import monthrange
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -28,6 +28,7 @@ from marketdata.ingest import (
     update_eod_validated,
     update_intraday_validated,
 )
+from marketdata.jsonutil import canonical_json
 from marketdata.locking import (
     DataDirectoryLock,
     coordinated_data_directory,
@@ -45,6 +46,8 @@ HOURLY_REQUEST_LIMIT = 10_000
 DAILY_REQUEST_LIMIT = 100_000
 TOTAL_BYTE_LIMIT = 40_000_000_000
 HISTORICAL_BYTE_LIMIT = 30_000_000_000
+HISTORICAL_BYTE_LIMIT_MAX = 39_000_000_000
+HISTORICAL_LIMIT_RAMP_DAYS = 7
 
 # Tiingo does not document whether its monthly ledger counts encoded or
 # decoded bodies, nor the account's precise reset boundary (RE-006). Current
@@ -70,11 +73,70 @@ class BudgetPolicy:
     daily_request_limit: int = DAILY_REQUEST_LIMIT
     total_byte_limit: int = TOTAL_BYTE_LIMIT
     historical_byte_limit: int = HISTORICAL_BYTE_LIMIT
+    historical_byte_limit_max: int | None = None
+    historical_limit_ramp_days: int = HISTORICAL_LIMIT_RAMP_DAYS
     rolling_days: int = ROLLING_BUDGET_DAYS
     response_reservation_bytes: int = RESPONSE_RESERVATION_BYTES
 
+    def __post_init__(self) -> None:
+        limits = (
+            self.hourly_request_limit,
+            self.daily_request_limit,
+            self.total_byte_limit,
+            self.historical_byte_limit,
+            self.historical_limit_ramp_days,
+            self.rolling_days,
+        )
+        if any(value <= 0 for value in limits):
+            raise ValueError("budget policy limits must be positive")
+        if self.response_reservation_bytes < 0:
+            raise ValueError("response reservation must not be negative")
+        historical_max = self.effective_historical_byte_limit_max
+        if historical_max < self.historical_byte_limit:
+            raise ValueError(
+                "late-month historical limit must not be below its base limit"
+            )
+        if historical_max > self.total_byte_limit:
+            raise ValueError(
+                "late-month historical limit must not exceed the total byte limit"
+            )
+        if self.historical_limit_ramp_days < 2:
+            raise ValueError("historical limit ramp must span at least two days")
 
-DEFAULT_BUDGET_POLICY = BudgetPolicy()
+    @property
+    def effective_historical_byte_limit_max(self) -> int:
+        """Late-month maximum, defaulting to the caller's base fixture limit."""
+        return (
+            self.historical_byte_limit
+            if self.historical_byte_limit_max is None
+            else self.historical_byte_limit_max
+        )
+
+    def historical_total_byte_limit(self, now: datetime) -> int:
+        """Total rolling usage at which new historical work must stop.
+
+        The base limit applies until the final seven UTC calendar days. The
+        limit then rises in equal daily steps and reaches its maximum on the
+        final day. Current work is not subject to this admission limit and may
+        continue to the separate total ceiling.
+        """
+        if now.tzinfo is None:
+            raise ValueError("budget timestamps must be timezone-aware")
+        today = now.astimezone(UTC).date()
+        final_day = monthrange(today.year, today.month)[1]
+        days_remaining = final_day - today.day
+        if days_remaining >= self.historical_limit_ramp_days:
+            return self.historical_byte_limit
+        step = self.historical_limit_ramp_days - 1 - days_remaining
+        increase = self.effective_historical_byte_limit_max - self.historical_byte_limit
+        return self.historical_byte_limit + (
+            increase * step // (self.historical_limit_ramp_days - 1)
+        )
+
+
+DEFAULT_BUDGET_POLICY = BudgetPolicy(
+    historical_byte_limit_max=HISTORICAL_BYTE_LIMIT_MAX
+)
 
 
 def _utc_now() -> datetime:
@@ -162,15 +224,16 @@ class PersistentAttemptObserver(RequestAttemptObserver):
     def before_attempt(
         self, path: str = "", params: dict[str, Any] | None = None
     ) -> int:
+        now = self._clock()
         attempt_id, reason = self._meta.reserve_request_attempt(
-            now=self._clock(),
+            now=now,
             work_kind=self._work_kind,
             operation=_operation_label(self._operation, path),
             reserved_bytes=self._policy.response_reservation_bytes,
             hourly_request_limit=self._policy.hourly_request_limit,
             daily_request_limit=self._policy.daily_request_limit,
             total_byte_limit=self._policy.total_byte_limit,
-            historical_byte_limit=self._policy.historical_byte_limit,
+            historical_total_byte_limit=(self._policy.historical_total_byte_limit(now)),
             rolling_days=self._policy.rolling_days,
         )
         if reason is not None:
@@ -183,15 +246,16 @@ class PersistentAttemptObserver(RequestAttemptObserver):
         return self._policy.response_reservation_bytes
 
     def can_start_batch(self, attempts: int) -> bool:
+        now = self._clock()
         return self._meta.can_start_request_batch(
-            now=self._clock(),
+            now=now,
             work_kind=self._work_kind,
             attempts=attempts,
             reserved_bytes=self._policy.response_reservation_bytes,
             hourly_request_limit=self._policy.hourly_request_limit,
             daily_request_limit=self._policy.daily_request_limit,
             total_byte_limit=self._policy.total_byte_limit,
-            historical_byte_limit=self._policy.historical_byte_limit,
+            historical_total_byte_limit=(self._policy.historical_total_byte_limit(now)),
             rolling_days=self._policy.rolling_days,
         )
 
@@ -273,7 +337,7 @@ def history_job_id(
     payload = _history_request_payload(
         dataset_key, tickers, start, end, phase=phase, force=force
     )
-    digest = hashlib.sha256(_canonical_json(payload).encode()).hexdigest()[:20]
+    digest = hashlib.sha256(canonical_json(payload).encode()).hexdigest()[:20]
     return f"history-{digest}"
 
 
@@ -288,8 +352,13 @@ def resolve_history_job(
     phase: int | None = None,
     force: bool = False,
     job_id: str | None = None,
+    retry_blocked: bool = False,
 ) -> str:
-    """Resolve one CLI/scheduled request to a frozen, initialized job."""
+    """Resolve one CLI/scheduled request to a frozen, initialized job.
+
+    Active jobs resume normally. Terminal ranges remain dormant unless the
+    operator explicitly requests a retry after repairing their evidence.
+    """
     durable_job_id = job_id or history_job_id(
         dataset_key, tickers, start, end, phase=phase, force=force
     )
@@ -314,6 +383,7 @@ def resolve_history_job(
         end=frozen_end,
         phase=phase,
         force=force,
+        retry_blocked=retry_blocked,
     )
     return durable_job_id
 
@@ -330,6 +400,7 @@ def run_history_request(
     phase: int | None = None,
     force: bool = False,
     job_id: str | None = None,
+    retry_blocked: bool = False,
     policy: BudgetPolicy = DEFAULT_BUDGET_POLICY,
     max_units: int | None = None,
     clock: Callable[[], datetime] = _utc_now,
@@ -344,6 +415,7 @@ def run_history_request(
         phase=phase,
         force=force,
         job_id=job_id,
+        retry_blocked=retry_blocked,
     )
     return run_history_sweep(
         client,
@@ -376,13 +448,14 @@ def initialize_history_job(
     end: date,
     phase: int | None = None,
     force: bool = False,
+    retry_blocked: bool = False,
 ) -> None:
     """Snapshot stable owners and their date-ranged aliases deterministically."""
     _require_phase_dataset(phase, dataset_key)
     request_payload = _history_request_payload(
         dataset_key, tickers, start, end, phase=phase, force=force
     )
-    request_hash = hashlib.sha256(_canonical_json(request_payload).encode()).hexdigest()
+    request_hash = hashlib.sha256(canonical_json(request_payload).encode()).hexdigest()
     existing = meta.history_job(job_id)
     if existing is not None:
         expected = (
@@ -403,8 +476,20 @@ def initialize_history_job(
         )
         if actual != expected:
             raise ValueError(f"history job {job_id!r} already has a different request")
-        if existing["status"] == "blocked":
-            meta.reactivate_history_job(job_id)
+        if retry_blocked:
+            if existing["status"] != "blocked":
+                raise ValueError(
+                    f"history job {job_id!r} is {existing['status']}, not blocked"
+                )
+            if not meta.reactivate_history_job(job_id):
+                reason = (
+                    "the job is cancelled"
+                    if existing["cancelled"]
+                    else "it has no retryable terminal ranges"
+                )
+                raise ValueError(
+                    f"history job {job_id!r} was not reactivated because {reason}"
+                )
         return
     ranges_by_instrument: dict[str, list[dict[str, Any]]] = {}
     blocked: list[dict[str, Any]] = []
@@ -470,7 +555,7 @@ def initialize_history_job(
             for item in blocked
         ],
     }
-    cohort_hash = hashlib.sha256(_canonical_json(snapshot).encode()).hexdigest()
+    cohort_hash = hashlib.sha256(canonical_json(snapshot).encode()).hexdigest()
     meta.create_history_job(
         job_id=job_id,
         phase=phase,
@@ -1179,10 +1264,6 @@ def _require_phase_dataset(phase: int | None, dataset_key: str) -> None:
     }
     if phase not in allowed or dataset_key not in allowed[phase]:
         raise ValueError(f"dataset {dataset_key!r} is not valid for phase {phase}")
-
-
-def _canonical_json(value: Any) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
 def _history_request_payload(

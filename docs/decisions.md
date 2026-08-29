@@ -25,7 +25,95 @@ Decision / Context / Consequences / Reopen if
 
 ---
 
-## D-024: IEX ticker evidence comes from exact-frequency bounded probes  (2026-08-28, status: accepted, amends D-014)
+## D-026: Study eligibility is local-window and decision-time causal  (2026-08-29, status: accepted, amends D-010, D-015, D-020, and D-024)
+
+**Decision:** Event studies decide eligibility for each instrument at each
+decision timestamp from only the data available through that timestamp. A study
+declares its dataset-specific selection/lookback window and requires the
+expected observations in that local window to be contiguous and valid. It does
+not require the instrument's entire stored history to be complete, resolve
+identity gaps outside that window, or treat one ticker as a continuous company
+across distinct listing episodes. Canonical bars remain instrument-owned and
+all ingestion-time response/identity validation in D-014 and D-024 remains in
+force.
+
+The outcome window is deliberately separate from candidate eligibility. Once
+selected, an event remains in the study population even if a later checkpoint
+is unavailable. Its outcome is recorded as unavailable with a reason rather
+than silently dropping the event; event counts distinguish selected,
+evaluable, missing-outcome, lookback-incomplete, identity-excluded, and
+quality-excluded cases. No future alias end, coverage state, or returned bar
+may retroactively decide whether the candidate existed at the decision time.
+
+Terminal history ranges and static identity exclusions remain durable and
+visible, but they are accepted exclusions rather than unfinished work that
+holds a later backfill phase or a study whose local inputs are complete.
+Routine history invocations do not reactivate terminal ranges. An operator
+must use an explicit retry after changing or reviewing the underlying evidence.
+
+**Context:** The confirmed strategies hold positions for hours to days and
+select each event from a short contiguous lookback. For that research unit, a
+distant gap or earlier use of the same ticker has no bearing on a locally
+complete ticker/date window. Exhaustively resolving those edges would spend
+quota without improving the intended result. Conversely, requiring a future
+exit bar before retaining a candidate would introduce lookahead/survivorship
+bias; high-price/liquidity filters reduce ordinary delisting exposure but do
+not eliminate halts, acquisitions, or vendor omissions.
+
+**Consequences:** M3's runner owns a reusable local-window eligibility audit and
+persists exclusion/outcome-status counts with each run. Study features never
+group across listing episodes by ticker alone. Phase completion means every
+safe target is covered and every remaining target is durably classified; it
+does not mean every identity edge was resolved. D-020's blocked terminal state
+continues to satisfy predecessor gates, while retries require explicit operator
+intent.
+
+**Reopen if:** A confirmed strategy uses issuer continuity, fundamentals,
+longitudinal per-security features spanning identity boundaries, or holding
+periods long enough that corporate-action/delisting semantics need first-class
+simulation.
+
+---
+
+## D-025: Late-month history may consume proven-unused reserve  (2026-08-29, status: accepted, amends D-013 and D-020)
+
+**Decision:** The admission ceiling for every historical request remains 30 GB
+of total metered usage until the final seven UTC calendar days of a month. On
+those seven dates it advances in equal daily steps through 30, 31.5, 33, 34.5,
+36, 37.5, and 39 GB. The check uses total charged usage, not historical usage
+alone, so current work already performed consumes the same allowance and only
+genuinely unused reserve becomes available to history. Current work is exempt
+from this sliding admission ceiling and retains the separate 40 GB total hard
+stop. The 64 MB pre-request reservation is included in both checks.
+
+RE-006's conservative 32-day rolling usage window remains the accounting
+basis; UTC calendar dates change the admission ceiling but do not assert or
+simulate a vendor reset. Consequently, the ceiling returns to 30 GB on the
+first of a month while prior attempts remain charged until they age out. This
+can pause history longer than Tiingo's actual billing cycle, but cannot spend
+an undocumented reset twice.
+
+**Context:** A fixed 10 GB current-work reserve was mostly unused during the
+first live phase-1 backfill, leaving substantial bandwidth idle near month end.
+The owner prefers to release that reserve gradually once the remaining current
+work has had most of the month to reveal its actual cost, while retaining 1 GB
+at month end and the 40 GB absolute ceiling for current collection.
+
+**Consequences:** Budget checks and bucket-batch preflights calculate the same
+date-dependent ceiling. `market-data status` reports the currently active
+ceiling and headroom after the next conservative response reservation. The
+schedule is intentionally daily rather than a
+last-minute jump, so breadth-first history can make useful progress throughout
+the final week. D-013's fixed 30 GB history-only ceiling and permanent 10 GB
+reserve no longer govern.
+
+**Reopen if:** Tiingo exposes an authoritative billing ledger/reset timestamp,
+current traffic needs more than the retained late-month headroom, or measured
+historical throughput needs a smoother intra-day ramp.
+
+---
+
+## D-024: IEX ticker evidence comes from exact-frequency bounded probes  (2026-08-28, status: accepted, amended by D-026; amends D-014)
 
 **Decision:** A stable alias envelope is only a candidate for IEX identity; EOD
 validation is never copied into an intraday dataset. For each conflict-free
@@ -222,7 +310,7 @@ target segment.
 
 ---
 
-## D-020: Historical backfills advance breadth-first by request depth  (2026-08-27, status: accepted, amends D-011 and D-013)
+## D-020: Historical backfills advance breadth-first by request depth  (2026-08-27, status: accepted, amended by D-025 and D-026; amends D-011 and D-013)
 
 **Decision:** Every historical backfill in phases 1–3, whether started
 manually or by the persisted scheduler, advances breadth-first within its
@@ -246,8 +334,9 @@ phase order is unchanged.
 
 If all remaining ranges are terminally identity-blocked, the job records a
 `blocked` terminal state. That durable unresolved report satisfies the phase
-gate without claiming coverage; explicitly rerunning the same request
-reactivates its runtime-blocked ranges after identity evidence is repaired.
+gate without claiming coverage. Routine reruns leave its ranges dormant;
+`backfill ... --retry-blocked` explicitly reactivates runtime-blocked ranges
+after identity evidence is repaired or reviewed.
 Operators can cancel an obsolete active/blocked job without deleting its audit
 trail, so a superseded request cannot orphan a permanent predecessor gate.
 
@@ -268,7 +357,7 @@ last-attempt status. Tests must prove a quota stop resumes the remainder
 of the same sweep, no instrument gets request depth N+1 before every eligible
 peer gets a depth-N turn, and failures or identity blocks neither advance that
 target nor stall safe peers. D-013 continues to own the special five-minute
-30 GB history cap and current-data reserve.
+budget and current-data priority, as amended by D-025's late-month ramp.
 
 **Reopen if:** Tiingo provides explicit complete pagination with different
 economics, the owner changes phase priority, or measured scheduler overhead
@@ -451,10 +540,12 @@ aggregate fingerprint is cataloged with the run. Paths in SQLite are relative
 to the relocatable data root.
 
 The library-level study runner holds the data-directory process lock from
-input selection through result publication. It expands input globs once and
-passes that explicit file list to both DuckDB and the manifest builder. The
-aggregate fingerprint hashes canonical (relative path, content digest) pairs,
-not filesystem mtimes, so a byte-identical restore preserves the fingerprint.
+input selection through result publication. It requires every declared input
+glob to match, expands them once, and passes that explicit file list to both
+DuckDB and the manifest builder. The manifest retains the canonical glob set;
+the aggregate fingerprint hashes those patterns plus canonical (relative path,
+content digest) pairs, not filesystem mtimes, so a byte-identical restore
+preserves the fingerprint while a newly matching file invalidates it.
 
 Result publication is append-only and failure-safe. Parquet artifacts are
 written and validated under temporary names, renamed into place, then the
@@ -463,7 +554,9 @@ interrupted runs are never selected by successful catalog-based result
 loading. A retry creates a new run rather than mutating a completed one.
 DuckDB loads observations through the same query surface as bars, using
 explicit compatible artifact paths read from successful SQLite catalog rows
-rather than a results-directory glob.
+rather than a results-directory glob. Runs that claim one study schema version
+must have exactly equal artifact schemas; union-by-name null padding is not a
+compatibility mechanism.
 
 The manifest identifies the input vintage but does not turn the
 correction-aware bar archive into versioned storage. Persisted observations
@@ -489,13 +582,14 @@ publication, catalog-filtered DuckDB loading, and stale-running/orphan
 reporting. Every result observation uses stable instrument identity.
 Parameters must not contain secrets. Removing old runs requires an explicit
 maintenance operation; automatic overwrite or reuse of a successful `run_id`
-is forbidden.
+is forbidden. Dry-run reconciliation reports abandoned `running` rows and
+unowned directories; an explicit apply is required to fail/clean them.
 
 **Reopen if:** A study must be exactly rerunnable after source corrections, in
 which case immutable input snapshots or dataset versioning are required; or
 result volume/query patterns make the per-run layout materially inefficient.
 
-## D-015: Research uses a project-native DuckDB/polars event engine  (2026-08-26, status: accepted)
+## D-015: Research uses a project-native DuckDB/polars event engine  (2026-08-26, status: accepted, amended by D-026)
 
 **Decision:** The research layer starts as a small, project-native vectorized
 engine over the existing DuckDB/polars query stack. Strategies select events
@@ -638,7 +732,7 @@ identity semantics. Such a source can replace the resolver input, but does not
 remove the need for stable warehouse identity unless its IDs and guarantees
 are contractually durable.
 
-## D-013: Five-minute history fills newest-first with a 30 GB monthly hard cap  (2026-08-26, status: accepted, amended by D-020; amends D-011)
+## D-013: Five-minute history fills newest-first with a 30 GB monthly hard cap  (2026-08-26, status: accepted, amended by D-020 and D-025; amends D-011)
 
 **Decision:** The phase-3 seed-ticker 5-minute backfill proceeds in global
 date bands from the most recent completed session backward toward 2016-12-12.
@@ -775,8 +869,9 @@ run roughly half to a third the bytes per bar (owner's call, 2026-08-26; the
 client switch landed in M1 on 2026-08-27). With CSV, the OQ-2 spike
 measured a 68.5 GB seed-list projection for 5-minute history, within the
 original ~40–75 GB estimate, i.e. **1–2 months only if phase 3 could use the
-full vendor cap**. D-013 instead hard-caps history at 30 GB/month, making the
-operational minimum three billing windows. The EOD phases and operational
+full vendor cap**. D-013 originally hard-capped history at 30 GB/month, making
+the operational minimum three billing windows; D-025's later reserve release
+can reduce that to two. The EOD phases and operational
 overhead are additional; all-ticker EOD is still projected at well under a
 month. Backfill runs through a budget-aware scheduler (confirmed feature,
 features.md):
@@ -812,7 +907,7 @@ using the client counter as the authoritative budget ledger (RE-006).
 wildly from the estimate, or the owner's study needs reprioritize which data
 arrives first.
 
-## D-010: Universes are dataset seed filters, not backtest membership  (2026-08-26, status: accepted, amends D-004; identity consequences amended by D-014)
+## D-010: Universes are dataset seed filters, not backtest membership  (2026-08-26, status: accepted, amended by D-026; amends D-004; identity consequences amended by D-014)
 
 **Decision:** The per-year dollar-volume universes exist to choose which
 symbols seed dataset ingestion (preferring large, stable names for the initial

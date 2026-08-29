@@ -118,7 +118,8 @@ build → commit loop, on-demand reviews, and the human commit gate.
 
 ## Current status
 
-Milestone **M2 (trustworthy scheduled ingestion)** is in progress. Cap-safe
+Milestones **M2 (trustworthy scheduled ingestion)** and **M3 (first persisted
+study)** are in progress. Cap-safe
 next-session IEX planning and the XNYS session-label surface are implemented;
 structured quality findings, consumer-declared gates, durable request budgets,
 current-first breadth-first scheduling, and shared data-directory mutation
@@ -130,6 +131,9 @@ user-systemd backfill is running. A bounded-status nightly current-EOD timer is
 installed; two actual post-market runs remain. External failure notification is
 optional for this personal deployment.
 M1 closed on 2026-08-27. Production ingestion is permitted only for validated
-request segments; unresolved work remains fail-closed. The backtest layer does
-not exist yet. See [docs/plan.md](docs/plan.md). Keep this paragraph short and
-current when plan.md milestone status changes (rule 4).
+request segments; unresolved work remains fail-closed. M3's D-016 result
+catalog, immutable artifact publication, input fingerprints, and compatible
+DuckDB loading are implemented, with explicit interrupted-run reconciliation;
+the event runner and first study are next. See [docs/plan.md](docs/plan.md).
+Keep this paragraph short and current when plan.md milestone status changes
+(rule 4).

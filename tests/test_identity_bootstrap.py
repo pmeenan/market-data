@@ -568,6 +568,7 @@ def test_intraday_bootstrap_quota_stop_resumes_after_validated_prefix(tmp_path):
         daily_request_limit=10,
         total_byte_limit=1_000_000_000,
         historical_byte_limit=1_000_000_000,
+        historical_byte_limit_max=1_000_000_000,
     )
     client = FakeIntradayIdentityClient()
     with MetaStore(tmp_path / "meta.db") as meta:

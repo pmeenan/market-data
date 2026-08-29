@@ -198,6 +198,16 @@ def test_cancel_stops_a_running_sweep_after_its_current_turn(tmp_path):
     with MetaStore(data_dir / "meta.db") as meta:
         job = meta.history_job(job_id)
         assert (job["status"], job["cancelled"]) == ("blocked", 1)
+        with pytest.raises(ValueError, match="job is cancelled"):
+            initialize_history_job(
+                meta,
+                job_id=job_id,
+                dataset_key="intraday_5min",
+                tickers=["A", "B"],
+                start=date(2024, 1, 1),
+                end=date(2024, 12, 31),
+                retry_blocked=True,
+            )
 
 
 def test_history_sweep_yields_lock_between_turns_for_current_work(
@@ -522,6 +532,20 @@ def test_terminal_identity_blocker_does_not_hold_later_phase_forever(tmp_path):
         assert blocked.job_status == "blocked"
         assert later.stop_reason is None
 
+        # Routine scheduler/timer invocations leave terminal exclusions
+        # dormant instead of spending quota on the same evidence again.
+        initialize_history_job(
+            meta,
+            job_id="blocked-phase-1",
+            phase=1,
+            dataset_key="intraday_1hour",
+            tickers=["A"],
+            start=start,
+            end=end,
+        )
+        assert meta.history_job("blocked-phase-1")["status"] == "blocked"
+        assert meta.history_ranges("blocked-phase-1")[0]["terminal_blocked"] == 1
+
         meta.add_vendor_identifier(
             "instrument-a",
             "intraday_1hour",
@@ -539,6 +563,7 @@ def test_terminal_identity_blocker_does_not_hold_later_phase_forever(tmp_path):
             tickers=["A"],
             start=start,
             end=end,
+            retry_blocked=True,
         )
         assert meta.history_job("blocked-phase-1")["status"] == "active"
 
@@ -608,7 +633,7 @@ def test_oversized_response_is_checkpointed_as_terminal_range_blocker(tmp_path):
 
 
 def test_budget_reserves_requests_and_bytes_before_transport(tmp_path):
-    now = datetime(2026, 8, 28, 12, tzinfo=UTC)
+    now = datetime(2026, 8, 20, 12, tzinfo=UTC)
     policy = BudgetPolicy(
         hourly_request_limit=10,
         daily_request_limit=10,
@@ -636,7 +661,6 @@ def test_budget_reserves_requests_and_bytes_before_transport(tmp_path):
             "requests": 4,
             "observed_bytes": 197,
             "charged_bytes": 290,
-            "historical_charged_bytes": 290,
             "incomplete_attempts": 1,
         }
         with pytest.raises(BudgetExhausted, match="historical_byte_limit"):
@@ -653,6 +677,97 @@ def test_budget_reserves_requests_and_bytes_before_transport(tmp_path):
         )
         current_attempt = current.before_attempt()
         current.after_attempt(current_attempt, 25, complete=True)
+        with pytest.raises(BudgetExhausted, match="total_byte_limit"):
+            current.before_attempt()
+
+
+def test_historical_limit_ramps_over_final_seven_calendar_days():
+    policy = scheduler_mod.DEFAULT_BUDGET_POLICY
+
+    expected = {
+        24: 30_000_000_000,
+        25: 30_000_000_000,
+        26: 31_500_000_000,
+        27: 33_000_000_000,
+        28: 34_500_000_000,
+        29: 36_000_000_000,
+        30: 37_500_000_000,
+        31: 39_000_000_000,
+    }
+    assert {
+        day: policy.historical_total_byte_limit(datetime(2026, 8, day, 12, tzinfo=UTC))
+        for day in expected
+    } == expected
+    assert (
+        policy.historical_total_byte_limit(datetime(2027, 2, 21, 12, tzinfo=UTC))
+        == 30_000_000_000
+    )
+    assert (
+        policy.historical_total_byte_limit(datetime(2027, 2, 22, 12, tzinfo=UTC))
+        == 30_000_000_000
+    )
+    assert (
+        policy.historical_total_byte_limit(datetime(2027, 2, 28, 12, tzinfo=UTC))
+        == 39_000_000_000
+    )
+
+    fixture_policy = BudgetPolicy(
+        total_byte_limit=40,
+        historical_byte_limit=30,
+        response_reservation_bytes=1,
+    )
+    assert (
+        fixture_policy.historical_total_byte_limit(
+            datetime(2026, 8, 31, 12, tzinfo=UTC)
+        )
+        == 30
+    )
+
+
+def test_late_month_history_uses_only_unused_total_headroom(tmp_path):
+    moments = [datetime(2026, 8, 24, 12, tzinfo=UTC)]
+    policy = BudgetPolicy(
+        hourly_request_limit=100,
+        daily_request_limit=100,
+        total_byte_limit=40,
+        historical_byte_limit=30,
+        historical_byte_limit_max=39,
+        rolling_days=32,
+        response_reservation_bytes=1,
+    )
+    with MetaStore(tmp_path / "meta.db") as meta:
+        current = PersistentAttemptObserver(
+            meta,
+            work_kind="current",
+            operation="current-reserve",
+            policy=policy,
+            clock=lambda: moments[0],
+        )
+        historical = PersistentAttemptObserver(
+            meta,
+            work_kind="historical",
+            operation="history-ramp",
+            policy=policy,
+            clock=lambda: moments[0],
+        )
+        for _ in range(5):
+            attempt = current.before_attempt()
+            current.after_attempt(attempt, 1, complete=True)
+        for _ in range(25):
+            attempt = historical.before_attempt()
+            historical.after_attempt(attempt, 1, complete=True)
+        with pytest.raises(BudgetExhausted, match="historical_byte_limit"):
+            historical.before_attempt()
+
+        moments[0] = datetime(2026, 8, 31, 12, tzinfo=UTC)
+        for _ in range(9):
+            attempt = historical.before_attempt()
+            historical.after_attempt(attempt, 1, complete=True)
+        with pytest.raises(BudgetExhausted, match="historical_byte_limit"):
+            historical.before_attempt()
+
+        final_current = current.before_attempt()
+        current.after_attempt(final_current, 1, complete=True)
         with pytest.raises(BudgetExhausted, match="total_byte_limit"):
             current.before_attempt()
 
