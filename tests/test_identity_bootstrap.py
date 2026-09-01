@@ -160,7 +160,7 @@ def test_bootstrap_validates_metadata_and_archive_bounded_reused_episodes(tmp_pa
         }
         assert "exchangeCode" in result.failed["BAD"]
         assert client.metadata_calls == ["BAD", "SAFE"]
-        assert meta.request_usage(now=now(), rolling_days=32)["requests"] == 2
+        assert meta.request_usage(now=now())["requests"] == 2
 
         report = meta.resolve_alias_range(
             "SAFE",
@@ -421,7 +421,7 @@ def test_intraday_bootstrap_probes_exact_frequency_and_persists_fail_closed_outc
         )
 
         calls = list(client.calls)
-        usage = meta.request_usage(now=now, rolling_days=32)
+        usage = meta.request_usage(now=now)
         resumed = bootstrap_intraday_identities(
             client,
             meta,
@@ -436,10 +436,7 @@ def test_intraday_bootstrap_probes_exact_frequency_and_persists_fail_closed_outc
         assert client.calls == calls
         assert len(resumed.skipped) == 3
         assert resumed.probe_attempts == 0
-        assert (
-            meta.request_usage(now=now, rolling_days=32)["requests"]
-            == usage["requests"]
-        )
+        assert meta.request_usage(now=now)["requests"] == usage["requests"]
 
         client.responses["EMPTY"] = lambda start, end: [_intraday_row(start)]
         retried = bootstrap_intraday_identities(

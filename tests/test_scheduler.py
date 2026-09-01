@@ -356,7 +356,6 @@ def test_quota_stop_does_not_consume_target_turn_or_move_cursor(tmp_path):
         daily_request_limit=100,
         total_byte_limit=1_000_000,
         historical_byte_limit=1_000_000,
-        rolling_days=32,
         response_reservation_bytes=100,
     )
     with MetaStore(data_dir / "meta.db") as meta:
@@ -685,7 +684,6 @@ def test_budget_reserves_requests_and_bytes_before_transport(tmp_path):
         daily_request_limit=10,
         total_byte_limit=400,
         historical_byte_limit=300,
-        rolling_days=32,
         response_reservation_bytes=100,
     )
     with MetaStore(tmp_path / "meta.db") as meta:
@@ -702,7 +700,7 @@ def test_budget_reserves_requests_and_bytes_before_transport(tmp_path):
         # An incomplete response keeps its 100-byte reservation charged.
         attempt = historical.before_attempt()
         historical.after_attempt(attempt, 7, complete=False, bytes_known=False)
-        usage = meta.request_usage(now=now, rolling_days=32)
+        usage = meta.request_usage(now=now)
         assert usage == {
             "requests": 4,
             "observed_bytes": 197,
@@ -770,6 +768,59 @@ def test_historical_limit_ramps_over_final_seven_calendar_days():
     )
 
 
+def test_billing_month_and_late_month_ramp_change_at_midnight_est():
+    policy = scheduler_mod.DEFAULT_BUDGET_POLICY
+    before_reset = datetime(2026, 9, 1, 4, 59, 59, tzinfo=UTC)
+    after_reset = datetime(2026, 9, 1, 5, tzinfo=UTC)
+
+    assert policy.billing_month_start(before_reset) == datetime(
+        2026, 8, 1, 5, tzinfo=UTC
+    )
+    assert policy.billing_month_start(after_reset) == datetime(
+        2026, 9, 1, 5, tzinfo=UTC
+    )
+    assert policy.historical_total_byte_limit(before_reset) == 39_000_000_000
+    assert policy.historical_total_byte_limit(after_reset) == 30_000_000_000
+
+
+def test_monthly_byte_budget_excludes_attempts_before_tiingo_reset(tmp_path):
+    moments = [datetime(2026, 9, 1, 4, 59, tzinfo=UTC)]
+    policy = BudgetPolicy(
+        hourly_request_limit=100,
+        daily_request_limit=100,
+        total_byte_limit=4,
+        historical_byte_limit=3,
+        response_reservation_bytes=1,
+    )
+    with MetaStore(tmp_path / "meta.db") as meta:
+        historical = PersistentAttemptObserver(
+            meta,
+            work_kind="historical",
+            operation="month-reset",
+            policy=policy,
+            clock=lambda: moments[0],
+        )
+        for _ in range(3):
+            attempt = historical.before_attempt()
+            historical.after_attempt(attempt, 1, complete=True)
+
+        assert historical.can_start_batch(1) is False
+        with pytest.raises(BudgetExhausted, match="monthly_historical_byte_limit"):
+            historical.before_attempt()
+
+        moments[0] = datetime(2026, 9, 1, 5, tzinfo=UTC)
+        assert historical.can_start_batch(1) is True
+        attempt = historical.before_attempt()
+        historical.after_attempt(attempt, 1, complete=True)
+
+        assert meta.request_usage(now=moments[0]) == {
+            "requests": 1,
+            "observed_bytes": 1,
+            "charged_bytes": 1,
+            "incomplete_attempts": 0,
+        }
+
+
 def test_late_month_history_uses_only_unused_total_headroom(tmp_path):
     moments = [datetime(2026, 8, 24, 12, tzinfo=UTC)]
     policy = BudgetPolicy(
@@ -778,7 +829,6 @@ def test_late_month_history_uses_only_unused_total_headroom(tmp_path):
         total_byte_limit=40,
         historical_byte_limit=30,
         historical_byte_limit_max=39,
-        rolling_days=32,
         response_reservation_bytes=1,
     )
     with MetaStore(tmp_path / "meta.db") as meta:
@@ -825,7 +875,6 @@ def test_retry_attempts_are_individually_reserved_and_settled(tmp_path):
         daily_request_limit=10,
         total_byte_limit=1_000,
         historical_byte_limit=1_000,
-        rolling_days=32,
         response_reservation_bytes=100,
     )
     with MetaStore(tmp_path / "meta.db") as meta:
@@ -852,7 +901,6 @@ def test_daily_request_limit_uses_a_conservative_rolling_window(tmp_path):
         daily_request_limit=1,
         total_byte_limit=1_000,
         historical_byte_limit=1_000,
-        rolling_days=32,
         response_reservation_bytes=100,
     )
     with MetaStore(tmp_path / "meta.db") as meta:

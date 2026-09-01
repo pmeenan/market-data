@@ -215,10 +215,10 @@ Identity and ingestion metadata:
   encoded response bytes, and complete/incomplete state; plus the immutable
   phase/dataset cohort, per-alias-range frontier, per-instrument attempt depth,
   and breadth-first sweep cursor required by D-013 and D-020. This is
-  operational state, not a second statement of bar coverage. The initial hard
-  budget uses a 32-day rolling window (longer than any calendar month) and a
-  64 MB response reservation because Tiingo does not publish its byte basis or
-  billing reset boundary. Complete responses settle to actual observed bytes;
+  operational state, not a second statement of bar coverage. The hard budget
+  follows Tiingo's documented midnight-EST billing month and uses a 64 MB
+  response reservation because Tiingo does not publish its byte basis.
+  Complete responses settle to actual observed bytes;
   interrupted responses retain the larger reservation, while an orderly
   transport failure before any response exists settles to the known zero-byte
   body. A crashed/unsettled attempt always retains its reservation.
@@ -358,12 +358,12 @@ budget durably before transport, including each retry. It then records encoded
 response-body bytes from the raw transport, including retry bodies, partial
 reads where the HTTP stack exposes their count, and responses that later fail
 validation. Current cycles complete every declared current dataset before
-history can run. Historical admission uses total rolling usage: its 30 GB
-ceiling rises in equal daily steps to 39 GB over the final seven UTC calendar
-days, releasing only reserve current work has not consumed, while current work
-retains the 40 GB rolling total ceiling. RE-006's vendor billing basis remains
-undocumented, so the rolling window and response reservation are deliberately
-stricter than an assumed calendar-month/observed-byte ledger.
+history can run. Historical admission uses total billing-month usage: its 30 GB
+ceiling rises in equal daily steps to 39 GB over the final seven Tiingo billing
+dates, releasing only reserve current work has not consumed, while current
+work retains the 40 GB monthly total ceiling. RE-006's vendor billing basis
+remains undocumented, so the response reservation remains deliberately
+stricter than an observed-byte ledger.
 Each durable historical turn holds D-022's mutation lock through planning,
 transport, publication, and checkpoint, then yields it before the next turn.
 Cancellation is a concurrent SQLite control signal; an in-flight turn may

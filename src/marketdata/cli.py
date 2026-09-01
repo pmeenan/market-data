@@ -1500,12 +1500,10 @@ def status(config: Config) -> None:
                 f"current={position}"
             )
         now = datetime.now(UTC)
-        usage = meta.request_usage(
-            now=now, rolling_days=DEFAULT_BUDGET_POLICY.rolling_days
-        )
+        usage = meta.request_usage(now=now)
         if usage["requests"]:
             click.echo(
-                "Tiingo rolling usage: "
+                "Tiingo billing-month usage: "
                 f"{usage['requests']:,} requests, "
                 f"{usage['observed_bytes']:,} observed bytes, "
                 f"{usage['charged_bytes']:,} budgeted bytes"

@@ -17,6 +17,7 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Any, Protocol
 from uuid import uuid4
 
+from marketdata.budget import tiingo_billing_date, tiingo_billing_month_start
 from marketdata.calendar import plan_intraday_requests, weekend_only
 from marketdata.errors import QUOTA_STOP_REASONS, BudgetExhausted
 from marketdata.identity import DATASET_KEYS, merge_closed_date_ranges
@@ -49,13 +50,11 @@ HISTORICAL_BYTE_LIMIT = 30_000_000_000
 HISTORICAL_BYTE_LIMIT_MAX = 39_000_000_000
 HISTORICAL_LIMIT_RAMP_DAYS = 7
 
-# Tiingo does not document whether its monthly ledger counts encoded or
-# decoded bodies, nor the account's precise reset boundary (RE-006). Current
-# bar responses are uncompressed, so observable encoded/decoded sizes match.
-# A rolling window longer than any calendar month plus a reservation far above
-# measured maximum bar payloads is the deliberately conservative enforcement
-# basis until the vendor exposes authoritative usage semantics.
-ROLLING_BUDGET_DAYS = 32
+# Tiingo documents its monthly bandwidth reset as midnight EST on the first of
+# each month. Its ledger still does not define whether encoded or decoded bytes
+# are charged (RE-006), but current bar responses are uncompressed so the two
+# observable sizes match. A reservation far above measured maximum payloads
+# protects the remaining uncertainty.
 RESPONSE_RESERVATION_BYTES = 64_000_000
 
 
@@ -75,7 +74,6 @@ class BudgetPolicy:
     historical_byte_limit: int = HISTORICAL_BYTE_LIMIT
     historical_byte_limit_max: int | None = None
     historical_limit_ramp_days: int = HISTORICAL_LIMIT_RAMP_DAYS
-    rolling_days: int = ROLLING_BUDGET_DAYS
     response_reservation_bytes: int = RESPONSE_RESERVATION_BYTES
 
     def __post_init__(self) -> None:
@@ -85,7 +83,6 @@ class BudgetPolicy:
             self.total_byte_limit,
             self.historical_byte_limit,
             self.historical_limit_ramp_days,
-            self.rolling_days,
         )
         if any(value <= 0 for value in limits):
             raise ValueError("budget policy limits must be positive")
@@ -113,16 +110,16 @@ class BudgetPolicy:
         )
 
     def historical_total_byte_limit(self, now: datetime) -> int:
-        """Total rolling usage at which new historical work must stop.
+        """Total billing-month usage at which new historical work must stop.
 
-        The base limit applies until the final seven UTC calendar days. The
+        The base limit applies until the final seven Tiingo billing dates. The
         limit then rises in equal daily steps and reaches its maximum on the
         final day. Current work is not subject to this admission limit and may
         continue to the separate total ceiling.
         """
         if now.tzinfo is None:
             raise ValueError("budget timestamps must be timezone-aware")
-        today = now.astimezone(UTC).date()
+        today = tiingo_billing_date(now)
         final_day = monthrange(today.year, today.month)[1]
         days_remaining = final_day - today.day
         if days_remaining >= self.historical_limit_ramp_days:
@@ -132,6 +129,10 @@ class BudgetPolicy:
         return self.historical_byte_limit + (
             increase * step // (self.historical_limit_ramp_days - 1)
         )
+
+    def billing_month_start(self, now: datetime) -> datetime:
+        """Return the UTC instant at which Tiingo's current month began."""
+        return tiingo_billing_month_start(now)
 
 
 DEFAULT_BUDGET_POLICY = BudgetPolicy(
@@ -234,7 +235,7 @@ class PersistentAttemptObserver(RequestAttemptObserver):
             daily_request_limit=self._policy.daily_request_limit,
             total_byte_limit=self._policy.total_byte_limit,
             historical_total_byte_limit=(self._policy.historical_total_byte_limit(now)),
-            rolling_days=self._policy.rolling_days,
+            billing_month_start=self._policy.billing_month_start(now),
         )
         if reason is not None:
             raise BudgetExhausted(reason)
@@ -256,7 +257,7 @@ class PersistentAttemptObserver(RequestAttemptObserver):
             daily_request_limit=self._policy.daily_request_limit,
             total_byte_limit=self._policy.total_byte_limit,
             historical_total_byte_limit=(self._policy.historical_total_byte_limit(now)),
-            rolling_days=self._policy.rolling_days,
+            billing_month_start=self._policy.billing_month_start(now),
         )
 
     def after_attempt(

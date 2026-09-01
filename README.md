@@ -195,18 +195,19 @@ next instrument turn.
 
 Authenticated attempts reserve quota in SQLite before transport and settle to
 the encoded body bytes observed afterward; retries and rejected payloads count,
-and incomplete transfers retain their reservation. Because Tiingo does not
-publish its billing-byte basis or reset boundary, enforcement conservatively
-uses a 32-day rolling window and a 64 MB response allowance. Historical work
-is admitted against total usage up to 30 GB normally; over the final seven UTC
-calendar days that ceiling rises daily through 31.5, 33, 34.5, 36, 37.5, and
-39 GB, releasing only reserve that current work has not consumed. Current work
-retains the separate 40 GB total ceiling.
+and incomplete transfers retain their reservation. Tiingo's documented
+billing month starts at midnight EST on the first; its billing-byte basis
+remains unpublished, so enforcement uses that calendar boundary with a 64 MB
+response allowance. Historical work is admitted against total billing-month
+usage up to 30 GB normally; over the final seven Tiingo billing dates that
+ceiling rises daily through 31.5, 33, 34.5, 36, 37.5, and 39 GB, releasing only
+reserve that current work has not consumed. Current work retains the separate
+40 GB monthly ceiling.
 An orderly connection failure before any response exists settles at zero body
 bytes; crashes and partial bodies retain the full reservation. Responses are
 capped while streaming so an oversized undeclared body becomes a durable
 blocker rather than a repeating download.
-`market-data status` displays rolling observed and budgeted usage plus the
+`market-data status` displays billing-month observed and budgeted usage plus the
 active historical admission ceiling and request-admissible headroom after the
 next 64 MB reservation.
 
@@ -366,8 +367,8 @@ represent 62 reused symbols as 125 inferred episodes, and validated 4,316
 exact-frequency hourly IEX segments while retaining honest exclusions. The
 enabled D-027 program timer has replaced both fixed phase-1 timers, frozen an
 immutable 23,078-instrument supported-US phase-2 cohort, completed its safe EOD
-work with accepted exclusions, and begun phase-3 five-minute identity
-preparation. A bounded-status nightly current-EOD timer is installed; two
+work with accepted exclusions, completed phase-3 five-minute identity
+preparation, and begun its historical transfer. A bounded-status nightly current-EOD timer is installed; two
 actual post-market timer runs remain. External failure notification is optional
 for this personal deployment.
 M1 closed on

@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from marketdata.budget import tiingo_billing_month_start
 from marketdata.identity import (
     ACTIVE_ALIAS_END,
     AliasResolutionReport,
@@ -2505,7 +2506,7 @@ class MetaStore:
         daily_request_limit: int,
         total_byte_limit: int,
         historical_total_byte_limit: int,
-        rolling_days: int,
+        billing_month_start: datetime,
     ) -> tuple[int | None, str | None]:
         """Atomically reserve one request or return its quota stop reason.
 
@@ -2524,27 +2525,32 @@ class MetaStore:
             daily_request_limit,
             total_byte_limit,
             historical_total_byte_limit,
-            rolling_days,
         )
         if any(value <= 0 for value in limits) or reserved_bytes < 0:
             raise ValueError("request accounting limits must be positive")
+        if billing_month_start.tzinfo is None:
+            raise ValueError("billing month start must be timezone-aware")
+        if billing_month_start > now:
+            raise ValueError("billing month start must not be after now")
         timestamp = _utc_timestamp(now)
         try:
             self._con.execute("BEGIN IMMEDIATE")
-            usage = self._request_window_usage(now=now, rolling_days=rolling_days)
+            usage = self._request_window_usage(
+                now=now, billing_month_start=billing_month_start
+            )
             reason = None
             if usage["hourly_requests"] >= hourly_request_limit:
                 reason = "hourly_request_limit"
             elif usage["daily_requests"] >= daily_request_limit:
                 reason = "daily_request_limit"
             elif usage["charged_bytes"] + reserved_bytes > total_byte_limit:
-                reason = "rolling_total_byte_limit"
+                reason = "monthly_total_byte_limit"
             elif (
                 work_kind == "historical"
                 and usage["charged_bytes"] + reserved_bytes
                 > historical_total_byte_limit
             ):
-                reason = "rolling_historical_byte_limit"
+                reason = "monthly_historical_byte_limit"
             if reason is not None:
                 self._con.commit()
                 return None, reason
@@ -2596,7 +2602,7 @@ class MetaStore:
         daily_request_limit: int,
         total_byte_limit: int,
         historical_total_byte_limit: int,
-        rolling_days: int,
+        billing_month_start: datetime,
     ) -> bool:
         """Conservative preflight used only to retain normal bucket batching.
 
@@ -2607,7 +2613,9 @@ class MetaStore:
         """
         if attempts <= 0:
             raise ValueError("batch attempt allowance must be positive")
-        usage = self._request_window_usage(now=now, rolling_days=rolling_days)
+        usage = self._request_window_usage(
+            now=now, billing_month_start=billing_month_start
+        )
         reservation = attempts * reserved_bytes
         return (
             usage["hourly_requests"] + attempts <= hourly_request_limit
@@ -2619,8 +2627,10 @@ class MetaStore:
             )
         )
 
-    def request_usage(self, *, now: datetime, rolling_days: int) -> dict[str, int]:
-        usage = self._request_window_usage(now=now, rolling_days=rolling_days)
+    def request_usage(self, *, now: datetime) -> dict[str, int]:
+        usage = self._request_window_usage(
+            now=now, billing_month_start=tiingo_billing_month_start(now)
+        )
         return {
             key: usage[key]
             for key in (
@@ -2632,12 +2642,12 @@ class MetaStore:
         }
 
     def _request_window_usage(
-        self, *, now: datetime, rolling_days: int
+        self, *, now: datetime, billing_month_start: datetime
     ) -> dict[str, int]:
-        """Return one canonical view of rolling request and byte usage."""
+        """Return one view of rolling request and billing-month byte usage."""
         hour_start = _utc_timestamp(now - timedelta(hours=1))
         day_start = _utc_timestamp(now - timedelta(days=1))
-        period_start = _utc_timestamp(now - timedelta(days=rolling_days))
+        period_start = _utc_timestamp(billing_month_start)
         row = self._con.execute(
             """WITH windowed AS (
                    SELECT *,
@@ -2646,7 +2656,7 @@ class MetaStore:
                                ELSE MAX(reserved_bytes, observed_bytes)
                           END AS charged_bytes
                    FROM api_request_attempts
-                   WHERE occurred_at > ?
+                   WHERE occurred_at >= ?
                )
                SELECT COALESCE(SUM(CASE WHEN occurred_at > ? THEN 1 ELSE 0 END), 0)
                           AS hourly_requests,

@@ -246,10 +246,11 @@ Scope:
   authenticated transport attempt and settle to observed encoded bytes after
   complete responses, including retries and later-rejected payloads; partial
   attempts and process crashes retain their conservative reservation, while
-  orderly failures before any response settle to a known zero bytes. A 32-day rolling window and
-  64 MB per-response reservation enforce D-025's 30-to-39 GB late-month
-  historical admission ramp against total usage and the 40 GB current-work
-  ceiling without assuming an undocumented reset/billing basis. Manual and
+  orderly failures before any response settle to a known zero bytes. D-028's
+  documented midnight-EST billing month and a 64 MB per-response reservation
+  enforce D-025's 30-to-39 GB late-month historical admission ramp against
+  total usage and the 40 GB current-work ceiling without assuming an
+  undocumented billing-byte basis. Manual and
   scheduled history share immutable stable-instrument cohorts, durable
   per-alias frontiers and sweep cursors, exact phase/dataset gates, and one
   maximum-safe request unit per eligible instrument per sweep; ready peers in
@@ -446,8 +447,8 @@ Scope:
   predecessors, freezes the vendor archive behind phase 2, and batches identity
   and history turns through one systemd driver. Phase 1 is terminal with
   exclusions; the enabled live driver froze 23,078 phase-2 instruments,
-  completed their safe EOD work with accepted exclusions, and began phase-3
-  five-minute identity preparation. The remaining phase-3 transfer and
+  completed their safe EOD work with accepted exclusions, completed phase-3
+  five-minute identity preparation, and began its historical transfer. The remaining phase-3 transfer and
   ongoing-current expansion keep this item open. Before enabling that current
   expansion, measure its end-to-end duty cycle and choose a batch/schedule that
   meets nightly freshness without exceeding the durable hourly, daily, or byte

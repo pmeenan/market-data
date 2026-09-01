@@ -9,6 +9,9 @@ QUOTA_STOP_REASONS = frozenset(
     {
         "hourly_request_limit",
         "daily_request_limit",
+        "monthly_total_byte_limit",
+        "monthly_historical_byte_limit",
+        # Retained so persisted pre-D-028 stop reasons remain recognizable.
         "rolling_total_byte_limit",
         "rolling_historical_byte_limit",
     }

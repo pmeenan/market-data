@@ -155,7 +155,7 @@ def test_invalid_csv_is_rejected_after_response_is_metered(tmp_path):
         with pytest.raises(TiingoError, match="missing columns.*volume"):
             client.intraday("AAPL", "2024-01-02", "2024-01-03")
 
-        usage = meta.request_usage(now=datetime.now(UTC), rolling_days=32)
+        usage = meta.request_usage(now=datetime.now(UTC))
         assert usage["requests"] == 1
         assert usage["observed_bytes"] == len(body)
         assert usage["charged_bytes"] == len(body)
@@ -391,7 +391,7 @@ def test_zero_byte_connection_retries_release_byte_reservations(tmp_path, monkey
         with pytest.raises(TiingoError, match="failed after 3 attempts"):
             client.eod("AAPL", "2024-01-01", "2024-01-05")
 
-        usage = meta.request_usage(now=datetime.now(UTC), rolling_days=32)
+        usage = meta.request_usage(now=datetime.now(UTC))
         assert usage["requests"] == 3
         assert usage["charged_bytes"] == 0
         assert usage["incomplete_attempts"] == 3

@@ -25,6 +25,40 @@ Decision / Context / Consequences / Reopen if
 
 ---
 
+## D-028: Bandwidth accounting follows Tiingo's documented billing month  (2026-09-01, status: accepted, amends D-013 and D-025)
+
+**Decision:** Monthly byte admission counts request attempts at or after
+midnight EST on the first of Tiingo's current billing month. The 30-to-39 GB
+historical ceiling follows that same EST billing calendar, while current work
+retains the separate 40 GB monthly ceiling. Complete responses still settle to
+observed encoded bytes; partial, interrupted, and crashed attempts retain the
+larger 64 MB reservation. Prior-month attempts remain immutable audit records
+but no longer consume the new month's allowance. Hourly and daily request
+admission remains conservatively rolling within the active billing month.
+
+**Context:** On 2026-09-01, Tiingo's account usage reset while the local
+32-day ledger continued charging 38.96 GB from August and stopped phase-3
+history before transport. With no further usage, D-025's late-month ramp would
+not have admitted another historical request until 2026-09-29. Tiingo's
+[general API documentation](https://www.tiingo.com/documentation/general)
+explicitly states that monthly bandwidth resets on the first of each month at
+midnight EST, satisfying D-025's reopen condition and replacing RE-006's
+earlier assumption that the reset boundary was unpublished.
+
+**Consequences:** Reservation, settlement, and request-attempt persistence do
+not change schema. Budget preflights, atomic reservations, status reporting,
+and the late-month ramp all use one billing-month boundary. Stop reasons now
+say `monthly_total_byte_limit` or `monthly_historical_byte_limit`; the old
+`rolling_*` names remain recognized so persisted pre-D-028 statuses retain
+their quota-stop meaning.
+
+**Reopen if:** Tiingo changes the documented reset boundary, account
+measurements contradict midnight EST, or Tiingo exposes an authoritative byte
+ledger whose accounting basis differs materially from observed response-body
+bytes.
+
+---
+
 ## D-027: One durable program owns ordered phase advancement  (2026-08-29, status: accepted, amends D-011, D-020, D-024, and D-026)
 
 **Decision:** The production historical program declares its required
@@ -124,7 +158,7 @@ simulation.
 
 ---
 
-## D-025: Late-month history may consume proven-unused reserve  (2026-08-29, status: accepted, amends D-013 and D-020)
+## D-025: Late-month history may consume proven-unused reserve  (2026-08-29, status: accepted, amended by D-028; amends D-013 and D-020)
 
 **Decision:** The admission ceiling for every historical request remains 30 GB
 of total metered usage until the final seven UTC calendar days of a month. On
@@ -785,7 +819,7 @@ identity semantics. Such a source can replace the resolver input, but does not
 remove the need for stable warehouse identity unless its IDs and guarantees
 are contractually durable.
 
-## D-013: Five-minute history fills newest-first with a 30 GB monthly hard cap  (2026-08-26, status: accepted, amended by D-020 and D-025; amends D-011)
+## D-013: Five-minute history fills newest-first with a 30 GB monthly hard cap  (2026-08-26, status: accepted, amended by D-020, D-025, and D-028; amends D-011)
 
 **Decision:** The phase-3 seed-ticker 5-minute backfill proceeds in global
 date bands from the most recent completed session backward toward 2016-12-12.
