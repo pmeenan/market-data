@@ -1264,7 +1264,7 @@ def test_identity_blocked_v2_ingestion_writes_no_canonical_bars(tmp_path, monkey
     )
 
     assert result.exit_code == 1
-    assert "Identity-blocked segments" in result.output
+    assert "Blocked segments" in result.output
     assert "production ingestion remains paused" not in result.output
     assert not BarStore(data_dir).has_canonical_bars()
 

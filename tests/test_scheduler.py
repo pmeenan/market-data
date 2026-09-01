@@ -22,7 +22,11 @@ from marketdata.scheduler import (
 )
 from marketdata.store import BarStore, MetaStore
 from marketdata.store.bars import instrument_bucket
-from marketdata.tiingo import ResponseReservationExceeded, TiingoError
+from marketdata.tiingo import (
+    ResponseReservationExceeded,
+    TiingoError,
+    TiingoNotFoundError,
+)
 
 
 class FakeIntraday:
@@ -418,9 +422,53 @@ def test_failed_and_identity_blocked_turns_retain_frontiers_but_not_peers(tmp_pa
         blocked = ordinals["instrument-b"]
         safe = ordinals["instrument-c"]
         assert ranges[failed]["frontier_end"] == original_frontiers[failed]
+        assert ranges[failed]["terminal_blocked"] == 0
         assert ranges[blocked]["frontier_end"] == original_frontiers[blocked]
         assert ranges[safe]["frontier_end"] < original_frontiers[safe]
         assert meta.get_coverage("instrument-c", "intraday_5min") is not None
+
+
+def test_http_404_terminalizes_range_until_explicit_retry(tmp_path):
+    data_dir, job_id = _scheduler_store(tmp_path, tickers=("A",))
+    start, end = date(2024, 1, 1), date(2024, 12, 31)
+
+    class Missing(FakeIntraday):
+        def intraday(self, ticker, request_start, request_end, freq="1hour"):
+            self.calls.append((ticker, request_start, request_end, freq))
+            raise TiingoNotFoundError(f"/iex/{ticker.lower()}/prices")
+
+    missing = Missing()
+    with MetaStore(data_dir / "meta.db") as meta:
+        first = run_history_sweep(missing, BarStore(data_dir), meta, job_id)
+        second = run_history_sweep(missing, BarStore(data_dir), meta, job_id)
+
+        history_range = meta.history_ranges(job_id)[0]
+        assert first.job_status == "blocked"
+        assert first.ingest.failed == {}
+        assert list(first.ingest.blocked.values()) == ["Not found: /iex/a/prices"]
+        assert history_range["terminal_blocked"] == 1
+        assert meta.history_targets(job_id)[0]["last_attempt_status"] == (
+            "terminal_blocked"
+        )
+        assert second.attempted_units == 0
+        assert len(missing.calls) == 1
+
+        initialize_history_job(
+            meta,
+            job_id=job_id,
+            dataset_key="intraday_5min",
+            tickers=["A"],
+            start=start,
+            end=end,
+            retry_blocked=True,
+        )
+        assert meta.history_job(job_id)["status"] == "active"
+        assert meta.history_ranges(job_id)[0]["terminal_blocked"] == 0
+
+        retried = run_history_sweep(
+            FakeIntraday(), BarStore(data_dir), meta, job_id, max_units=1
+        )
+        assert retried.advanced_units == 1
 
 
 def test_disconnected_older_coverage_is_bridged_from_its_trailing_edge(tmp_path):

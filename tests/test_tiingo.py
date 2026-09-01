@@ -16,6 +16,7 @@ from marketdata.tiingo import (
     ResponseReservationExceeded,
     TiingoClient,
     TiingoError,
+    TiingoNotFoundError,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures" / "tiingo"
@@ -132,6 +133,21 @@ def test_metadata_remains_json_and_is_metered():
     metadata = client.ticker_metadata("AAPL")
 
     assert metadata["ticker"] == "AAPL"
+    assert client.request_count == 1
+    assert client.response_bytes == len(body)
+
+
+@responses.activate
+def test_http_404_has_a_nonretryable_not_found_type():
+    url = f"{BASE_URL}/iex/missing/prices"
+    body = b"null"
+    responses.add(responses.GET, url, body=body, status=404)
+
+    client = TiingoClient("test-token", min_request_interval=0.0, max_retries=5)
+
+    with pytest.raises(TiingoNotFoundError, match="/iex/missing/prices"):
+        client.intraday("MISSING", "2024-01-02", "2024-01-03")
+
     assert client.request_count == 1
     assert client.response_bytes == len(body)
 

@@ -16,7 +16,7 @@ from marketdata.identity_bootstrap import (
 )
 from marketdata.scheduler import BudgetPolicy
 from marketdata.store import MetaStore
-from marketdata.tiingo import TiingoError
+from marketdata.tiingo import TiingoError, TiingoNotFoundError
 
 
 def _archive(
@@ -461,6 +461,34 @@ def test_intraday_bootstrap_probes_exact_frequency_and_persists_fail_closed_outc
             ).status
             == "resolved"
         )
+
+
+def test_intraday_bootstrap_persists_http_404_as_rejected_evidence(tmp_path):
+    start, end = date(2024, 1, 2), date(2024, 1, 31)
+
+    def not_found(probe_start, probe_end):
+        raise TiingoNotFoundError("/iex/missing/prices")
+
+    client = FakeIntradayIdentityClient({"MISSING": not_found})
+    with MetaStore(tmp_path / "meta.db") as meta:
+        _eod_identity(meta, "missing-id", "MISSING", start, end)
+
+        first = bootstrap_intraday_identities(
+            client, meta, ["MISSING"], start=start, end=end, freq="5min"
+        )
+        calls = list(client.calls)
+        second = bootstrap_intraday_identities(
+            client, meta, ["MISSING"], start=start, end=end, freq="5min"
+        )
+
+        evidence = meta.vendor_identifier_evidence_segments(
+            "missing-id", "intraday_5min", "ticker", "MISSING", start, end
+        )
+        assert first.failed == {}
+        assert list(first.blocked.values()) == ["Not found: /iex/missing/prices"]
+        assert evidence[0].validation_state == "rejected"
+        assert second.blocked
+        assert client.calls == calls
 
 
 def test_intraday_bootstrap_reuses_evidence_across_range_changes(tmp_path, monkeypatch):

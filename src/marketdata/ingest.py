@@ -49,7 +49,12 @@ from marketdata.store.bars import (
     require_canonical_generation,
     require_intraday_freq,
 )
-from marketdata.tiingo import ResponseReservationExceeded, TiingoClient, TiingoError
+from marketdata.tiingo import (
+    ResponseReservationExceeded,
+    TiingoClient,
+    TiingoError,
+    TiingoNotFoundError,
+)
 
 log = logging.getLogger(__name__)
 
@@ -93,7 +98,7 @@ class IngestResult:
     skipped: list[str] = field(default_factory=list)
     refreshed: list[str] = field(default_factory=list)  # full corp-action refreshes
     failed: dict[str, str] = field(default_factory=dict)
-    blocked: dict[str, str] = field(default_factory=dict)
+    blocked: dict[str, str] = field(default_factory=dict)  # terminal exclusions
     segments: list[dict[str, Any]] = field(default_factory=list)
 
     @property
@@ -110,7 +115,7 @@ class IngestResult:
             f"{len(self.fetched)} fetched",
             f"{len(self.skipped)} up-to-date",
             f"{len(self.failed)} failed",
-            f"{len(self.blocked)} identity-blocked",
+            f"{len(self.blocked)} blocked",
         ]
         if self.refreshed:
             parts.insert(2, f"{len(self.refreshed)} fully refreshed (corp action)")
@@ -795,6 +800,9 @@ def backfill_eod(
             except (BudgetExhausted, ResponseReservationExceeded) as exc:
                 interrupted = exc
                 break
+            except TiingoNotFoundError as exc:
+                log.warning("eod backfill blocked for %s: %s", instrument_id, exc)
+                result.blocked[instrument_id] = str(exc)
             except (TiingoError, ValueError, pl.exceptions.PolarsError) as exc:
                 log.warning("eod backfill failed for %s: %s", instrument_id, exc)
                 result.failed[instrument_id] = str(exc)
@@ -885,6 +893,9 @@ def update_eod(
                         max(last, frame["date"].max()),
                         "fetched",
                     )
+            except TiingoNotFoundError as exc:
+                log.warning("eod update blocked for %s: %s", instrument_id, exc)
+                result.blocked[instrument_id] = str(exc)
             except (TiingoError, ValueError, pl.exceptions.PolarsError) as exc:
                 log.warning("eod update failed for %s: %s", instrument_id, exc)
                 result.failed[instrument_id] = str(exc)
@@ -905,6 +916,7 @@ def update_eod(
             result.skipped += sub.skipped
             result.refreshed += sub.refreshed
             result.failed.update(sub.failed)
+            result.blocked.update(sub.blocked)
 
         processed += len(group)
         if processed % 25 < len(group) or processed == len(targets):
@@ -1002,6 +1014,16 @@ def backfill_intraday(
                     interrupted = exc
                     interrupted_instrument = instrument_id
                     break
+                except TiingoNotFoundError as exc:
+                    log.warning(
+                        "%s backfill blocked for %s: %s",
+                        dataset,
+                        instrument_id,
+                        exc,
+                    )
+                    result.blocked[instrument_id] = str(exc)
+                    failed.add(instrument_id)
+                    plan.clear()
                 except (TiingoError, ValueError, pl.exceptions.PolarsError) as exc:
                     log.warning(
                         "%s backfill failed for %s: %s", dataset, instrument_id, exc
@@ -1092,6 +1114,10 @@ def _record_segment_result(
     """Merge one low-level operation without losing its request identity."""
     instrument_id = segment.instrument_id
     assert instrument_id is not None
+    if instrument_id in sub_result.blocked:
+        detail = sub_result.blocked[instrument_id]
+        _record_blocked_segment(result, segment, detail)
+        return
     if instrument_id in sub_result.failed:
         detail = sub_result.failed[instrument_id]
         result.failed[segment.key] = detail
@@ -1195,6 +1221,7 @@ def _execute_validated_segments(
         for segment in selected:
             grouped.setdefault(segment.dataset_key, []).append(segment)
         failed_owners: set[tuple[str, str]] = set()
+        blocked_owners: set[tuple[str, str]] = set()
         for dataset_key, dataset_batch in sorted(grouped.items()):
             # The transport request carries only the identifier value.  Keep
             # same-value cross-type collisions in separate batches so lookup
@@ -1261,6 +1288,7 @@ def _execute_validated_segments(
                         + sub_result.skipped
                         + sub_result.refreshed
                         + list(sub_result.failed)
+                        + list(sub_result.blocked)
                     )
                     for segment in batch:
                         if segment.instrument_id in successful:
@@ -1272,6 +1300,8 @@ def _execute_validated_segments(
                     owner = (segment.instrument_id or "", segment.dataset_key)
                     if segment.instrument_id in sub_result.failed:
                         failed_owners.add(owner)
+                    elif segment.instrument_id in sub_result.blocked:
+                        blocked_owners.add(owner)
                     else:
                         coverage[owner] = meta.get_coverage(*owner)
 
@@ -1279,6 +1309,14 @@ def _execute_validated_segments(
             detail = "not attempted after another segment for this instrument failed"
             for segment in pending.pop(owner, []):
                 _record_unattempted_failure(result, segment, detail)
+            coverage.pop(owner, None)
+        for owner in blocked_owners:
+            detail = (
+                "not attempted after another segment for this instrument was "
+                "terminally blocked"
+            )
+            for segment in pending.pop(owner, []):
+                _record_blocked_segment(result, segment, detail)
             coverage.pop(owner, None)
         for owner in [owner for owner, owned in pending.items() if not owned]:
             pending.pop(owner)

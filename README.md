@@ -157,8 +157,10 @@ identity classifications. Inspect without API calls or durable mutation using
 `market-data backfill program-status`. The timer atomically writes bounded
 status to `data/operations/backfill-program-v1-status.json`; exit 1 represents
 durable per-symbol exclusions, while coordinator failures receive up to three
-two-minute retries. Current collection retains its independent priority and
-budget.
+two-minute retries. A definitive Tiingo HTTP 404 becomes a dormant fail-closed
+range exclusion without claiming coverage; `--retry-blocked` is required to
+reactivate it after review. Current collection retains its independent priority
+and budget.
 
 The nightly current-EOD timer runs at 23:30 UTC Monday through Friday. Its
 single locked command first refreshes exact EOD identity evidence for the latest
@@ -368,9 +370,10 @@ exact-frequency hourly IEX segments while retaining honest exclusions. The
 enabled D-027 program timer has replaced both fixed phase-1 timers, frozen an
 immutable 23,078-instrument supported-US phase-2 cohort, completed its safe EOD
 work with accepted exclusions, completed phase-3 five-minute identity
-preparation, and begun its historical transfer. A bounded-status nightly current-EOD timer is installed; two
-actual post-market timer runs remain. External failure notification is optional
-for this personal deployment.
+preparation, and completed its historical transfer with accepted fail-closed
+exclusions. A bounded-status nightly current-EOD timer is installed; two actual
+post-market timer runs remain. External failure notification is optional for
+this personal deployment.
 M1 closed on
 2026-08-27 after its controlled EOD/IEX canary passed. Production ingestion is
 permitted only for validated segments; unresolved work remains fail-closed and

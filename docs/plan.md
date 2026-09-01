@@ -323,10 +323,11 @@ Exit criteria:
   hourly probe that exposed the already-documented RE-004 closed-session rows.
 - [x] Scheduler tests prove current work wins; quota stops resume the unvisited
   remainder of the same deterministic sweep; no instrument reaches request
-  depth N+1 before every eligible peer receives a depth-N turn; failed or
-  identity-blocked segments retain their frontier without stalling safe peers;
-  actual bytes are charged even for rejected responses; and neither monthly
-  hard cap can be exceeded.
+  depth N+1 before every eligible peer receives a depth-N turn; retryable
+  failures and terminal blocked segments retain their frontier without
+  stalling safe peers; definitive HTTP 404s become dormant fail-closed
+  exclusions until explicitly retried; actual bytes are charged even for
+  rejected responses; and neither monthly hard cap can be exceeded.
   Completed 2026-08-28 with offline restart, retry, quota, phase-order,
   current-first, failure, identity-block, trailing-coverage, partial-batch,
   force-lifecycle, oversized-stream, zero-byte-outage, and dual-byte-ceiling
@@ -448,9 +449,11 @@ Scope:
   and history turns through one systemd driver. Phase 1 is terminal with
   exclusions; the enabled live driver froze 23,078 phase-2 instruments,
   completed their safe EOD work with accepted exclusions, completed phase-3
-  five-minute identity preparation, and began its historical transfer. The remaining phase-3 transfer and
-  ongoing-current expansion keep this item open. Before enabling that current
-  expansion, measure its end-to-end duty cycle and choose a batch/schedule that
+  five-minute identity preparation, and completed its historical transfer with
+  accepted exclusions after D-029 prevented one definitive GBF 404 from polling
+  forever. The ongoing-current expansion keeps this item open. Before enabling
+  that current expansion, measure its end-to-end duty cycle and choose a
+  batch/schedule that
   meets nightly freshness without exceeding the durable hourly, daily, or byte
   budgets. Do not automatically reuse the historical program timer's
   500-turn-plus-five-minute-idle throttle: it limits useful throughput to less

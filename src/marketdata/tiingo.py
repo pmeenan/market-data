@@ -41,6 +41,14 @@ class TiingoError(RuntimeError):
     pass
 
 
+class TiingoNotFoundError(TiingoError):
+    """A non-retryable HTTP 404 for one Tiingo resource."""
+
+    def __init__(self, path: str) -> None:
+        self.path = path
+        super().__init__(f"Not found: {path}")
+
+
 class ResponseReservationExceeded(TiingoError):
     """The response body exceeded the bytes reserved before transport."""
 
@@ -196,7 +204,7 @@ class TiingoClient:
                 return resp
             if resp.status_code == 404:
                 resp.close()
-                raise TiingoError(f"Not found: {path}")
+                raise TiingoNotFoundError(path)
             if (
                 resp.status_code in (429, 500, 502, 503, 504)
                 and attempt < self._max_retries

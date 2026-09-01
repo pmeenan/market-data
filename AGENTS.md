@@ -128,8 +128,8 @@ histories, repaired 62 reused symbols into 125 inferred episodes, and validated
 4,316 exact-frequency hourly IEX segments. D-027's enabled program timer has
 replaced both fixed phase-1 timers, frozen an immutable 23,078-instrument
 supported-US phase-2 cohort, completed its safe EOD work with accepted
-exclusions, completed phase-3 five-minute identity preparation, and begun its
-historical transfer. A bounded-status
+exclusions, and completed phase-3 five-minute history with accepted fail-closed
+exclusions. A bounded-status
 nightly current-EOD timer is installed; two actual post-market runs remain.
 External failure notification is optional for this personal deployment.
 M1 closed on 2026-08-27. Production ingestion is permitted only for validated

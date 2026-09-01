@@ -22,6 +22,35 @@ Newest first. RE-numbers are never reused.
 
 ---
 
+## RE-010: An IEX 404 can pin the final breadth-first sweep  (2026-09-01, status: worked-around)
+
+**Environment:** D-027 program scheduler, phase-3 five-minute history, Tiingo
+IEX CSV endpoint.
+
+**Repro/measurement:** GBF had validated five-minute identity evidence and
+contiguous stored coverage from 2018-11-21 through 2026-08-27. Its next older
+request (`2018-05-29..2018-11-20`) returned HTTP 404 with a four-byte response.
+The request ledger accumulated 41 such responses. Once every peer was covered
+or terminal, ten timer runs in the final observed hour each attempted only GBF
+and advanced nothing.
+
+**Observed:** `TiingoClient` correctly did not retry a 404 within one logical
+request, but raised the generic exception also used for transient transport
+failures. Validated ingestion therefore left the range active, and every new
+sweep retried it indefinitely.
+
+**Expected:** A definitive resource-absence response is fail-closed and
+terminal for that immutable historical range: retain no coverage claim, expose
+the exact exclusion, and require explicit operator intent to retry it.
+
+**Impact/workaround:** D-029 gives HTTP 404 a distinct type, records IEX probe
+404s as rejected evidence, and maps validated history 404s to durable terminal
+blockers. The live GBF range became terminal on the next request and the
+program completed with exclusions. Generic transport and payload failures
+remain retryable.
+
+---
+
 ## RE-009: A recent empty EOD range can poll indefinitely at a phase gate  (2026-08-29, status: open)
 
 **Environment:** D-027 program scheduler, EOD phase-2 terminal sweep, Tiingo

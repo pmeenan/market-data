@@ -25,6 +25,45 @@ Decision / Context / Consequences / Reopen if
 
 ---
 
+## D-029: Definitive vendor absence is a terminal fail-closed exclusion  (2026-09-01, status: accepted, amends D-020 and D-024)
+
+**Decision:** An authenticated Tiingo HTTP 404 has its own non-retryable error
+type. An exact-frequency IEX identity probe persists that outcome as rejected
+evidence. A validated historical EOD or IEX request records the exact range as
+a terminal blocker without advancing its frontier or claiming coverage. The
+range remains visible and dormant until an operator explicitly retries blocked
+work after reviewing changed vendor or identity evidence. Current collection
+reports the exclusion for that run but does not make future current work
+dormant.
+
+Transient transport errors, retryable HTTP responses, malformed payloads, and
+successful responses that do not advance coverage remain ordinary failures;
+they retain their frontier and may be retried. This decision does not solve
+RE-009's deterministic recent-data publication wait.
+
+**Context:** The phase-3 five-minute sweep advanced GBF through 2018-11-21,
+then Tiingo returned HTTP 404 for the next older request
+(`2018-05-29..2018-11-20`). The client already treated 404 as non-retryable
+inside one logical request, but collapsed it into the generic `TiingoError`
+used for transient failures. After every safe peer became covered or terminal,
+the program made the same request once per six-minute timer cycle and never
+completed; the durable ledger accumulated 41 four-byte 404 responses for the
+path. Classifying the response as terminal preserves D-020's no-false-coverage
+rule while allowing the accepted exclusion to satisfy D-027's phase gate.
+
+**Consequences:** Ingestion's `blocked` category now means any terminal
+fail-closed segment, not only an identity-planning blocker. CLI text and
+scheduler attempt status use that general term. Ordinary generic
+`TiingoError` fixtures remain retryable, and tests prove a terminal 404 is
+dormant on routine reruns but can be reactivated explicitly.
+
+**Reopen if:** Tiingo documents or demonstrates that authenticated 404s for
+price endpoints are transient, or exposes a stronger durable absence state
+that distinguishes a temporarily unavailable listing from a permanent vendor
+exclusion.
+
+---
+
 ## D-028: Bandwidth accounting follows Tiingo's documented billing month  (2026-09-01, status: accepted, amends D-013 and D-025)
 
 **Decision:** Monthly byte admission counts request attempts at or after

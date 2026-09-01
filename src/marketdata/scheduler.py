@@ -1026,7 +1026,7 @@ def _checkpoint_after_ingest(
             job_id,
             target,
             range_row,
-            attempt_status="failed" if failed else "identity_blocked",
+            attempt_status="failed" if failed else "terminal_blocked",
             detail=detail,
             attempted=True,
             successful=False,

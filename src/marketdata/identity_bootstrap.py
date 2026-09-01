@@ -39,7 +39,7 @@ from marketdata.scheduler import (
 )
 from marketdata.store import MetaStore
 from marketdata.store.bars import require_intraday_freq
-from marketdata.tiingo import TiingoClient, TiingoError
+from marketdata.tiingo import TiingoClient, TiingoError, TiingoNotFoundError
 
 US_EXCHANGES = frozenset({"NYSE", "NASDAQ", "NYSE ARCA", "AMEX", "BATS"})
 US_ASSET_TYPES = frozenset({"Stock", "ETF"})
@@ -669,6 +669,18 @@ def bootstrap_intraday_identities(
                     candidate,
                     dataset_key,
                     validation_state="conflict",
+                    detail=detail,
+                    probe_evidence=probe_evidence,
+                )
+                result.blocked[candidate.key] = detail
+            except TiingoNotFoundError as exc:
+                result.probe_attempts += 1
+                detail = str(exc)
+                _record_intraday_probe_evidence(
+                    meta,
+                    candidate,
+                    dataset_key,
+                    validation_state="rejected",
                     detail=detail,
                     probe_evidence=probe_evidence,
                 )

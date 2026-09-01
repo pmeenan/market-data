@@ -348,12 +348,14 @@ advances every phase/dataset history breadth-first: one maximum-safe request
 unit from each eligible instrument's newest uncovered frontier per durable
 sweep before any instrument receives another older unit (D-011, D-013,
 D-020). A quota stop publishes and checkpoints any completed prefix of a bucket
-batch, then resumes the unfinished sweep. Failed and identity-blocked units
-retain their own frontier but count as attempted turns, so they do not stall
-safe peers. When only terminal identity blockers remain, the job becomes
-`blocked` and no longer holds a later phase. Routine invocations leave those
-ranges dormant; `--retry-blocked` reactivates them only after evidence is
-repaired or reviewed. Every authenticated attempt reserves request and byte
+batch, then resumes the unfinished sweep. Retryable failures and terminal
+blocked units retain their own frontier but count as attempted turns, so they
+do not stall safe peers. A definitive Tiingo HTTP 404 is a terminal vendor
+blocker under D-029; transient transport and payload failures remain
+retryable. When only terminal identity or vendor blockers remain, the job
+becomes `blocked` and no longer holds a later phase. Routine invocations leave
+those ranges dormant; `--retry-blocked` reactivates them only after evidence
+is repaired or reviewed. Every authenticated attempt reserves request and byte
 budget durably before transport, including each retry. It then records encoded
 response-body bytes from the raw transport, including retry bodies, partial
 reads where the HTTP stack exposes their count, and responses that later fail

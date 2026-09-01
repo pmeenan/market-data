@@ -36,7 +36,12 @@ from marketdata.ingest import (
 )
 from marketdata.store import BarStore, MetaStore
 from marketdata.store.bars import eod_frame, instrument_bucket
-from marketdata.tiingo import BASE_URL, TiingoClient, TiingoError
+from marketdata.tiingo import (
+    BASE_URL,
+    TiingoClient,
+    TiingoError,
+    TiingoNotFoundError,
+)
 
 
 def eod_row(
@@ -374,6 +379,46 @@ def test_validated_ingestion_allows_safe_peer_and_reports_blocked_segment(tmp_pa
     assert client.eod_calls == [("GOOD", start, end)]
     assert bars.read_canonical_eod("good-id") is not None
     assert bars.read_canonical_eod("blocked-id") is None
+
+
+def test_validated_ingestion_reports_http_404_as_terminal_blocker(tmp_path):
+    class MissingIntraday(FakeTiingo):
+        def intraday(self, ticker, start, end=None, freq="1hour"):
+            self.intraday_calls.append(
+                (
+                    ticker.upper(),
+                    date.fromisoformat(str(start)),
+                    date.fromisoformat(str(end)),
+                    freq,
+                )
+            )
+            raise TiingoNotFoundError(f"/iex/{ticker.lower()}/prices")
+
+    bars, meta = stores(tmp_path)
+    start, end = date(2024, 1, 2), date(2024, 1, 31)
+    instrument_id = meta.upsert_instrument("stable-id")
+    meta.add_instrument_alias(instrument_id, "MISSING", start, end)
+    meta.add_vendor_identifier(
+        instrument_id,
+        "intraday_5min",
+        "ticker",
+        "MISSING",
+        start,
+        end,
+        validation_state="validated",
+    )
+    client = MissingIntraday({})
+
+    result = backfill_intraday_validated(
+        client, bars, meta, ["MISSING"], start, end, freq="5min"
+    )
+
+    assert result.failed == {}
+    assert result.blocked == {
+        f"MISSING:{start}..{end}": "Not found: /iex/missing/prices"
+    }
+    assert meta.get_coverage(instrument_id, "intraday_5min") is None
+    assert len(client.intraday_calls) == 1
 
 
 def test_validated_ingestion_preserves_bucket_batching(tmp_path, monkeypatch):

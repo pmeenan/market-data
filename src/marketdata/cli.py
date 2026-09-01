@@ -148,7 +148,7 @@ def _finish_ingest(
         click.echo("Failed segments: " + ", ".join(sorted(result.failed)), err=True)
     if result.blocked:
         click.echo(
-            "Identity-blocked segments: " + ", ".join(sorted(result.blocked)),
+            "Blocked segments: " + ", ".join(sorted(result.blocked)),
             err=True,
         )
     if result.partial:
@@ -186,7 +186,7 @@ def _finish_ingestion_cycle(
         click.echo("Failed segments: " + ", ".join(sorted(result.failed)), err=True)
     if result.blocked:
         click.echo(
-            "Identity-blocked segments: " + ", ".join(sorted(result.blocked)),
+            "Blocked segments: " + ", ".join(sorted(result.blocked)),
             err=True,
         )
     if identity_bootstrap is not None and identity_bootstrap.operational_failure:
