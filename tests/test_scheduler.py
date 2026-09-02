@@ -6,15 +6,18 @@ from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
+import marketdata.ingest as ingest_mod
 import marketdata.scheduler as scheduler_mod
 from marketdata.backfill_program import sync_backfill_program
 from marketdata.locking import LOCK_FILE_NAME
 from marketdata.scheduler import (
     BudgetExhausted,
     BudgetPolicy,
+    CurrentJobMember,
     PersistentAttemptObserver,
     cancel_history_job,
     history_job_id,
+    initialize_current_job,
     initialize_history_job,
     resolve_history_job,
     run_history_sweep,
@@ -703,6 +706,251 @@ def test_current_cycle_validates_every_dataset_before_transport(tmp_path):
                 history_job_id=None,
             )
     assert client.events == []
+
+
+def test_current_job_refetches_overlap_and_bridges_from_historical_edge(tmp_path):
+    data_dir = tmp_path / "data"
+    alias_start = date(2024, 1, 1)
+    coverage_end = date(2024, 1, 31)
+    cycle_end = date(2024, 2, 5)
+    with MetaStore(data_dir / "meta.db") as meta:
+        meta.activate_canonical_generation()
+        meta.upsert_instrument("instrument-a")
+        meta.add_instrument_alias("instrument-a", "A", alias_start, date.max)
+        meta.add_vendor_identifier(
+            "instrument-a",
+            "eod",
+            "ticker",
+            "A",
+            alias_start,
+            date.max,
+            validation_state="validated",
+        )
+        meta.set_coverage("instrument-a", "eod", alias_start, coverage_end)
+        initialize_current_job(
+            meta,
+            job_id="current-eod-20240205",
+            dataset_key="eod",
+            members=[CurrentJobMember("A", "instrument-a")],
+            end=cycle_end,
+            default_start=cycle_end,
+            refresh_overlap_days=7,
+        )
+
+        client = FakeIntraday()
+        result = run_history_sweep(
+            client, BarStore(data_dir), meta, "current-eod-20240205"
+        )
+
+        assert result.job_status == "complete"
+        assert client.eod_calls == [("A", date(2024, 1, 24), cycle_end)]
+        assert meta.get_coverage("instrument-a", "eod") == (
+            alias_start,
+            cycle_end,
+        )
+        assert meta.history_job("current-eod-20240205")["work_kind"] == "current"
+        assert [row["work_kind"] for row in meta.request_attempts()] == ["current"]
+
+
+def test_new_intraday_current_member_starts_forward_only(tmp_path):
+    data_dir = tmp_path / "data"
+    alias_start = date(2020, 1, 1)
+    cohort_entry = date(2024, 2, 5)
+    with MetaStore(data_dir / "meta.db") as meta:
+        meta.activate_canonical_generation()
+        meta.upsert_instrument("instrument-a")
+        meta.add_instrument_alias("instrument-a", "A", alias_start, date.max)
+        meta.add_vendor_identifier(
+            "instrument-a",
+            "intraday_5min",
+            "ticker",
+            "A",
+            alias_start,
+            date.max,
+            validation_state="validated",
+        )
+        initialize_current_job(
+            meta,
+            job_id="current-5min-20240205",
+            dataset_key="intraday_5min",
+            members=[CurrentJobMember("A", "instrument-a")],
+            end=cohort_entry,
+            default_start=cohort_entry,
+            refresh_overlap_days=7,
+        )
+
+        client = FakeIntraday()
+        result = run_history_sweep(
+            client, BarStore(data_dir), meta, "current-5min-20240205"
+        )
+
+        assert result.job_status == "complete"
+        assert client.calls[0][0:2] == ("A", cohort_entry)
+        assert meta.get_coverage("instrument-a", "intraday_5min")[0] == cohort_entry
+
+        second_end = date(2024, 2, 7)
+        initialize_current_job(
+            meta,
+            job_id="current-5min-20240207",
+            dataset_key="intraday_5min",
+            members=[CurrentJobMember("A", "instrument-a")],
+            end=second_end,
+            default_start=cohort_entry,
+            refresh_overlap_days=7,
+        )
+        second_client = FakeIntraday()
+        second = run_history_sweep(
+            second_client, BarStore(data_dir), meta, "current-5min-20240207"
+        )
+
+        assert second.job_status == "complete"
+        assert second_client.calls[0][1] == cohort_entry
+        assert meta.get_coverage("instrument-a", "intraday_5min")[0] == cohort_entry
+
+
+def test_current_job_retires_unavailable_session_until_the_next_cycle(tmp_path):
+    data_dir = tmp_path / "data"
+    alias_start = date(2024, 1, 1)
+    cycle_end = date.today()
+
+    class EmptyCurrent(FakeIntraday):
+        def eod(self, ticker, start, end):
+            self.eod_calls.append((ticker, start, end))
+            return []
+
+    with MetaStore(data_dir / "meta.db") as meta:
+        meta.activate_canonical_generation()
+        meta.upsert_instrument("instrument-a")
+        meta.add_instrument_alias("instrument-a", "A", alias_start, date.max)
+        meta.add_vendor_identifier(
+            "instrument-a",
+            "eod",
+            "ticker",
+            "A",
+            alias_start,
+            date.max,
+            validation_state="validated",
+        )
+        meta.set_coverage(
+            "instrument-a", "eod", alias_start, cycle_end - timedelta(days=1)
+        )
+        initialize_current_job(
+            meta,
+            job_id="current-eod-empty",
+            dataset_key="eod",
+            members=[CurrentJobMember("A", "instrument-a")],
+            end=cycle_end,
+            default_start=cycle_end,
+            refresh_overlap_days=7,
+        )
+        client = EmptyCurrent()
+
+        first = run_history_sweep(client, BarStore(data_dir), meta, "current-eod-empty")
+        second = run_history_sweep(
+            client, BarStore(data_dir), meta, "current-eod-empty"
+        )
+
+        assert first.job_status == "blocked"
+        assert first.ingest.blocked
+        assert "retry in the next cycle" in next(iter(first.ingest.blocked.values()))
+        assert meta.history_ranges("current-eod-empty")[0]["terminal_blocked"] == 1
+        assert second.attempted_units == 0
+        assert len(client.eod_calls) == 1
+
+
+def test_older_recovery_cycle_keeps_already_covered_owner_without_request(tmp_path):
+    data_dir = tmp_path / "data"
+    alias_start = date(2024, 1, 1)
+    recovered_session = date(2024, 8, 20)
+    coverage_end = date(2024, 9, 1)
+
+    with MetaStore(data_dir / "meta.db") as meta:
+        meta.activate_canonical_generation()
+        meta.upsert_instrument("instrument-a")
+        meta.add_instrument_alias("instrument-a", "A", alias_start, date.max)
+        meta.add_vendor_identifier(
+            "instrument-a",
+            "eod",
+            "ticker",
+            "A",
+            alias_start,
+            date.max,
+            validation_state="validated",
+        )
+        meta.set_coverage("instrument-a", "eod", alias_start, coverage_end)
+        initialize_current_job(
+            meta,
+            job_id="current-eod-recovery",
+            dataset_key="eod",
+            members=[CurrentJobMember("A", "instrument-a")],
+            end=recovered_session,
+            default_start=recovered_session,
+            refresh_overlap_days=7,
+        )
+        client = FakeIntraday()
+
+        result = run_history_sweep(
+            client, BarStore(data_dir), meta, "current-eod-recovery"
+        )
+
+        assert result.job_status == "complete"
+        assert meta.history_target_count("current-eod-recovery") == 1
+        assert not meta.history_has_blockers("current-eod-recovery")
+        assert client.eod_calls == []
+
+
+@pytest.mark.parametrize(
+    ("utc_hour", "expected_status", "expected_coverage"),
+    [
+        (18, "blocked", None),
+        (23, "complete", (date(2024, 2, 5), date(2024, 2, 5))),
+    ],
+)
+def test_current_intraday_covers_today_only_after_its_exchange_session(
+    tmp_path, monkeypatch, utc_hour, expected_status, expected_coverage
+):
+    class FixedDate(date):
+        @classmethod
+        def today(cls):
+            return cls(2024, 2, 5)
+
+    monkeypatch.setattr(ingest_mod, "date", FixedDate)
+    data_dir = tmp_path / "data"
+    session = date(2024, 2, 5)
+    alias_start = date(2020, 1, 1)
+    with MetaStore(data_dir / "meta.db") as meta:
+        meta.activate_canonical_generation()
+        meta.upsert_instrument("instrument-a")
+        meta.add_instrument_alias("instrument-a", "A", alias_start, date.max)
+        meta.add_vendor_identifier(
+            "instrument-a",
+            "intraday_5min",
+            "ticker",
+            "A",
+            alias_start,
+            date.max,
+            validation_state="validated",
+        )
+        initialize_current_job(
+            meta,
+            job_id="current-5min-same-night",
+            dataset_key="intraday_5min",
+            members=[CurrentJobMember("A", "instrument-a")],
+            end=session,
+            default_start=session,
+            refresh_overlap_days=7,
+        )
+
+        result = run_history_sweep(
+            FakeIntraday(),
+            BarStore(data_dir),
+            meta,
+            "current-5min-same-night",
+            clock=lambda: datetime(2024, 2, 5, utc_hour, 30, tzinfo=UTC),
+        )
+
+        assert result.job_status == expected_status
+        assert meta.get_coverage("instrument-a", "intraday_5min") == expected_coverage
 
 
 def test_oversized_response_is_checkpointed_as_terminal_range_blocker(tmp_path):

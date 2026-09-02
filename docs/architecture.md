@@ -16,8 +16,10 @@ The load-bearing boundaries are:
 - Parquet is the canonical bar and large-result store; SQLite holds small,
   relational metadata; DuckDB is the analytical query engine (D-003, D-016,
   D-019).
-- Tiingo is the sole market-data source. Vendor concerns stop at the client,
-  identity resolver, and normalization boundary (D-002).
+- Tiingo is the sole source for canonical warehouse bars. A separately
+  approved future read-only broker feed may supply source-labelled morning
+  trigger data for a small tagged watchlist, but it cannot silently enter the
+  canonical Tiingo archive (D-002, D-031).
 - Stable internal `instrument_id` values own bars and research results.
   Symbols are date-ranged aliases and never durable join keys (D-014).
 - Universes scope ingestion only. Research selects from the bars that are
@@ -25,8 +27,9 @@ The load-bearing boundaries are:
 - Research starts with columnar event studies over DuckDB and polars. It does
   not model orders, fills, cash, or overlapping-position constraints until a
   confirmed study requires those semantics (D-015).
-- There is no order execution, broker connection, multi-user service, or
-  non-US-stock/ETF asset path (D-007, D-008).
+- There is no order execution, broker trading/account mutation, multi-user
+  service, or non-US-stock/ETF asset path. Read-only broker market data is a
+  proposed future input, not trading connectivity (D-007, D-008, D-031).
 
 ## System shape
 
@@ -192,6 +195,12 @@ Identity and ingestion metadata:
   validated envelope, validation state, and evidence. Adjacent or overlapping
   validated evidence rows for the same identifier, instrument, and exact
   dataset key may jointly cover a request segment; an evidence gap never does.
+  Per D-032, a current EOD envelope whose `endDate` advances may reuse its
+  authenticated immutable listing anchor only when every other archive field
+  is unchanged and the new tail has no competing alias owner; the evidence
+  retains both the authenticated anchor and continuation provenance. New or
+  changed anchors still require authenticated metadata. This rule never
+  applies to IEX.
   A weekend-only interval between trading-day evidence boundaries is a
   non-session continuity marker per D-014, not request or row authorization.
 - `identity_episodes`: provenance for archive-bounded or observed-gap EOD
@@ -214,8 +223,9 @@ Identity and ingestion metadata:
   historical work class, conservative pre-request byte reservation, observed
   encoded response bytes, and complete/incomplete state; plus the immutable
   phase/dataset cohort, per-alias-range frontier, per-instrument attempt depth,
-  and breadth-first sweep cursor required by D-013 and D-020. This is
-  operational state, not a second statement of bar coverage. The hard budget
+  and breadth-first sweep cursor required by D-013 and D-020. Schema v8 also
+  gives these jobs an immutable `current` mode and correction-overlap policy;
+  coverage remains the only statement of published bars. The hard budget
   follows Tiingo's documented midnight-EST billing month and uses a 64 MB
   response reservation because Tiingo does not publish its byte basis.
   Complete responses settle to actual observed bytes;
@@ -228,6 +238,12 @@ Identity and ingestion metadata:
   identity cursor. Program state distinguishes a missing predecessor from a
   terminal predecessor with accepted exclusions; phase-2/3 jobs outside the
   declaration fail closed.
+- ongoing-program state: one immutable collector definition, content-addressed
+  active supported-list snapshots, per-session cycle states and identity
+  cursors, monthly stable-instrument liquidity cohorts with complete ranking
+  provenance, and the three designated current-mode job ids. An interrupted
+  cycle always resumes its frozen scopes; a later session cannot silently
+  replace them.
 
 Research metadata follows D-016:
 
@@ -386,6 +402,53 @@ scope has exact-dataset identity classifications, and every declared lower
 component is terminal. `blocked` is terminal with exclusions, while a missing,
 active, or cancelled designated predecessor is not completion.
 
+Ongoing collection is a separate durable current program under D-030–D-033.
+The schema-v8 implementation admits automatic work no earlier than 23:30 UTC
+after the completed XNYS regular session, preserving the deployed publication
+buffer, and stops before 08:00 New York time on the next XNYS session. Each
+cycle refreshes Tiingo's supported metadata, content-addresses the active US
+stock/ETF listing snapshot, and completes its EOD sweep first. After the first
+complete EOD cycle following month end, the program calculates and persists a
+fixed intraday cohort: by default the top 5,000 active stable instruments by
+mean canonical EOD `close * volume` over the latest 20 completed XNYS sessions,
+requiring at least 15 valid observations. The snapshot records its as-of
+session, ranking window and method, metric, rank, and stable membership; it is
+an ingestion scope and never a backtest-membership join.
+
+Direct hourly and five-minute sweeps independently consume that snapshot and
+retain their exact-frequency identity gates. EOD, hourly, and five-minute each
+use a frozen current-mode job with a durable cursor and bounded operator
+status. If coverage exists, the immutable target begins at its trailing edge
+minus the seven-day correction overlap and therefore fetches every missing
+interval through the cycle session. An intraday cohort entrant without prior
+coverage begins at the cohort's as-of session, never at the historical IEX
+floor, and subsequent correction overlaps are clamped to that forward-only
+floor. An already-covered older recovery session retires without a request but
+keeps its stable owner in the EOD ranking input. A completed current request
+that cannot establish coverage through the cycle session becomes a terminal
+exclusion for that immutable cycle; the next session gets a new job and retries
+normally rather than holding the whole program through the historical
+publication-lag horizon. Cancellation has the same cycle-terminal semantics.
+Jobs publish/checkpoint a completed batch and yield the shared mutation lock
+before the next batch;
+hourly and five-minute are scheduled in separate request-budget windows because
+5,000 instruments at both frequencies already represent about 10,000 logical
+requests before retries. Cohort departures retain their canonical history,
+and partial sweeps resume against the same snapshot. No cycle claims freshness
+until every declared target is covered through the most recent completed
+session or carries an explicit fail-closed exclusion. The broad collector
+performs all three dataset sweeps in the overnight window and completes or
+checkpoints before the next morning decision window; it never becomes an
+in-session polling service.
+
+A future morning trigger surface is deliberately separate. It consumes a
+small owner-tagged watchlist and may obtain realtime or five-minute data from
+Tiingo or a broker API restricted to read-only market-data permissions. Broker
+rows remain source-labelled in a hot/decision store unless a later decision
+defines a canonical multi-source contract. This path has no order endpoint,
+order credential, account mutation, or implicit write into Tiingo-owned
+Parquet bars.
+
 ## Query, calendar, and quality contracts
 
 `marketdata.query.connect()` is the common read surface. After the identity
@@ -483,17 +546,23 @@ environment, local filesystem, `.env` token, and cron/systemd timer. No secret
 is stored in SQLite, Parquet, logs, summaries, or result parameters.
 
 Operational commands return nonzero if any requested segment fails and can
-emit machine-readable summaries. The nightly job writes a bounded status
-record (start/end, counts, bytes, and at most 100 details per diagnostic
-category). It refreshes latest-universe EOD identity evidence and collects bars
-under one shared-lock ownership interval. Per-symbol fail-closed identity and
-vendor failures return 1 and are accepted as a completed partial pass by the
-user service; quota boundaries return 0. Coordinator, configuration, lock, and
-status-publication failures return 2. The nightly service retries exit 2 up to
-three times at two-minute intervals before remaining failed. On the owner's
-personal server, that systemd result plus the
-inspectable status is the required visible failure signal; an external
-notification channel may be added later but is not an M2 gate.
+emit machine-readable summaries. The schema-v8 ongoing driver writes a bounded
+replace-in-place status record after every step, including program/cycle state,
+each dataset's job status/target/cursor/sweep/exclusion summary, request and
+observed-byte counts, and the overnight deadline. Its service paces at most
+1,000 turns per six minutes, reserves exit 3 for a terminal cycle with explicit
+per-symbol exclusions, and therefore retries ordinary exit-1 CLI/crash failures
+as well as exit-2 coordinator/configuration/lock/status failures. A one-second
+idle delay prevents zero-request state transitions from spinning. Quota stops
+and the 08:00 New York deadline checkpoint cleanly. The implementation and
+user-systemd templates are tested but the program and replacement timer are not
+yet initialized or enabled on the production warehouse; the interim
+latest-universe EOD timer stays authoritative until the human commit gate and
+explicit cutover. That enabled editable-install timer already migrated the live
+metadata database to schema v8 on 2026-09-02, so the supporting schema code is
+now a forward-only live dependency. On the owner's personal server, the
+systemd result plus inspectable status is the required visible failure signal;
+an external notification channel may be added later but is not an M2 gate.
 
 Backups treat `data/` as one unit. Parquet is canonical for bars and result
 observations, while `meta.db` is required for identity evidence, universe

@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from functools import lru_cache
+from zoneinfo import ZoneInfo
 
 import exchange_calendars as xcals
 import polars as pl
@@ -24,6 +25,8 @@ _BAR_LABEL_SEMANTICS = {
     "5min": "session_5min_start",
 }
 _NORMAL_SESSION_MINUTES = 390
+_EASTERN = ZoneInfo("America/New_York")
+_ONGOING_NOT_BEFORE_UTC = (23, 30)
 
 
 def weekend_only(start: date, end: date) -> bool:
@@ -49,6 +52,74 @@ class IntradayRequestChunk:
     end: date
     fetch_end: date
     max_response_rows: int
+
+
+@dataclass(frozen=True)
+class OvernightCollectionWindow:
+    """Post-close archive window ending before the next decision morning."""
+
+    session_date: date
+    opened_at: datetime
+    closes_at: datetime
+
+
+def latest_completed_session(now: datetime) -> date:
+    """Return the most recent XNYS session whose regular close has passed."""
+    if now.tzinfo is None:
+        raise ValueError("completed-session timestamp must be timezone-aware")
+    now = now.astimezone(UTC)
+    schedule = session_schedule(now.date() - timedelta(days=10), now.date())
+    completed = schedule.filter(pl.col("session_close") <= now)
+    if completed.is_empty():
+        raise ValueError("no completed XNYS session is available")
+    return completed.row(-1, named=True)["session_date"]
+
+
+def overnight_collection_window(
+    now: datetime, *, morning_hour: int = 8
+) -> OvernightCollectionWindow | None:
+    """Return the active post-market window, or ``None`` during daytime.
+
+    The window opens no earlier than 23:30 UTC after the latest completed XNYS
+    session.  That preserves the deployed EOD publication buffer in both US
+    daylight- and standard-time seasons.  It ends at ``morning_hour`` New York
+    time on the next XNYS session date.  Weekend and exchange-holiday nights
+    therefore remain one continuous safe window while early post-close and
+    regular-session/daytime invocations fail closed.
+    """
+    if now.tzinfo is None:
+        raise ValueError("overnight collection timestamp must be timezone-aware")
+    if not 0 <= morning_hour <= 23:
+        raise ValueError("morning decision hour must be between 0 and 23")
+    now = now.astimezone(UTC)
+    try:
+        session_date = latest_completed_session(now)
+    except ValueError:
+        return None
+    session_close = session_schedule(session_date, session_date).row(0, named=True)[
+        "session_close"
+    ]
+    not_before_hour, not_before_minute = _ONGOING_NOT_BEFORE_UTC
+    publication_buffer_end = datetime(
+        session_date.year,
+        session_date.month,
+        session_date.day,
+        not_before_hour,
+        not_before_minute,
+        tzinfo=UTC,
+    )
+    opened_at = max(session_close, publication_buffer_end)
+    next_session = next_session_after(session_date)
+    closes_at = datetime(
+        next_session.year,
+        next_session.month,
+        next_session.day,
+        morning_hour,
+        tzinfo=_EASTERN,
+    ).astimezone(UTC)
+    if not opened_at <= now < closes_at:
+        return None
+    return OvernightCollectionWindow(session_date, opened_at, closes_at)
 
 
 @lru_cache(maxsize=16)

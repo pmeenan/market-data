@@ -1,0 +1,11 @@
+[Unit]
+Description=Run market-data ongoing collection in the post-market window
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 23:30:00 UTC
+Persistent=true
+AccuracySec=1min
+Unit=market-data-ongoing.service
+
+[Install]
+WantedBy=timers.target

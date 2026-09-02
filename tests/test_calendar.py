@@ -1,6 +1,6 @@
 """Exchange-calendar planning and bar-label semantics."""
 
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import polars as pl
 
@@ -9,7 +9,9 @@ from marketdata.calendar import (
     IEX_ROW_CAP,
     expected_intraday_labels,
     label_intraday_sessions,
+    latest_completed_session,
     next_session_after,
+    overnight_collection_window,
     plan_intraday_requests,
     session_schedule,
 )
@@ -62,6 +64,27 @@ def test_next_session_handles_dates_before_the_years_first_session():
     assert [(chunk.start, chunk.end, chunk.fetch_end) for chunk in chunks] == [
         (date(2024, 1, 1), date(2024, 1, 1), date(2024, 1, 2))
     ]
+
+
+def test_overnight_collection_window_stops_before_morning_decisions():
+    monday_evening = datetime(2024, 3, 11, 23, 30, tzinfo=UTC)
+    window = overnight_collection_window(monday_evening)
+
+    assert latest_completed_session(monday_evening) == date(2024, 3, 11)
+    assert window is not None
+    assert window.session_date == date(2024, 3, 11)
+    assert window.opened_at == _utc("2024-03-11T23:30:00Z")
+    assert window.closes_at == _utc("2024-03-12T12:00:00Z")
+    assert overnight_collection_window(_utc("2024-03-11T22:00:00Z")) is None
+    assert overnight_collection_window(_utc("2024-03-12T13:00:00Z")) is None
+
+
+def test_weekend_is_one_continuous_overnight_collection_window():
+    window = overnight_collection_window(_utc("2024-03-10T12:00:00Z"))
+
+    assert window is not None
+    assert window.session_date == date(2024, 3, 8)
+    assert window.closes_at == _utc("2024-03-11T12:00:00Z")
 
 
 def test_five_minute_labels_filter_holidays_and_after_close_rows():

@@ -288,6 +288,57 @@ def test_bootstrap_skips_universe_resolution_when_identity_is_unchanged(
     assert resolutions == []
 
 
+def test_bootstrap_extends_unchanged_current_listing_without_metadata_request(
+    tmp_path,
+):
+    first_archive = _archive("SAFE", end="2026-08-31")
+    client = FakeIdentityClient([first_archive], {"SAFE": _metadata(first_archive)})
+
+    with MetaStore(tmp_path / "meta.db") as meta:
+        first = bootstrap_eod_identities(client, meta, ["SAFE"])
+        assert first.registered_episodes == 1
+        assert client.metadata_calls == ["SAFE"]
+
+        continued = _archive("SAFE", end="2026-09-01")
+        client.archive = [continued]
+        client.metadata = {"SAFE": _metadata(continued)}
+        second = bootstrap_eod_identities(client, meta, ["SAFE"])
+
+        assert second.validated == ["SAFE"]
+        assert second.extended_episodes == 1
+        assert second.registered_episodes == 0
+        assert client.metadata_calls == ["SAFE"]
+        assert meta.request_usage(now=datetime.now(UTC))["requests"] == 1
+        instrument_id = _instrument_id(continued)
+        assert meta.has_exact_identity_evidence(
+            instrument_id,
+            "eod",
+            "SAFE",
+            date(2020, 1, 2),
+            date(2026, 9, 1),
+        )
+        assert [
+            (row["start_date"], row["end_date"])
+            for row in meta.instrument_alias_records(instrument_id)
+        ] == [("2020-01-02", "2026-09-01")]
+
+
+def test_bootstrap_does_not_extend_a_changed_listing_anchor(tmp_path):
+    first_archive = _archive("SAFE", end="2026-08-31")
+    client = FakeIdentityClient([first_archive], {"SAFE": _metadata(first_archive)})
+
+    with MetaStore(tmp_path / "meta.db") as meta:
+        bootstrap_eod_identities(client, meta, ["SAFE"])
+        changed = _archive("SAFE", exchange="NYSE", end="2026-09-01")
+        client.archive = [changed]
+        client.metadata = {"SAFE": _metadata(changed)}
+
+        result = bootstrap_eod_identities(client, meta, ["SAFE"])
+
+        assert result.extended_episodes == 0
+        assert client.metadata_calls == ["SAFE", "SAFE"]
+
+
 def test_intraday_bootstrap_probes_exact_frequency_and_persists_fail_closed_outcomes(
     tmp_path,
 ):

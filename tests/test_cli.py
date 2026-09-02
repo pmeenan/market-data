@@ -4,7 +4,8 @@ import json
 import subprocess
 import sys
 from contextlib import contextmanager
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
+from types import SimpleNamespace
 
 from click.testing import CliRunner
 from test_ingest import FakeTiingo, eod_row, weekdays
@@ -40,6 +41,140 @@ def test_backfill_program_commands_expose_bounded_turn_controls():
     assert "--max-units" in step.output
     assert "--status-json" in step.output
     assert "--phase1-eod-job-id" in initialize.output
+
+
+def test_ongoing_commands_expose_overnight_and_bounded_controls():
+    runner = CliRunner()
+
+    initialize = runner.invoke(main, ["ongoing", "init", "--help"])
+    step = runner.invoke(main, ["ongoing", "step", "--help"])
+    run = runner.invoke(main, ["ongoing", "run", "--help"])
+
+    assert initialize.exit_code == step.exit_code == run.exit_code == 0
+    assert "--cohort-size" in initialize.output
+    assert "--initial-session" in initialize.output
+    assert "--identity-batch-size" in step.output
+    assert "--max-units" in step.output
+    assert "--pause-seconds" in run.output
+    assert "--status-json" in run.output
+
+
+def test_ongoing_run_backs_off_between_zero_request_state_transitions(
+    tmp_path, monkeypatch
+):
+    from marketdata.ongoing import OngoingProgramStepResult
+    from marketdata.store import MetaStore
+
+    data_dir = tmp_path / "data"
+    with MetaStore(data_dir / "meta.db") as meta:
+        meta.activate_canonical_generation()
+    now = datetime.now(UTC)
+    session = date(2024, 1, 31)
+    monkeypatch.setattr(
+        cli_mod,
+        "overnight_collection_window",
+        lambda value: SimpleNamespace(
+            session_date=session, closes_at=now + timedelta(hours=1)
+        ),
+    )
+    client = SimpleNamespace(request_count=0, response_bytes=0)
+    monkeypatch.setattr(cli_mod, "_operational_client", lambda config: client)
+    results = iter(
+        [
+            OngoingProgramStepResult(
+                program_id="test",
+                session_date=session,
+                cycle_state="eod",
+                action="dataset_job_initialized",
+            ),
+            OngoingProgramStepResult(
+                program_id="test",
+                session_date=session,
+                cycle_state="complete",
+                action="up_to_date",
+            ),
+        ]
+    )
+    monkeypatch.setattr(
+        cli_mod, "run_ongoing_program_step", lambda *args, **kwargs: next(results)
+    )
+    sleeps = []
+    monkeypatch.setattr(cli_mod, "sleep", sleeps.append)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "--data-dir",
+            str(data_dir),
+            "ongoing",
+            "run",
+            "--status-json",
+            str(data_dir / "status.json"),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert sleeps == [1]
+
+
+def test_ongoing_run_reserves_exit_three_for_terminal_exclusions(tmp_path, monkeypatch):
+    from marketdata.ongoing import OngoingProgramStepResult
+    from marketdata.store import MetaStore
+
+    data_dir = tmp_path / "data"
+    with MetaStore(data_dir / "meta.db") as meta:
+        meta.activate_canonical_generation()
+    now = datetime.now(UTC)
+    session = date(2024, 1, 31)
+    monkeypatch.setattr(
+        cli_mod,
+        "overnight_collection_window",
+        lambda value: SimpleNamespace(
+            session_date=session, closes_at=now + timedelta(hours=1)
+        ),
+    )
+    monkeypatch.setattr(
+        cli_mod,
+        "_operational_client",
+        lambda config: SimpleNamespace(request_count=0, response_bytes=0),
+    )
+    monkeypatch.setattr(
+        cli_mod,
+        "run_ongoing_program_step",
+        lambda *args, **kwargs: OngoingProgramStepResult(
+            program_id="test",
+            session_date=session,
+            cycle_state="complete_with_exclusions",
+            action="up_to_date",
+        ),
+    )
+
+    partial = CliRunner().invoke(
+        main,
+        [
+            "--data-dir",
+            str(data_dir),
+            "ongoing",
+            "run",
+            "--status-json",
+            str(data_dir / "status.json"),
+        ],
+    )
+    monkeypatch.setattr(cli_mod, "overnight_collection_window", lambda value: None)
+    refused = CliRunner().invoke(
+        main,
+        [
+            "--data-dir",
+            str(data_dir),
+            "ongoing",
+            "run",
+            "--status-json",
+            str(data_dir / "status.json"),
+        ],
+    )
+
+    assert partial.exit_code == 3
+    assert refused.exit_code == 1
 
 
 def test_backfill_program_status_is_read_only_under_mutation_lock(tmp_path):

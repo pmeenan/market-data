@@ -11,12 +11,13 @@ conflict-free stable alias envelope.
 
 from __future__ import annotations
 
+import json
 from bisect import bisect_left, bisect_right
 from collections import defaultdict
 from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Protocol
 from uuid import NAMESPACE_URL, uuid5
 
@@ -110,6 +111,7 @@ class IdentityBootstrapResult:
     overlaps: dict[str, list[str]] = field(default_factory=dict)
     failed: dict[str, str] = field(default_factory=dict)
     registered_episodes: int = 0
+    extended_episodes: int = 0
     stop_reason: str | None = None
 
     @property
@@ -137,6 +139,7 @@ class IdentityBootstrapResult:
             "overlaps": dict(sorted(self.overlaps.items())),
             "failed": dict(sorted(self.failed.items())),
             "registered_episodes": self.registered_episodes,
+            "extended_episodes": self.extended_episodes,
             "stop_reason": self.stop_reason,
             "quota_stopped": self.quota_stopped,
             "partial": self.partial,
@@ -271,6 +274,40 @@ def bootstrap_eod_identities(
                     and parsed[0][3] in episode_rows
                     and episode_rows[parsed[0][3]]["confidence"] == "archive_bound"
                 )
+                continuation = None
+                if len(parsed) == 1 and not requires_metadata_upgrade:
+                    archive, start, end, instrument_id = parsed[0]
+                    if not _already_validated(meta, instrument_id, ticker, start, end):
+                        continuation = _validated_eod_continuation(
+                            meta,
+                            episode_rows.get(instrument_id),
+                            instrument_id=instrument_id,
+                            ticker=ticker,
+                            start=start,
+                            end=end,
+                            archive=archive,
+                        )
+                if continuation is not None:
+                    evidence, description = continuation
+                    _register_episode(
+                        meta,
+                        instrument_id=instrument_id,
+                        ticker=ticker,
+                        start=start,
+                        end=end,
+                        archive=archive,
+                        evidence=evidence,
+                        description=description,
+                        ordinal=1,
+                        confidence="metadata_validated",
+                    )
+                    identity_changed = True
+                    meta.prune_archive_episode_envelope(
+                        instrument_id, ticker, start, end
+                    )
+                    result.validated.append(ticker)
+                    result.extended_episodes += 1
+                    continue
                 if (
                     all(
                         instrument_id in superseded
@@ -848,6 +885,98 @@ def _already_validated(
     end: date,
 ) -> bool:
     return meta.has_exact_identity_evidence(instrument_id, "eod", ticker, start, end)
+
+
+def _validated_eod_continuation(
+    meta: MetaStore,
+    episode: Any,
+    *,
+    instrument_id: str,
+    ticker: str,
+    start: date,
+    end: date,
+    archive: Mapping[str, str],
+) -> tuple[dict[str, Any], str | None] | None:
+    """Reuse an authenticated listing anchor when only its current end advances.
+
+    Tiingo's active supported-list record advances ``endDate`` each session.
+    Requiring a fresh metadata request for that mechanical continuation would
+    consume one request per active listing.  Continuation is admitted only for
+    an already metadata-validated singleton whose immutable archive fields are
+    unchanged and whose new tail has no competing alias owner.
+    """
+    if (
+        episode is None
+        or str(episode["basis"]) != "archive_record"
+        or str(episode["confidence"]) != "metadata_validated"
+        or str(episode["ticker"]) != ticker
+    ):
+        return None
+    try:
+        prior_evidence = json.loads(str(episode["evidence"]))
+    except (json.JSONDecodeError, TypeError):
+        return None
+    prior_archive = prior_evidence.get("archive")
+    metadata = prior_evidence.get("metadata")
+    if not isinstance(prior_archive, dict) or not isinstance(metadata, dict):
+        return None
+    immutable_fields = (
+        "ticker",
+        "exchange",
+        "assetType",
+        "priceCurrency",
+        "startDate",
+    )
+    if any(
+        prior_archive.get(field) != archive.get(field) for field in immutable_fields
+    ):
+        return None
+    if (
+        str(metadata.get("ticker") or "").upper() != ticker
+        or metadata.get("exchangeCode") != archive.get("exchange")
+        or metadata.get("startDate") != archive.get("startDate")
+    ):
+        return None
+
+    aliases = [
+        row
+        for row in meta.instrument_alias_records(instrument_id)
+        if str(row["ticker"]) == ticker
+        and date.fromisoformat(str(row["start_date"])) == start
+        and str(row["exchange"]) == str(archive.get("exchange") or "")
+        and str(row["asset_type"]) == str(archive.get("assetType") or "")
+    ]
+    prior_ends = sorted(
+        (
+            date.fromisoformat(str(row["end_date"]))
+            for row in aliases
+            if date.fromisoformat(str(row["end_date"])) < end
+        ),
+        reverse=True,
+    )
+    if not prior_ends:
+        return None
+    prior_end = prior_ends[0]
+    if not meta.has_exact_identity_evidence(
+        instrument_id, "eod", ticker, start, prior_end
+    ):
+        return None
+    added_tail = meta.resolve_alias_range(ticker, prior_end + timedelta(days=1), end)
+    if any(segment.status != "zero_matches" for segment in added_tail.segments):
+        return None
+
+    evidence = {
+        "source": "tiingo-supported-tickers-current-continuation",
+        "archive": {key: archive.get(key) for key in sorted(archive)},
+        "metadata": metadata,
+        "continuation": {
+            "authenticated_anchor_valid_to": metadata.get("endDate"),
+            "previous_valid_to": prior_end.isoformat(),
+            "policy": "unchanged unique listing anchor; endDate advanced only",
+        },
+    }
+    description = str(metadata.get("name") or "") or None
+    return evidence, description
 
 
 def _metadata_evidence(

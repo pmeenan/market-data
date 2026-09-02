@@ -22,6 +22,34 @@ Newest first. RE-numbers are never reused.
 
 ---
 
+## RE-011: An enabled editable-install timer can deploy a schema migration  (2026-09-02, status: worked-around)
+
+**Environment:** User-systemd market-data timers, repository editable virtual
+environment, SQLite `PRAGMA user_version` migrations.
+
+**Repro/measurement:** While schema-v8 collector changes were still awaiting
+the human commit gate, the enabled interim current-EOD/backfill timers launched
+the repository's editable console script. Merely constructing `MetaStore`
+automatically ran the v8 migration. The live `data/meta.db` had
+`user_version=8`, all `ongoing_*` tables, and a 2026-09-02 modification time
+even though the ongoing program/timer had never been initialized or installed.
+
+**Observed:** The working tree had crossed a forward-only production boundary
+without an explicit cutover command. Stashing or reverting it would leave every
+timer unable to open the newer database.
+
+**Expected:** Enabled editable-install services are production actors. Stop
+them before developing a migration, or treat the supporting code as deployed
+as soon as any timer opens the database.
+
+**Impact/workaround:** Schema-v8 support remains in the working tree and the
+docs now record the live boundary; the ongoing program and replacement timer
+remain uninitialized pending review. Future migration work must disable all
+editable-install timers before the schema version changes, not only the timer
+being replaced.
+
+---
+
 ## RE-010: An IEX 404 can pin the final breadth-first sweep  (2026-09-01, status: worked-around)
 
 **Environment:** D-027 program scheduler, phase-3 five-minute history, Tiingo

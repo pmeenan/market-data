@@ -22,8 +22,11 @@ affected docs. Until then, these govern.
   files (canonical), queried through DuckDB; small relational state lives in
   SQLite (`meta.db`). A server DB may appear later only as a hot layer for a
   realtime tool — the Parquet archive stays canonical. (D-003)
-- **Tiingo is the sole market-data source.** The API token lives in `.env`
-  (gitignored) and must never be committed or logged. (D-002)
+- **Tiingo is the sole canonical-warehouse market-data source.** The API token
+  lives in `.env` (gitignored) and must never be committed or logged. A future
+  read-only broker feed may supply source-labelled morning trigger data for a
+  small tagged watchlist, but may not silently enter canonical bars. (D-002,
+  D-031)
 - **Universes seed the dataset; strategies select from the data.** Per-year
   dollar-volume universes choose what gets ingested (and remain stored as the
   historical record), but backtests select instruments from stored price/volume
@@ -37,8 +40,10 @@ affected docs. Until then, these govern.
   next-session IEX context, whose out-of-segment rows are request-validated and
   discarded before normalization. Discontinuous EOD histories are partitioned
   only through D-023's evidence-bounded listing episodes. (D-014, D-021, D-023)
-- **Research only; US stocks + ETFs only.** No order execution or broker
-  connectivity, ever; no options/futures/crypto. (D-007, D-008)
+- **Research only; US stocks + ETFs only.** No order execution, broker trading
+  connectivity, or account mutation; no options/futures/crypto. A separately
+  approved future broker connection may be read-only market data. (D-007,
+  D-008, D-031)
 - **Ingestion is idempotent, resumable, and vintage-consistent.** Coverage is
   a per-(instrument, dataset) interval (leading gaps get fetched, not skipped);
   Parquet writes are merge-upserts; updates refetch a rolling overlap and a
@@ -118,8 +123,9 @@ build → commit loop, on-demand reviews, and the human commit gate.
 
 ## Current status
 
-Milestones **M2 (trustworthy scheduled ingestion)** and **M3 (first persisted
-study)** are in progress. Cap-safe
+Milestones **M2 (trustworthy scheduled ingestion)**, **M3 (first persisted
+study)**, and **M4 (full opening-window study and historical program)** are in
+progress. Cap-safe
 next-session IEX planning and the XNYS session-label surface are implemented;
 structured quality findings, consumer-declared gates, durable request budgets,
 current-first breadth-first scheduling, and shared data-directory mutation
@@ -129,8 +135,14 @@ histories, repaired 62 reused symbols into 125 inferred episodes, and validated
 replaced both fixed phase-1 timers, frozen an immutable 23,078-instrument
 supported-US phase-2 cohort, completed its safe EOD work with accepted
 exclusions, and completed phase-3 five-minute history with accepted fail-closed
-exclusions. A bounded-status
-nightly current-EOD timer is installed; two actual post-market runs remain.
+exclusions. A bounded-status nightly current-EOD timer is installed; one
+further consecutive actual post-market run remains. D-030/D-031's schema-v8
+overnight all-active EOD and monthly top-5,000 hourly/five-minute collector,
+including D-032 current-identity continuation and D-033 gap/floor behavior, is
+implemented and tested.
+An enabled editable-install timer already migrated live `meta.db` to schema v8;
+the ongoing program and replacement timer are not initialized. Human commit,
+timer cutover, and measured live duty-cycle runs remain.
 External failure notification is optional for this personal deployment.
 M1 closed on 2026-08-27. Production ingestion is permitted only for validated
 request segments; unresolved work remains fail-closed. M3's D-016 result

@@ -1,0 +1,27 @@
+[Unit]
+Description=market-data overnight EOD and rolling intraday collection
+Documentation=file://%h/src/market-data/README.md
+ConditionPathExists=%h/src/market-data/data/meta.db
+StartLimitIntervalSec=10min
+StartLimitBurst=4
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/src/market-data
+Environment=PYTHONUNBUFFERED=1
+ExecStart=%h/src/market-data/.venv/bin/market-data --data-dir %h/src/market-data/data ongoing run --program-id ongoing-main-v1 --identity-batch-size 1000 --max-units 1000 --pause-seconds 360 --status-json %h/src/market-data/data/operations/ongoing-main-v1-status.json
+# Exit 3 is reserved for a terminal cycle with durable per-instrument
+# exclusions. Ordinary Click errors and uncaught exceptions remain exit 1 and
+# retry; coordinator/configuration/locking/status failures use exit 2.
+SuccessExitStatus=3
+Restart=on-failure
+RestartSec=2min
+Nice=5
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+TimeoutStartSec=14h
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=%h/src/market-data/data
+RestrictSUIDSGID=true

@@ -175,9 +175,64 @@ two-minute retries before the user service remains failed. Manual forensic runs
 can still use `--summary-json` for the complete segment report instead of the
 bounded `--status-json` record.
 
-On this server the templates were installed under
-`~/.config/systemd/user/`, the timer was enabled, and user lingering was
-enabled so it continues after logout. Reinstall changed templates with:
+That service is the interim M2 deployment. An enabled editable-install timer
+opened the live database with this working tree on 2026-09-02, so the
+forward-only schema-v8 migration has already run and must not be reverted. The
+ongoing program itself is not initialized and its replacement timer is not
+installed or enabled. Each eventual cycle freezes the active Tiingo-supported
+US stock/ETF roster and updates EOD for every resolvable listing. It persists a
+monthly top-5,000 cohort ranked by mean EOD `close * volume` over the latest 20
+completed XNYS sessions, then runs independently resumable direct-hourly and
+five-minute sweeps for that cohort.
+
+D-032 prevents the active roster from consuming one metadata request per
+listing every night. An unchanged, unique EOD listing whose prior envelope was
+authenticated can extend its advancing supported-list `endDate` locally; any
+new or changed immutable listing field still requires metadata or fails closed.
+The continuation never authorizes IEX and every bar response remains
+identity-envelope validated.
+
+Per D-033, every current-mode target with existing coverage begins at that
+coverage's trailing edge minus the seven-day correction overlap. It therefore
+fills every missing interval from the historical or prior-current stop through the cycle
+session rather than fetching only the last day. A new intraday cohort member
+with no stored intraday bars begins forward-only at the cohort's as-of session
+and later correction overlaps cannot move that lower bound backward. A
+completed request with no bar through the cycle session becomes an explicit
+cycle-scoped exclusion so it can retry in the next cycle without holding every
+other dataset for five publication-lag days. Cancelling a designated job is
+also a terminal exclusion for that cycle, not a permanent program stall.
+The automatic driver refuses work before 23:30 UTC or after 08:00 New York time
+on the next XNYS session; an explicit `step --session` is reserved for manual
+recovery. Inspecting status never calls Tiingo:
+
+```bash
+market-data ongoing init
+market-data ongoing status
+market-data ongoing step --session YYYY-MM-DD --max-units 1000
+market-data ongoing run \
+  --status-json data/operations/ongoing-main-v1-status.json
+```
+
+`ongoing run` checkpoints each bounded action, paces API-bearing batches, and
+continues an older unfinished frozen cycle before creating the requested
+session. EOD completes before the monthly rank, hourly, and five-minute states.
+The systemd template uses 1,000 turns followed by six minutes of headroom and
+stops cleanly at the morning boundary or a durable quota limit. Exit 3 is
+reserved for a terminal cycle with explicit exclusions and is the only
+nonzero status accepted by the service; ordinary exit-1 CLI/crash failures and
+exit-2 operational failures retry.
+
+A future, separately scoped decision tool may update only a small set of
+owner-tagged tickers during the morning using Tiingo or a broker's read-only
+market-data API. That feed is not part of M4, cannot place orders or mutate a
+broker account, and cannot silently merge broker data into canonical Tiingo
+bars.
+
+On this server the historical-program and interim current-EOD templates are
+installed under `~/.config/systemd/user/`, their timers are enabled, and user
+lingering is enabled so they continue after logout. Reinstall those live
+templates with:
 
 ```bash
 install -Dm0644 -t ~/.config/systemd/user \
@@ -190,6 +245,21 @@ systemctl --user enable --now market-data-backfill-program.timer
 systemctl --user enable --now market-data-current-eod.timer
 loginctl enable-linger "$USER"
 ```
+
+After these schema-v8 supporting changes are reviewed and committed, the
+explicit production-program cutover is:
+
+```bash
+install -Dm0644 -t ~/.config/systemd/user deploy/systemd/market-data-ongoing.*
+systemctl --user daemon-reload
+market-data ongoing init
+systemctl --user disable --now market-data-current-eod.timer
+systemctl --user enable --now market-data-ongoing.timer
+```
+
+The live `meta.db` is already schema v8; stashing or reverting its supporting
+code would make every existing timer fail with a newer-schema error. The old
+timer remains enabled until the ongoing-program cutover succeeds.
 
 Cancellation is also available while a sweep is running. Any already-started
 request turn finishes and checkpoints safely, then the sweep stops before the
@@ -345,6 +415,7 @@ src/marketdata/
   quality.py                 structured checks + consumer-declared gates
   research.py                vectorized event runner + cataloged publication
   research_layout.py         shared safe result-layout contract
+  ongoing.py                 durable overnight EOD/intraday program
   scheduler.py               durable budgets + breadth-first history sweeps
   identity.py               fail-closed identity resolution result contracts
   tiingo.py                 Tiingo REST client (CSV bars, retries, metering)
@@ -359,8 +430,9 @@ src/marketdata/
 
 ## Status
 
-Milestones **M2 (trustworthy scheduled ingestion)** and **M3 (first persisted
-study)** are in progress. M2's
+Milestones **M2 (trustworthy scheduled ingestion)**, **M3 (first persisted
+study)**, and **M4 (full opening-window study and historical program)** are in
+progress. M2's
 cap-safe intraday request planner, XNYS calendar/session-label surface, and
 structured quality/gating layer are implemented, as are durable request-budget
 accounting, current-first breadth-first history scheduling, and shared process
@@ -371,9 +443,16 @@ enabled D-027 program timer has replaced both fixed phase-1 timers, frozen an
 immutable 23,078-instrument supported-US phase-2 cohort, completed its safe EOD
 work with accepted exclusions, completed phase-3 five-minute identity
 preparation, and completed its historical transfer with accepted fail-closed
-exclusions. A bounded-status nightly current-EOD timer is installed; two actual
-post-market timer runs remain. External failure notification is optional for
-this personal deployment.
+exclusions. A bounded-status nightly current-EOD timer is installed; one
+further consecutive actual post-market run remains. External failure
+notification is optional for this personal deployment. D-030/D-031's schema-v8
+all-active EOD and monthly
+top-5,000 hourly/five-minute overnight collector, gap bridging, CLI, status,
+tests, and replacement systemd templates are implemented. Production program
+initialization, timer cutover, and measured live duty-cycle runs remain. The
+live metadata database is already schema v8 because an enabled editable-install
+timer applied the migration; no ongoing program rows or replacement timer are
+live yet.
 M1 closed on
 2026-08-27 after its controlled EOD/IEX canary passed. Production ingestion is
 permitted only for validated segments; unresolved work remains fail-closed and

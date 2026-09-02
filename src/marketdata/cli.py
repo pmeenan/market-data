@@ -7,8 +7,9 @@ import logging
 import sqlite3
 import sys
 from contextlib import nullcontext
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
+from time import sleep
 from typing import Any
 
 import click
@@ -25,7 +26,11 @@ from marketdata.backfill_program import (
     initialize_default_backfill_program,
     run_backfill_program_step,
 )
-from marketdata.calendar import max_intraday_probe_sessions
+from marketdata.calendar import (
+    latest_completed_session,
+    max_intraday_probe_sessions,
+    overnight_collection_window,
+)
 from marketdata.config import Config, load_config
 from marketdata.identity import DATASET_KEYS
 from marketdata.identity_bootstrap import (
@@ -50,6 +55,15 @@ from marketdata.migration import (
     _write_json_atomic,
     default_migration_report_path,
     migrate_v1_bars,
+)
+from marketdata.ongoing import (
+    DEFAULT_COHORT_SIZE,
+    DEFAULT_LOOKBACK_SESSIONS,
+    DEFAULT_MIN_OBSERVATIONS,
+    DEFAULT_ONGOING_PROGRAM_ID,
+    OngoingProgramStepResult,
+    initialize_ongoing_program,
+    run_ongoing_program_step,
 )
 from marketdata.quality import (
     DEFAULT_ZERO_VOLUME_RUN_LENGTH,
@@ -86,6 +100,7 @@ _DATA_OPERATION_ERRORS = (
     TiingoError,
 )
 _STATUS_DETAIL_LIMIT = 100
+_ONGOING_PARTIAL_EXIT_CODE = 3
 
 
 def _client(config: Config) -> TiingoClient:
@@ -260,6 +275,29 @@ def _bounded_program_status(result: BackfillProgramStepResult) -> dict[str, Any]
     return payload
 
 
+def _bounded_ongoing_status(
+    result: OngoingProgramStepResult,
+    *,
+    started_at: datetime,
+    client: Any,
+    window_end: datetime | None = None,
+) -> dict[str, Any]:
+    payload = result.to_dict()
+    if payload["identity"] is not None:
+        payload["identity"] = _bounded_result(payload["identity"])
+    if payload["sweep"] is not None:
+        payload["sweep"] = _bounded_result(payload["sweep"])
+    payload["operation"] = {
+        "kind": "ongoing_overnight_collection",
+        "started_at": started_at.isoformat(),
+        "finished_at": datetime.now(UTC).isoformat(),
+        "window_end": window_end.isoformat() if window_end is not None else None,
+        "request_attempts": int(getattr(client, "request_count", 0)),
+        "observed_response_bytes": int(getattr(client, "response_bytes", 0)),
+    }
+    return payload
+
+
 def _write_ingest_json(payload: dict[str, Any], path: str) -> None:
     """Publish an ingestion report or fail with the operational exit code."""
     try:
@@ -299,6 +337,7 @@ def _echo_identity_bootstrap(result: IdentityBootstrapResult) -> None:
         "Identity bootstrap: "
         f"{len(result.validated)} validated, {len(result.skipped)} already valid, "
         f"{result.registered_episodes} episodes registered, "
+        f"{result.extended_episodes} current episodes extended, "
         f"{len(result.overlaps)} overlap-blocked, "
         f"{len(result.blocked)} blocked, {len(result.failed)} failed"
     )
@@ -1087,6 +1126,303 @@ def backfill_program_status_cmd(config: Config, program_id: str) -> None:
             f"identity={component['identity_status']} "
             f"{component['identity_cursor']}/{cohort}; job={component['job_id']}"
         )
+
+
+@main.group()
+def ongoing() -> None:
+    """Operate the durable post-market EOD and intraday collector."""
+
+
+@ongoing.command("init")
+@click.option("--program-id", default=DEFAULT_ONGOING_PROGRAM_ID, show_default=True)
+@click.option(
+    "--initial-session",
+    type=click.DateTime(["%Y-%m-%d"]),
+    default=None,
+    help="Forward-only start for intraday members without existing coverage",
+)
+@click.option(
+    "--cohort-size",
+    type=click.IntRange(min=1),
+    default=DEFAULT_COHORT_SIZE,
+    show_default=True,
+)
+@click.option(
+    "--lookback-sessions",
+    type=click.IntRange(min=1),
+    default=DEFAULT_LOOKBACK_SESSIONS,
+    show_default=True,
+)
+@click.option(
+    "--min-observations",
+    type=click.IntRange(min=1),
+    default=DEFAULT_MIN_OBSERVATIONS,
+    show_default=True,
+)
+@click.pass_obj
+def ongoing_init_cmd(
+    config: Config,
+    program_id: str,
+    initial_session: datetime | None,
+    cohort_size: int,
+    lookback_sessions: int,
+    min_observations: int,
+) -> None:
+    """Initialize the immutable ongoing collection definition."""
+    _require_initialized_warehouse(config)
+    session = (
+        initial_session.date()
+        if initial_session is not None
+        else latest_completed_session(datetime.now(UTC))
+    )
+    try:
+        with MetaStore(config.meta_path) as meta:
+            _require_ingestion_ready(meta)
+            initialize_ongoing_program(
+                meta,
+                program_id=program_id,
+                initial_session=session,
+                cohort_size=cohort_size,
+                lookback_sessions=lookback_sessions,
+                min_observations=min_observations,
+            )
+    except _DATA_OPERATION_ERRORS as exc:
+        raise _IngestOperationalError(str(exc)) from exc
+    click.echo(
+        f"Ongoing program {program_id}: active; initial session {session}; "
+        f"intraday cohort {cohort_size}"
+    )
+
+
+def _ongoing_session(explicit: datetime | None) -> tuple[date, datetime | None]:
+    if explicit is not None:
+        return explicit.date(), None
+    window = overnight_collection_window(datetime.now(UTC))
+    if window is None:
+        raise click.ClickException(
+            "ongoing collection is allowed only after the XNYS close and before "
+            "the next 08:00 America/New_York decision window; use --session only "
+            "for an intentional manual recovery"
+        )
+    return window.session_date, window.closes_at
+
+
+def _echo_ongoing_step(result: OngoingProgramStepResult) -> None:
+    click.echo(
+        f"Ongoing program {result.program_id}: session {result.session_date}; "
+        f"state={result.cycle_state}; action={result.action}"
+    )
+    if result.dataset_key is not None:
+        detail = f"Dataset {result.dataset_key}"
+        if result.target_count is not None:
+            detail += f": {result.target_count} targets"
+        if result.identity_cursor is not None:
+            detail += f"; identity cursor {result.identity_cursor}"
+        click.echo(detail)
+    if result.sweep is not None:
+        click.echo(
+            f"Sweep {result.sweep.job_id}: {result.sweep.job_status}; "
+            f"{result.sweep.attempted_units} attempted, "
+            f"{result.sweep.advanced_units} advanced"
+        )
+    if result.stop_reason:
+        click.echo(f"Ongoing step stopped: {result.stop_reason}")
+
+
+@ongoing.command("step")
+@click.option("--program-id", default=DEFAULT_ONGOING_PROGRAM_ID, show_default=True)
+@click.option(
+    "--session",
+    type=click.DateTime(["%Y-%m-%d"]),
+    default=None,
+    help="Explicit manual recovery session; otherwise require the overnight window",
+)
+@click.option("--identity-batch-size", type=click.IntRange(min=1), default=1_000)
+@click.option("--max-units", type=click.IntRange(min=1), default=1_000)
+@click.option("--status-json", type=click.Path(), default=None)
+@click.pass_obj
+def ongoing_step_cmd(
+    config: Config,
+    program_id: str,
+    session: datetime | None,
+    identity_batch_size: int,
+    max_units: int,
+    status_json: str | None,
+) -> None:
+    """Advance one bounded ongoing-program action."""
+    _require_initialized_warehouse(config)
+    target_session, window_end = _ongoing_session(session)
+    started_at = datetime.now(UTC)
+    client = None
+    try:
+        with MetaStore(config.meta_path) as meta:
+            _require_ingestion_ready(meta)
+            client = _operational_client(config)
+            result = run_ongoing_program_step(
+                client,
+                BarStore(config.data_dir),
+                meta,
+                session_date=target_session,
+                program_id=program_id,
+                identity_batch_size=identity_batch_size,
+                max_units=max_units,
+            )
+    except _DATA_OPERATION_ERRORS as exc:
+        _raise_ingest_error(exc, status_json, operational=True)
+    _echo_ongoing_step(result)
+    if status_json:
+        _write_ingest_json(
+            _bounded_ongoing_status(
+                result,
+                started_at=started_at,
+                client=client,
+                window_end=window_end,
+            ),
+            status_json,
+        )
+    if result.partial:
+        raise click.exceptions.Exit(1)
+
+
+@ongoing.command("run")
+@click.option("--program-id", default=DEFAULT_ONGOING_PROGRAM_ID, show_default=True)
+@click.option("--identity-batch-size", type=click.IntRange(min=1), default=1_000)
+@click.option("--max-units", type=click.IntRange(min=1), default=1_000)
+@click.option(
+    "--pause-seconds",
+    type=click.IntRange(min=1, max=3_600),
+    default=360,
+    show_default=True,
+    help="Pause after API-bearing batches to preserve hourly retry headroom",
+)
+@click.option("--status-json", type=click.Path(), required=True)
+@click.pass_obj
+def ongoing_run_cmd(
+    config: Config,
+    program_id: str,
+    identity_batch_size: int,
+    max_units: int,
+    pause_seconds: int,
+    status_json: str,
+) -> None:
+    """Run resumable bounded steps until current or the overnight window ends."""
+    _require_initialized_warehouse(config)
+    now = datetime.now(UTC)
+    window = overnight_collection_window(now)
+    if window is None:
+        raise click.ClickException(
+            "ongoing run refused outside the post-market overnight window"
+        )
+    started_at = now
+    client = None
+    result = None
+    try:
+        with MetaStore(config.meta_path) as meta:
+            _require_ingestion_ready(meta)
+            client = _operational_client(config)
+            bars = BarStore(config.data_dir)
+            while datetime.now(UTC) < window.closes_at:
+                requests_before = int(getattr(client, "request_count", 0))
+                result = run_ongoing_program_step(
+                    client,
+                    bars,
+                    meta,
+                    session_date=window.session_date,
+                    program_id=program_id,
+                    identity_batch_size=identity_batch_size,
+                    max_units=max_units,
+                )
+                _write_ingest_json(
+                    _bounded_ongoing_status(
+                        result,
+                        started_at=started_at,
+                        client=client,
+                        window_end=window.closes_at,
+                    ),
+                    status_json,
+                )
+                _echo_ongoing_step(result)
+                if result.terminal and result.session_date == window.session_date:
+                    break
+                if result.stop_reason in {
+                    "daily_request_limit",
+                    "monthly_total_byte_limit",
+                }:
+                    break
+                requests_after = int(getattr(client, "request_count", 0))
+                remaining = (window.closes_at - datetime.now(UTC)).total_seconds()
+                if remaining <= 0:
+                    break
+                delay = (
+                    pause_seconds
+                    if requests_after > requests_before or result.stop_reason
+                    else 1
+                )
+                sleep(min(delay, remaining))
+    except _DATA_OPERATION_ERRORS as exc:
+        _raise_ingest_error(exc, status_json, operational=True)
+    if result is None:
+        raise _IngestOperationalError("overnight window ended before work began")
+    if result.partial and result.terminal:
+        raise click.exceptions.Exit(_ONGOING_PARTIAL_EXIT_CODE)
+
+
+@ongoing.command("status")
+@click.option("--program-id", default=DEFAULT_ONGOING_PROGRAM_ID, show_default=True)
+@click.pass_obj
+def ongoing_status_cmd(config: Config, program_id: str) -> None:
+    """Show persisted ongoing cycles and cohort state without API calls."""
+    _require_initialized_warehouse(config)
+    try:
+        with MetaStore(config.meta_path) as meta:
+            program = meta.ongoing_program(program_id)
+            if program is None:
+                raise click.ClickException(f"unknown ongoing program {program_id!r}")
+            cycles = meta.ongoing_cycles(program_id)
+            cohort = meta.latest_ongoing_cohort_snapshot(program_id)
+            job_summaries: dict[tuple[str, str], tuple[Any, int]] = {}
+            for cycle in cycles[-10:]:
+                for dataset_key, field_name in (
+                    ("eod", "eod_job_id"),
+                    ("intraday_1hour", "hourly_job_id"),
+                    ("intraday_5min", "five_min_job_id"),
+                ):
+                    job = meta.history_job(str(cycle[field_name]))
+                    if job is not None:
+                        job_summaries[(str(cycle["session_date"]), dataset_key)] = (
+                            job,
+                            meta.history_target_count(str(job["job_id"])),
+                        )
+    except _DATA_OPERATION_ERRORS as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(
+        f"Ongoing program {program_id}: {program['status']}; "
+        f"initial={program['initial_session']}; cycles={len(cycles)}"
+    )
+    if cohort is not None:
+        click.echo(
+            f"Latest cohort {cohort['snapshot_id']}: as-of "
+            f"{cohort['as_of_session']}; {cohort['member_count']} members"
+        )
+    for cycle in cycles[-10:]:
+        click.echo(
+            f"  {cycle['session_date']}: {cycle['state']}; "
+            f"eod_identity={cycle['eod_identity_cursor']}; "
+            f"hourly_identity={cycle['hourly_identity_cursor']}; "
+            f"five_min_identity={cycle['five_min_identity_cursor']}"
+        )
+        for dataset_key in ("eod", "intraday_1hour", "intraday_5min"):
+            summary = job_summaries.get((str(cycle["session_date"]), dataset_key))
+            if summary is not None:
+                job, target_count = summary
+                job_status = (
+                    "cancelled" if bool(job["cancelled"]) else str(job["status"])
+                )
+                click.echo(
+                    f"    {dataset_key}: {job_status}; "
+                    f"cursor={job['cursor']}/{target_count}; "
+                    f"sweep={job['sweep']}"
+                )
 
 
 @main.command()

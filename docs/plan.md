@@ -347,8 +347,10 @@ Exit criteria:
   The installed service completed two consecutive controlled pre-publication
   runs on 2026-08-28, and induced lock contention produced systemd exit 2 plus
   a 506-byte diagnostic status before a healthy rerun restored the standing
-  4.9 KB status. The first two actual timer-triggered post-market runs remain,
-  so this criterion stays unchecked. The scheduler/status checkpoint passed
+  4.9 KB status. The first actual timer-triggered post-market run completed on
+  2026-09-01 with 1,623 fetched, 62 corporate-action refreshes, and 12 explicit
+  blockers; one further consecutive actual run remains, so this criterion stays
+  unchecked. The scheduler/status checkpoint passed
   `make check` with 188 tests before the phase-1 bootstrap work landed.
 - [x] Phase 1 ran through the persisted scheduler, its coverage and budget
   state survive restart, and `make check` passes.
@@ -431,36 +433,61 @@ Exit criteria:
 - [ ] The CLI output and notebook state the direct-hourly and IEX-volume limits;
   benchmark conventions match the event observations; `make check` passes.
 
-## M4 — Full opening-window study and historical program  `pending`
+## M4 — Full opening-window study and historical program  `in progress`
 
-Goal: finish the planned dataset breadth and extend the coarse result into the
-complete five-minute, session-relative opening-window study promised by the
-vision, then exercise the research engine with a second strategy.
+Goal: turn the completed historical archive into the intended durable ongoing
+collection, extend the coarse result into the complete five-minute,
+session-relative opening-window study promised by the vision, then exercise the
+research engine with a second strategy.
 
 Scope:
 
-- [ ] Keep the metered scheduler running through D-011 phase 1, phase 2 (20 years
-  of EOD for all supported US stocks/ETFs, including delisted listings), and
-  phase 3 (seed five-minute history back to 2016-12-12). Begin forward-only
-  all-ticker current five-minute collection no later than phase 3, as required
-  by D-013.
-  D-027 now persists the four ordered components, rejects missing or ad hoc
-  predecessors, freezes the vendor archive behind phase 2, and batches identity
-  and history turns through one systemd driver. Phase 1 is terminal with
-  exclusions; the enabled live driver froze 23,078 phase-2 instruments,
-  completed their safe EOD work with accepted exclusions, completed phase-3
-  five-minute identity preparation, and completed its historical transfer with
-  accepted exclusions after D-029 prevented one definitive GBF 404 from polling
-  forever. The ongoing-current expansion keeps this item open. Before enabling
-  that current expansion, measure its end-to-end duty cycle and choose a
-  batch/schedule that
-  meets nightly freshness without exceeding the durable hourly, daily, or byte
-  budgets. Do not automatically reuse the historical program timer's
-  500-turn-plus-five-minute-idle throttle: it limits useful throughput to less
-  than 6,000 calls/hour even before runtime, and the live phase-2 EOD transfer
-  sustained about 4,000--4,500 calls/hour. Historical five-minute work remains
-  bandwidth-window-bound, so increasing its request rate is not itself a
-  completion requirement.
+- [x] Complete D-011 phases 1–3 through D-027's metered historical program:
+  phase-1 seed EOD/hourly, 20 years of phase-2 EOD for the frozen 23,078-ticker
+  supported-US archive (including delisted listings), and phase-3 seed
+  five-minute history back to 2016-12-12. All four components are terminal
+  with explicit accepted exclusions after D-029 prevented one definitive GBF
+  404 from polling forever.
+- [x] Implement D-030's durable ongoing collector. Refresh Tiingo's active
+  supported-US stock/ETF roster at the start of each post-market weekday cycle
+  and update EOD for every resolvable stable listing. After the first complete
+  all-active EOD cycle following month end, persist the next rolling liquidity
+  snapshot: default top 5,000 by mean EOD `close * volume` across the latest 20
+  completed XNYS sessions, at least 15 valid observations, with deterministic
+  ties and full ranking provenance. Collect direct hourly and five-minute data
+  independently for that fixed cohort during the same overnight window;
+  membership changes affect future collection only.
+  Completed 2026-09-01: schema v8 content-addresses active supported-list
+  snapshots, persists monthly stable-instrument liquidity cohorts, and drives
+  ordered EOD/hourly/five-minute identity and data states. Existing coverage
+  starts at its trailing edge plus the seven-day correction overlap, so every
+  gap from the historical or prior-current stop through the cycle session is
+  fetched. A cohort member with no intraday coverage starts forward-only at
+  its cohort as-of session and later overlap refreshes cannot move that floor
+  backward. D-032 extends unchanged authenticated current EOD listing anchors
+  without a per-ticker metadata request; new/changed anchors remain fail-closed.
+- [x] Make each current dataset an independently resumable bounded sweep with
+  honest target/completed/excluded status. EOD runs first; hourly and
+  five-minute run in separate request-budget windows and every batch yields the
+  D-022 mutation lock. Completed 2026-09-01: current-mode scheduler jobs retain
+  immutable targets, per-range progress, retryable failures, terminal
+  exclusions, and shared current-work request/byte accounting. `ongoing run`
+  admits automatic work only from 23:30 UTC through 08:00 New York time on the
+  next XNYS session, checkpoints each bounded step, and writes
+  target/cursor/sweep/exclusion status. The systemd template uses 1,000-turn
+  API batches separated by six minutes and a one-second idle delay for
+  zero-request transitions. Missing current-session bars and cancellations are
+  terminal exclusions for that frozen cycle rather than permanent phase gates;
+  only the designated exit 3 is accepted by systemd as partial success.
+- [ ] The live metadata database was already migrated to schema v8 by an
+  enabled editable-install timer on 2026-09-02 and must not be downgraded.
+  After the human commit gate, initialize the production ongoing program,
+  replace the interim latest-universe-only EOD timer with the new overnight
+  timer, and measure complete end-to-end cycles. Confirm the 1,000-turn/six-
+  minute pacing leaves retry headroom under the 10,000/hour and 100,000/day
+  limits and finishes or checkpoints before the next morning decision window.
+  Adjust measured batch spacing if necessary; the broad collector must never
+  poll during the regular session.
 - [ ] Extend the gap study with exchange-calendar-filtered five-minute observations
   for the opening half-hour and other session-relative windows. Retain direct
   hourly results as their own vendor-frequency checkpoints; do not relabel them
@@ -477,12 +504,16 @@ Scope:
 
 Exit criteria:
 
-- [ ] Every target in phases 1–3 is either covered to its defined range or listed
+- [x] Every target in phases 1–3 is either covered to its defined range or listed
   in a durable unresolved/failed report; scheduler records show phase order,
   D-020 breadth-first sweep order, and every billing window remained within
   D-013's limits.
-- [ ] Nightly EOD/hourly/five-minute collection is current for every resolvable
-  all-ticker target, with honest per-dataset coverage and visible failures.
+- [ ] Repeated overnight post-market cycles keep EOD current through the most
+  recent completed XNYS session for every resolvable active supported listing,
+  and keep both direct intraday datasets current for every resolvable member of
+  the accepted rolling top-5,000 snapshot. The snapshot provenance,
+  new/removed membership, per-dataset sweep progress, budget stops, and
+  fail-closed exclusions are queryable and present in bounded operator status.
 - [ ] The full study publishes validated opening-half-hour and later-window
   observations through the M3 result path, passes hand-calculated session and
   early-close fixtures, and documents the measured effect of adding five-minute
@@ -498,6 +529,12 @@ Exit criteria:
 - After M3, the owner will revisit the proposed read-only web UI and realtime
   research layer. If either is promoted, it gets a newly scoped milestone and
   decision updates before implementation; neither is an implicit M4 task.
+- The likely first realtime shape is D-031's small owner-tagged morning
+  watchlist for triggering decisions. It may use Tiingo five-minute updates or
+  a broker's read-only market-data API, but it remains separate from the
+  overnight bulk collector and canonical Tiingo bars. Promotion requires its
+  own source, credential, freshness, and persistence decisions; broker order
+  or account mutation remains out of scope.
 - Corporate-action handling beyond Tiingo's adjusted columns is triggered by
   a concrete study limitation. A stateful portfolio/order simulator is likewise
   triggered only by a confirmed study that needs execution semantics.

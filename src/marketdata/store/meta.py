@@ -38,7 +38,7 @@ from marketdata.research_layout import (
     normalize_relative_data_path,
 )
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 _SCHEMA_V1 = """
 CREATE TABLE IF NOT EXISTS tickers (
@@ -524,6 +524,134 @@ CREATE INDEX IF NOT EXISTS backfill_program_supported_ticker
     ON backfill_program_supported_records (program_id, scope_key, ticker);
 """
 
+_SCHEMA_V8 = """
+ALTER TABLE history_jobs
+ADD COLUMN work_kind TEXT NOT NULL DEFAULT 'historical'
+CHECK (work_kind IN ('current', 'historical'));
+
+ALTER TABLE history_jobs
+ADD COLUMN refresh_overlap_days INTEGER NOT NULL DEFAULT 0
+CHECK (refresh_overlap_days >= 0);
+
+CREATE TABLE IF NOT EXISTS ongoing_programs (
+    program_id          TEXT PRIMARY KEY,
+    definition_hash     TEXT NOT NULL,
+    initial_session     TEXT NOT NULL,
+    cohort_size         INTEGER NOT NULL,
+    lookback_sessions   INTEGER NOT NULL,
+    min_observations    INTEGER NOT NULL,
+    status              TEXT NOT NULL DEFAULT 'active',
+    created_at          TEXT NOT NULL,
+    updated_at          TEXT NOT NULL,
+    CHECK (length(trim(program_id)) BETWEEN 1 AND 128),
+    CHECK (length(definition_hash) = 64),
+    CHECK (cohort_size > 0),
+    CHECK (lookback_sessions > 0),
+    CHECK (min_observations > 0),
+    CHECK (min_observations <= lookback_sessions),
+    CHECK (status = 'active')
+);
+
+CREATE TABLE IF NOT EXISTS ongoing_supported_snapshots (
+    snapshot_id         TEXT PRIMARY KEY,
+    as_of_session       TEXT NOT NULL,
+    ticker_count        INTEGER NOT NULL,
+    record_count        INTEGER NOT NULL,
+    created_at          TEXT NOT NULL,
+    CHECK (length(snapshot_id) = 64),
+    CHECK (ticker_count > 0),
+    CHECK (record_count >= ticker_count)
+);
+
+CREATE TABLE IF NOT EXISTS ongoing_supported_records (
+    snapshot_id         TEXT NOT NULL REFERENCES ongoing_supported_snapshots(snapshot_id)
+                        ON DELETE CASCADE,
+    record_ordinal      INTEGER NOT NULL,
+    ticker              TEXT NOT NULL,
+    exchange            TEXT NOT NULL,
+    asset_type          TEXT NOT NULL,
+    price_currency      TEXT NOT NULL,
+    start_date          TEXT NOT NULL,
+    end_date            TEXT NOT NULL,
+    PRIMARY KEY (snapshot_id, record_ordinal),
+    CHECK (record_ordinal >= 0),
+    CHECK (length(trim(ticker)) > 0),
+    CHECK (start_date <= end_date)
+);
+CREATE INDEX IF NOT EXISTS ongoing_supported_records_ticker
+    ON ongoing_supported_records (snapshot_id, ticker);
+
+CREATE TABLE IF NOT EXISTS ongoing_cycles (
+    program_id          TEXT NOT NULL REFERENCES ongoing_programs(program_id)
+                        ON DELETE CASCADE,
+    session_date        TEXT NOT NULL,
+    supported_snapshot_id TEXT NOT NULL
+                        REFERENCES ongoing_supported_snapshots(snapshot_id),
+    state               TEXT NOT NULL DEFAULT 'eod_identity',
+    eod_identity_cursor INTEGER NOT NULL DEFAULT 0,
+    cohort_snapshot_id  TEXT REFERENCES ongoing_cohort_snapshots(snapshot_id),
+    hourly_identity_cursor INTEGER NOT NULL DEFAULT 0,
+    five_min_identity_cursor INTEGER NOT NULL DEFAULT 0,
+    eod_job_id          TEXT NOT NULL UNIQUE,
+    hourly_job_id       TEXT NOT NULL UNIQUE,
+    five_min_job_id     TEXT NOT NULL UNIQUE,
+    last_stop_reason    TEXT,
+    created_at          TEXT NOT NULL,
+    updated_at          TEXT NOT NULL,
+    PRIMARY KEY (program_id, session_date),
+    CHECK (state IN (
+        'eod_identity', 'eod', 'cohort',
+        'hourly_identity', 'hourly',
+        'five_min_identity', 'five_min',
+        'complete', 'complete_with_exclusions'
+    )),
+    CHECK (eod_identity_cursor >= 0),
+    CHECK (hourly_identity_cursor >= 0),
+    CHECK (five_min_identity_cursor >= 0)
+);
+CREATE INDEX IF NOT EXISTS ongoing_cycles_state
+    ON ongoing_cycles (program_id, state, session_date);
+
+CREATE TABLE IF NOT EXISTS ongoing_cohort_snapshots (
+    snapshot_id         TEXT PRIMARY KEY,
+    program_id          TEXT NOT NULL REFERENCES ongoing_programs(program_id)
+                        ON DELETE CASCADE,
+    as_of_session       TEXT NOT NULL,
+    lookback_start      TEXT NOT NULL,
+    lookback_end        TEXT NOT NULL,
+    cohort_size         INTEGER NOT NULL,
+    min_observations    INTEGER NOT NULL,
+    member_count        INTEGER NOT NULL,
+    cohort_hash         TEXT NOT NULL,
+    created_at          TEXT NOT NULL,
+    UNIQUE (program_id, as_of_session),
+    CHECK (length(trim(snapshot_id)) BETWEEN 1 AND 160),
+    CHECK (lookback_start <= lookback_end),
+    CHECK (cohort_size > 0),
+    CHECK (min_observations > 0),
+    CHECK (member_count > 0),
+    CHECK (length(cohort_hash) = 64)
+);
+CREATE INDEX IF NOT EXISTS ongoing_cohort_snapshots_program_date
+    ON ongoing_cohort_snapshots (program_id, as_of_session);
+
+CREATE TABLE IF NOT EXISTS ongoing_cohort_members (
+    snapshot_id         TEXT NOT NULL REFERENCES ongoing_cohort_snapshots(snapshot_id)
+                        ON DELETE CASCADE,
+    rank                INTEGER NOT NULL,
+    instrument_id       TEXT NOT NULL REFERENCES instruments(instrument_id),
+    ticker              TEXT NOT NULL,
+    avg_dollar_volume   REAL NOT NULL,
+    observation_count   INTEGER NOT NULL,
+    PRIMARY KEY (snapshot_id, rank),
+    UNIQUE (snapshot_id, instrument_id),
+    CHECK (rank > 0),
+    CHECK (length(trim(ticker)) > 0),
+    CHECK (avg_dollar_volume >= 0),
+    CHECK (observation_count > 0)
+);
+"""
+
 
 def _apply_v4_compatibility(con: sqlite3.Connection) -> None:
     """Fold pre-commit v4 working-tree variants into the numbered v5 migration."""
@@ -612,6 +740,11 @@ def _migrate(con: sqlite3.Connection) -> None:
             con.executescript(_SCHEMA_V7)
             con.execute("PRAGMA user_version = 7")
         version = 7
+    if version < 8:
+        with con:
+            con.executescript(_SCHEMA_V8)
+            con.execute("PRAGMA user_version = 8")
+        version = 8
     if version > SCHEMA_VERSION:
         raise RuntimeError(
             f"meta.db schema version {version} is newer than this code "
@@ -2677,7 +2810,431 @@ class MetaStore:
             """SELECT * FROM api_request_attempts ORDER BY attempt_id"""
         ).fetchall()
 
-    # ---- durable breadth-first history progress ------------------------
+    # ---- durable ongoing collection -----------------------------------
+
+    def create_ongoing_program(
+        self,
+        *,
+        program_id: str,
+        definition_hash: str,
+        initial_session: date,
+        cohort_size: int,
+        lookback_sessions: int,
+        min_observations: int,
+    ) -> None:
+        """Create one immutable ongoing-collection definition."""
+        normalized_id = program_id.strip()
+        if not normalized_id or len(normalized_id) > 128:
+            raise ValueError("ongoing program_id must contain 1..128 characters")
+        if len(definition_hash) != 64:
+            raise ValueError("ongoing program definition hash must be SHA-256")
+        if cohort_size <= 0 or lookback_sessions <= 0 or min_observations <= 0:
+            raise ValueError("ongoing cohort parameters must be positive")
+        if min_observations > lookback_sessions:
+            raise ValueError("minimum observations cannot exceed the lookback")
+        definition = (
+            definition_hash,
+            initial_session.isoformat(),
+            cohort_size,
+            lookback_sessions,
+            min_observations,
+        )
+        existing = self.ongoing_program(normalized_id)
+        if existing is not None:
+            actual = tuple(
+                existing[key]
+                for key in (
+                    "definition_hash",
+                    "initial_session",
+                    "cohort_size",
+                    "lookback_sessions",
+                    "min_observations",
+                )
+            )
+            if actual != definition:
+                raise ValueError(
+                    f"ongoing program {normalized_id!r} already has a different "
+                    "definition"
+                )
+            return
+        now = _now()
+        with self._con:
+            self._con.execute(
+                """INSERT INTO ongoing_programs
+                       (program_id, definition_hash, initial_session, cohort_size,
+                        lookback_sessions, min_observations, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (normalized_id, *definition, now, now),
+            )
+
+    def ongoing_program(self, program_id: str) -> sqlite3.Row | None:
+        return self._con.execute(
+            "SELECT * FROM ongoing_programs WHERE program_id = ?",
+            (program_id.strip(),),
+        ).fetchone()
+
+    def create_ongoing_supported_snapshot(
+        self,
+        *,
+        as_of_session: date,
+        records: Collection[Mapping[str, Any]],
+    ) -> sqlite3.Row:
+        """Persist one content-addressed active supported-list snapshot."""
+        normalized = sorted(
+            (
+                {
+                    "ticker": str(row.get("ticker") or "").strip().upper(),
+                    "exchange": str(row.get("exchange") or "").strip(),
+                    "assetType": str(row.get("assetType") or "").strip(),
+                    "priceCurrency": str(row.get("priceCurrency") or "").strip(),
+                    "startDate": str(row.get("startDate") or "").strip(),
+                    "endDate": str(row.get("endDate") or "").strip(),
+                }
+                for row in records
+            ),
+            key=lambda row: (
+                row["ticker"],
+                row["startDate"],
+                row["endDate"],
+                row["exchange"],
+                row["assetType"],
+                row["priceCurrency"],
+            ),
+        )
+        if not normalized:
+            raise ValueError("ongoing supported snapshot must not be empty")
+        if any(
+            not row["ticker"]
+            or not row["startDate"]
+            or not row["endDate"]
+            or row["startDate"] > row["endDate"]
+            for row in normalized
+        ):
+            raise ValueError("ongoing supported snapshot contains invalid records")
+        snapshot_id = hashlib.sha256(canonical_json(normalized).encode()).hexdigest()
+        existing = self.ongoing_supported_snapshot(snapshot_id)
+        if existing is not None:
+            return existing
+        tickers = {row["ticker"] for row in normalized}
+        now = _now()
+        with self._con:
+            self._con.execute(
+                """INSERT INTO ongoing_supported_snapshots
+                       (snapshot_id, as_of_session, ticker_count, record_count,
+                        created_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (
+                    snapshot_id,
+                    as_of_session.isoformat(),
+                    len(tickers),
+                    len(normalized),
+                    now,
+                ),
+            )
+            self._con.executemany(
+                """INSERT INTO ongoing_supported_records
+                       (snapshot_id, record_ordinal, ticker, exchange, asset_type,
+                        price_currency, start_date, end_date)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                [
+                    (
+                        snapshot_id,
+                        ordinal,
+                        row["ticker"],
+                        row["exchange"],
+                        row["assetType"],
+                        row["priceCurrency"],
+                        row["startDate"],
+                        row["endDate"],
+                    )
+                    for ordinal, row in enumerate(normalized)
+                ],
+            )
+        snapshot = self.ongoing_supported_snapshot(snapshot_id)
+        assert snapshot is not None
+        return snapshot
+
+    def ongoing_supported_snapshot(self, snapshot_id: str) -> sqlite3.Row | None:
+        return self._con.execute(
+            "SELECT * FROM ongoing_supported_snapshots WHERE snapshot_id = ?",
+            (snapshot_id,),
+        ).fetchone()
+
+    def ongoing_supported_tickers(self, snapshot_id: str) -> list[str]:
+        rows = self._con.execute(
+            """SELECT DISTINCT ticker FROM ongoing_supported_records
+               WHERE snapshot_id = ? ORDER BY ticker""",
+            (snapshot_id,),
+        ).fetchall()
+        return [str(row["ticker"]) for row in rows]
+
+    def ongoing_supported_records(
+        self, snapshot_id: str, tickers: Collection[str] | None = None
+    ) -> list[dict[str, str]]:
+        parameters: list[Any] = [snapshot_id]
+        predicate = ""
+        if tickers is not None:
+            normalized = sorted(
+                {ticker.strip().upper() for ticker in tickers if ticker.strip()}
+            )
+            if not normalized:
+                return []
+            predicate = f" AND ticker IN ({','.join('?' for _ in normalized)})"
+            parameters.extend(normalized)
+        rows = self._con.execute(
+            """SELECT ticker, exchange, asset_type, price_currency,
+                      start_date, end_date
+                 FROM ongoing_supported_records WHERE snapshot_id = ?"""
+            + predicate
+            + " ORDER BY record_ordinal",
+            parameters,
+        ).fetchall()
+        return [
+            {
+                "ticker": str(row["ticker"]),
+                "exchange": str(row["exchange"]),
+                "assetType": str(row["asset_type"]),
+                "priceCurrency": str(row["price_currency"]),
+                "startDate": str(row["start_date"]),
+                "endDate": str(row["end_date"]),
+            }
+            for row in rows
+        ]
+
+    def create_ongoing_cycle(
+        self,
+        *,
+        program_id: str,
+        session_date: date,
+        supported_snapshot_id: str,
+        eod_job_id: str,
+        hourly_job_id: str,
+        five_min_job_id: str,
+    ) -> sqlite3.Row:
+        existing = self.ongoing_cycle(program_id, session_date)
+        if existing is not None:
+            expected = (
+                supported_snapshot_id,
+                eod_job_id,
+                hourly_job_id,
+                five_min_job_id,
+            )
+            actual = tuple(
+                existing[key]
+                for key in (
+                    "supported_snapshot_id",
+                    "eod_job_id",
+                    "hourly_job_id",
+                    "five_min_job_id",
+                )
+            )
+            if actual != expected:
+                raise ValueError("ongoing cycle already has a different definition")
+            return existing
+        if self.ongoing_program(program_id) is None:
+            raise ValueError(f"unknown ongoing program {program_id!r}")
+        if self.ongoing_supported_snapshot(supported_snapshot_id) is None:
+            raise ValueError("unknown ongoing supported snapshot")
+        now = _now()
+        with self._con:
+            self._con.execute(
+                """INSERT INTO ongoing_cycles
+                       (program_id, session_date, supported_snapshot_id,
+                        eod_job_id, hourly_job_id, five_min_job_id,
+                        created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    program_id,
+                    session_date.isoformat(),
+                    supported_snapshot_id,
+                    eod_job_id,
+                    hourly_job_id,
+                    five_min_job_id,
+                    now,
+                    now,
+                ),
+            )
+        cycle = self.ongoing_cycle(program_id, session_date)
+        assert cycle is not None
+        return cycle
+
+    def ongoing_cycle(self, program_id: str, session_date: date) -> sqlite3.Row | None:
+        return self._con.execute(
+            """SELECT * FROM ongoing_cycles
+               WHERE program_id = ? AND session_date = ?""",
+            (program_id.strip(), session_date.isoformat()),
+        ).fetchone()
+
+    def ongoing_cycles(self, program_id: str) -> list[sqlite3.Row]:
+        return self._con.execute(
+            """SELECT * FROM ongoing_cycles WHERE program_id = ?
+               ORDER BY session_date""",
+            (program_id.strip(),),
+        ).fetchall()
+
+    def latest_ongoing_cycle(self, program_id: str) -> sqlite3.Row | None:
+        return self._con.execute(
+            """SELECT * FROM ongoing_cycles WHERE program_id = ?
+               ORDER BY session_date DESC LIMIT 1""",
+            (program_id.strip(),),
+        ).fetchone()
+
+    def update_ongoing_cycle(
+        self, program_id: str, session_date: date, **changes: Any
+    ) -> None:
+        """Update bounded mutable cycle state using a fixed column allow-list."""
+        allowed = {
+            "state",
+            "eod_identity_cursor",
+            "cohort_snapshot_id",
+            "hourly_identity_cursor",
+            "five_min_identity_cursor",
+            "last_stop_reason",
+        }
+        unknown = set(changes) - allowed
+        if unknown:
+            raise ValueError(f"invalid ongoing cycle fields: {sorted(unknown)}")
+        if not changes:
+            return
+        if "state" in changes and changes["state"] not in {
+            "eod_identity",
+            "eod",
+            "cohort",
+            "hourly_identity",
+            "hourly",
+            "five_min_identity",
+            "five_min",
+            "complete",
+            "complete_with_exclusions",
+        }:
+            raise ValueError(f"invalid ongoing cycle state {changes['state']!r}")
+        for name in (
+            "eod_identity_cursor",
+            "hourly_identity_cursor",
+            "five_min_identity_cursor",
+        ):
+            if name in changes and int(changes[name]) < 0:
+                raise ValueError("ongoing identity cursor must not be negative")
+        assignments = [f"{name} = ?" for name in changes]
+        values = list(changes.values())
+        assignments.append("updated_at = ?")
+        values.append(_now())
+        values.extend((program_id.strip(), session_date.isoformat()))
+        with self._con:
+            changed = self._con.execute(
+                f"UPDATE ongoing_cycles SET {', '.join(assignments)} "
+                "WHERE program_id = ? AND session_date = ?",
+                values,
+            ).rowcount
+        if changed != 1:
+            raise ValueError(f"unknown ongoing cycle {program_id!r}/{session_date}")
+
+    def create_ongoing_cohort_snapshot(
+        self,
+        *,
+        program_id: str,
+        as_of_session: date,
+        lookback_start: date,
+        lookback_end: date,
+        cohort_size: int,
+        min_observations: int,
+        members: Sequence[Mapping[str, Any]],
+    ) -> sqlite3.Row:
+        if not members:
+            raise ValueError("ongoing intraday cohort must not be empty")
+        normalized = [
+            {
+                "rank": int(row["rank"]),
+                "instrument_id": str(row["instrument_id"]),
+                "ticker": str(row["ticker"]).strip().upper(),
+                "avg_dollar_volume": float(row["avg_dollar_volume"]),
+                "observation_count": int(row["observation_count"]),
+            }
+            for row in members
+        ]
+        if [row["rank"] for row in normalized] != list(range(1, len(normalized) + 1)):
+            raise ValueError("ongoing cohort ranks must be contiguous from one")
+        if len({row["instrument_id"] for row in normalized}) != len(normalized):
+            raise ValueError("ongoing cohort instrument ids must be unique")
+        cohort_hash = hashlib.sha256(canonical_json(normalized).encode()).hexdigest()
+        snapshot_id = f"{program_id.strip()}-{as_of_session:%Y%m%d}"
+        existing = self.ongoing_cohort_snapshot(snapshot_id)
+        if existing is not None:
+            if str(existing["cohort_hash"]) != cohort_hash:
+                raise ValueError("ongoing cohort snapshot is immutable")
+            return existing
+        now = _now()
+        with self._con:
+            self._con.execute(
+                """INSERT INTO ongoing_cohort_snapshots
+                       (snapshot_id, program_id, as_of_session, lookback_start,
+                        lookback_end, cohort_size, min_observations, member_count,
+                        cohort_hash, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    snapshot_id,
+                    program_id,
+                    as_of_session.isoformat(),
+                    lookback_start.isoformat(),
+                    lookback_end.isoformat(),
+                    cohort_size,
+                    min_observations,
+                    len(normalized),
+                    cohort_hash,
+                    now,
+                ),
+            )
+            self._con.executemany(
+                """INSERT INTO ongoing_cohort_members
+                       (snapshot_id, rank, instrument_id, ticker,
+                        avg_dollar_volume, observation_count)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                [
+                    (
+                        snapshot_id,
+                        row["rank"],
+                        row["instrument_id"],
+                        row["ticker"],
+                        row["avg_dollar_volume"],
+                        row["observation_count"],
+                    )
+                    for row in normalized
+                ],
+            )
+        snapshot = self.ongoing_cohort_snapshot(snapshot_id)
+        assert snapshot is not None
+        return snapshot
+
+    def ongoing_cohort_snapshot(self, snapshot_id: str) -> sqlite3.Row | None:
+        return self._con.execute(
+            "SELECT * FROM ongoing_cohort_snapshots WHERE snapshot_id = ?",
+            (snapshot_id,),
+        ).fetchone()
+
+    def latest_ongoing_cohort_snapshot(
+        self, program_id: str, *, through: date | None = None
+    ) -> sqlite3.Row | None:
+        predicate = ""
+        parameters: list[Any] = [program_id.strip()]
+        if through is not None:
+            predicate = " AND as_of_session <= ?"
+            parameters.append(through.isoformat())
+        return self._con.execute(
+            """SELECT * FROM ongoing_cohort_snapshots
+               WHERE program_id = ?"""
+            + predicate
+            + " ORDER BY as_of_session DESC LIMIT 1",
+            parameters,
+        ).fetchone()
+
+    def ongoing_cohort_members(self, snapshot_id: str) -> list[sqlite3.Row]:
+        return self._con.execute(
+            """SELECT * FROM ongoing_cohort_members WHERE snapshot_id = ?
+               ORDER BY rank""",
+            (snapshot_id,),
+        ).fetchall()
+
+    # ---- durable breadth-first/current progress ------------------------
 
     def create_history_job(
         self,
@@ -2692,6 +3249,8 @@ class MetaStore:
         force: bool,
         targets: list[dict[str, Any]],
         blocked_ranges: list[dict[str, Any]],
+        work_kind: str = "historical",
+        refresh_overlap_days: int = 0,
     ) -> None:
         """Create an immutable cohort snapshot; an identical job is a no-op."""
         if not job_id.strip() or len(job_id) > 128:
@@ -2701,9 +3260,15 @@ class MetaStore:
             raise ValueError("history job start must not be after end")
         if phase not in {None, 1, 2, 3}:
             raise ValueError("history phase must be 1, 2, 3, or None")
+        if work_kind not in {"current", "historical"}:
+            raise ValueError(f"invalid job work kind {work_kind!r}")
+        if refresh_overlap_days < 0:
+            raise ValueError("refresh overlap must not be negative")
+        if work_kind == "historical" and refresh_overlap_days:
+            raise ValueError("historical jobs cannot declare a refresh overlap")
         existing = self._con.execute(
             """SELECT phase, dataset_key, range_start, range_end, request_hash,
-                      cohort_hash, force
+                      cohort_hash, force, work_kind, refresh_overlap_days
                FROM history_jobs WHERE job_id = ?""",
             (job_id,),
         ).fetchone()
@@ -2715,6 +3280,8 @@ class MetaStore:
             request_hash,
             cohort_hash,
             int(force),
+            work_kind,
+            refresh_overlap_days,
         )
         if existing is not None:
             if tuple(existing) != definition:
@@ -2728,8 +3295,9 @@ class MetaStore:
             self._con.execute(
                 """INSERT INTO history_jobs
                        (job_id, phase, dataset_key, range_start, range_end,
-                        request_hash, cohort_hash, force, status, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        request_hash, cohort_hash, force, work_kind,
+                        refresh_overlap_days, status, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (job_id, *definition, status, now, now),
             )
             self._con.executemany(

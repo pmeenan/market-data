@@ -25,7 +25,201 @@ Decision / Context / Consequences / Reopen if
 
 ---
 
-## D-029: Definitive vendor absence is a terminal fail-closed exclusion  (2026-09-01, status: accepted, amends D-020 and D-024)
+## D-033: Current cycles bridge existing edges but never move a new-member floor backward  (2026-09-02, status: accepted, amends D-029, D-030, and D-031)
+
+**Decision:** A current target with coverage that predates its intraday cohort
+entry bridges from that stored trailing edge, including the correction overlap,
+through the cycle session. A cohort entrant with no prior exact-frequency
+coverage instead receives a persistent effective lower bound at the cohort
+snapshot's as-of session; after its first successful cycle, later correction
+overlaps cannot widen coverage before that bound. EOD retains its historical
+edge bridge. An intentionally recovered older session already contained in
+coverage retires without transport while retaining the instrument in the
+cycle's EOD ranking input.
+
+A completed current request that does not establish coverage through its cycle
+session is a terminal fail-closed exclusion for that immutable cycle, without
+claiming the missing bar. Cancellation is likewise terminal for that cycle.
+The next cycle creates a new job and retries the then-current edge; neither
+condition may pin every later session behind the historical five-day
+empty-response rule. Intraday coverage may include the UTC current date only
+when the scheduler's exchange calendar proves that XNYS session has completed;
+receiving a partial in-session row is not enough.
+
+**Context:** The first current-mode implementation had three conflicting edge
+behaviors. A missing current bar remained active until the historical
+publication lag elapsed, blocking later datasets and sessions. A no-history
+intraday entrant began correctly at cohort entry but each next cycle subtracted
+another overlap window and widened coverage backward. Conversely, simply
+clamping every covered member to cohort entry would violate the owner's
+explicit requirement to bridge a real gap between historical backfill and
+ongoing collection. Current work needs a per-cycle terminal policy and must
+distinguish those two coverage origins.
+
+**Consequences:** Current exclusions remain visible in bounded status and make
+the terminal cycle partial, but never become a false coverage claim or a
+permanent program gate. Tests cover unavailable sessions, cancellation,
+same-day pre/post-close behavior, older covered recovery, historical-edge
+bridging, and the persistent no-history cohort floor.
+
+**Reopen if:** Current-cycle exclusions become too noisy to operate, Tiingo
+publishes explicit per-symbol availability/finalization state, or cohort entry
+is redefined to require historical intraday backfill for every new member.
+
+---
+
+## D-032: Current EOD identity reuses an authenticated immutable listing anchor  (2026-09-02, status: accepted, amends D-014 and D-030)
+
+**Decision:** An active Tiingo supported-list record may extend an existing
+metadata-validated EOD alias and bare-ticker identifier without another
+per-ticker metadata request only when `endDate` is the sole changing listing
+field. The ticker, exchange, asset type, currency, start date, deterministic
+instrument id, archive-episode basis, and authenticated metadata anchor must
+all match the prior evidence, and the added tail must have no competing alias
+owner. The replacement evidence retains the authenticated metadata payload,
+the previous validated end, the new supported-list record, and this
+continuation policy. New listings, changed immutable fields, archive-bound
+singletons needing upgrade, reused-symbol conflicts, and any ambiguous tail
+still require authenticated metadata or fail closed.
+
+This is EOD-only continuation evidence. It does not authorize either IEX
+frequency, weaken per-response request/row envelope validation, or merge two
+listing anchors. Each subsequent current response must still fit the extended
+stable-instrument alias and exact EOD identifier envelope before publication.
+
+**Context:** Tiingo advances the active supported-list and EOD-metadata
+`endDate` every session. Exact-envelope bootstrap therefore repeated one
+authenticated metadata request for nearly every current listing even though
+the immutable listing anchor was unchanged. The 2026-09-01 interim
+latest-universe run made 1,611 such attempts; applying that behavior to the
+roughly 23,000-listing D-030 roster would exceed the published 10,000-request
+hourly allowance before requesting any bars. A one-record continuation of an
+already authenticated unique anchor carries materially different identity risk
+from creating or joining an instrument and can be checked locally against all
+known alias owners.
+
+**Consequences:** Nightly identity preparation normally needs metadata only
+for genuinely new/changed/unresolved listing anchors. Status distinguishes
+newly registered episodes, zero-request continuations, and already exact
+evidence. Tests must prove a changed immutable field cannot take this path.
+
+**Reopen if:** Tiingo stops advancing current `endDate`, changes another field
+without creating a new listing anchor, exposes a batch authenticated security
+master, or a continuation response is observed to resolve to the wrong stable
+instrument.
+
+---
+
+## D-031: Canonical updates are overnight; morning trigger data is a separate future feed  (2026-09-01, status: accepted, amended by D-033; amends D-002, D-007, and D-030)
+
+**Decision:** D-030's all-active EOD and rolling-cohort hourly/five-minute
+updates are post-market batch work. Each collection cycle starts only after the
+completed XNYS regular session and the applicable vendor publication lag, runs
+through the overnight window, and checkpoints before the next morning decision
+window. It does not poll the full EOD or top-5,000 scopes while the market is
+open. EOD still completes before either independently resumable intraday sweep.
+
+A future decision-triggering path may poll or stream only a small,
+owner-maintained set of tagged instruments during the morning. That is a
+separate proposed capability, not another mode of the canonical overnight
+collector and not M4 scope. Its source may be Tiingo current five-minute data
+or a broker's **read-only market-data API**. Broker order endpoints, order
+credentials, execution, and account mutation remain prohibited.
+
+Tiingo remains the sole source for the canonical historical/ongoing Parquet
+warehouse. Data from a future broker feed must stay source-labelled in a
+separate hot/decision surface unless another explicit decision establishes its
+identity, normalization, persistence, licensing, and reconciliation contract.
+It must never be silently merged into Tiingo-owned canonical bars.
+
+**Context:** The owner clarified that broad ongoing EOD, hourly, and
+five-minute filling should happen overnight rather than live during the day.
+Only a later, much smaller tagged watchlist may need morning updates to support
+triggering decisions, and that information may be easier to obtain from a
+broker API. D-007's blanket ban on every broker connection was broader than the
+actual safety boundary: no trading or account mutation.
+
+**Consequences:** M4 timers and duty-cycle acceptance tests are defined against
+one post-market-to-morning window and must prove that partial work checkpoints
+cleanly rather than spilling bulk polling into the next session. The future
+tagged feed gets its own milestone, credentials/security review, source
+contract, freshness/status semantics, and explicit promotion decision. A
+read-only data connection does not reopen automated execution.
+
+**Reopen if:** Tiingo publication timing cannot support a reliable overnight
+window, the full cohort needs genuine intraday freshness, a broker feed is
+proposed for canonical persistence, or the owner explicitly reconsiders order
+execution as a separate major charter change.
+
+---
+
+## D-030: Ongoing collection is all-active EOD plus a rolling top-liquidity intraday cohort  (2026-09-01, status: accepted, amended by D-031, D-032, and D-033; amends D-011 and D-013)
+
+**Decision:** Every weekday current cycle targets EOD for every active
+Tiingo-supported US stock/ETF listing that can be resolved to a stable
+instrument. The cycle refreshes the supported-list metadata before planning so
+new listings enter without waiting for a seed-universe update. Historical bars
+for inactive or delisted listings remain canonical, but those listings do not
+receive pointless current requests.
+
+Direct hourly and five-minute collection instead targets one persisted rolling
+liquidity cohort, with **5,000 instruments as the default size**. After the
+first successful all-active EOD cycle following each month end, rank active
+listings by mean composite EOD dollar volume (`close * volume`) over the latest
+20 completed XNYS sessions. A candidate needs at least 15 valid,
+non-quarantined observations in that window. Sort descending by the mean and
+then by stable instrument id for deterministic ties. Persist the accepted
+snapshot's as-of session, window, method, rank, metric, and instrument ids; the
+membership stays fixed until the next accepted monthly snapshot. If fewer than
+5,000 listings qualify, use every qualifier.
+
+Both direct intraday frequencies remain independently collected and
+identity-validated. A listing entering the cohort begins forward-only hourly
+and five-minute coverage; leaving the cohort stops future intraday requests but
+does not delete stored bars. There is no ongoing all-ticker intraday target.
+The cohort is an operational ingestion scope, not point-in-time strategy
+membership; research continues to select directly from stored data under
+D-010 and D-026. IEX volume is not used for this rank, as required by D-012.
+
+The current collector is a durable, resumable program rather than one
+monolithic `update` command. EOD completes first. Hourly and five-minute each
+have their own bounded sweep and status, run in separate budget windows, and
+yield D-022's mutation lock between batches. All authenticated attempts use the
+shared request/byte ledger. A partial sweep resumes without changing its cohort
+snapshot, and a cycle is not reported current until every target is covered or
+has an explicit fail-closed exclusion.
+
+**Context:** D-011/D-013 said ongoing EOD, hourly, and five-minute collection
+would cover all tickers, but the deployed current-EOD timer still resolves only
+the latest seed universe and no durable ongoing intraday program exists. That
+left both the intended production scope and M4 completion criteria ambiguous.
+The owner clarified the desired steady state as all-ticker EOD plus roughly the
+top 5,000 recent-dollar-volume tickers for both intraday frequencies.
+
+At the chosen size the two intraday datasets require about 10,000 logical
+requests per complete daily cycle before retries, exactly one published hourly
+request allowance. They therefore cannot be launched as one burst. Applying
+both frequencies to the roughly 23,000-listing archive scale would require
+about 46,000 intraday requests per cycle before EOD or retries. Although that
+removes the ranking step, it creates a much longer duty cycle, more identity
+work, and mostly illiquid intraday data. The monthly EOD-derived cohort is the
+smaller and more useful operational target while preserving all-instrument EOD
+breadth.
+
+**Consequences:** M4 must build a current-scope refresher, stable-instrument
+dollar-volume ranking and snapshot store, independently resumable EOD/hourly/
+five-minute sweeps, and production timers/status. The existing latest-universe
+current-EOD service is an interim deployment, not completion of ongoing
+collection. Historical phase completion remains unchanged.
+
+**Reopen if:** Measured all-active intraday duty cycle and bandwidth are low
+enough to simplify operations without crowding out EOD, the owner changes the
+cohort size/cadence or liquidity definition, or Tiingo's feed, pricing, or
+limits materially change.
+
+---
+
+## D-029: Definitive vendor absence is a terminal fail-closed exclusion  (2026-09-01, status: accepted, amended by D-033; amends D-020 and D-024)
 
 **Decision:** An authenticated Tiingo HTTP 404 has its own non-retryable error
 type. An exact-frequency IEX identity probe persists that outcome as rejected
@@ -762,7 +956,7 @@ the long-form columnar path fails representative full-scale benchmarks, or a
 permissively licensed library demonstrably removes more project complexity
 than it adds for a concrete study.
 
-## D-014: Stable instruments own bars; symbols are date-ranged aliases  (2026-08-26, status: accepted, amended by D-017, D-021, and D-023; amends D-003, D-004, D-009, and D-011)
+## D-014: Stable instruments own bars; symbols are date-ranged aliases  (2026-08-26, status: accepted, amended by D-017, D-021, D-023, and D-032; amends D-003, D-004, D-009, and D-011)
 
 **Decision:** The warehouse's durable identity is an opaque internal
 `instrument_id`, not a ticker string and not a vendor identifier. SQLite will
@@ -858,7 +1052,7 @@ identity semantics. Such a source can replace the resolver input, but does not
 remove the need for stable warehouse identity unless its IDs and guarantees
 are contractually durable.
 
-## D-013: Five-minute history fills newest-first with a 30 GB monthly hard cap  (2026-08-26, status: accepted, amended by D-020, D-025, and D-028; amends D-011)
+## D-013: Five-minute history fills newest-first with a 30 GB monthly hard cap  (2026-08-26, status: accepted, amended by D-020, D-025, D-028, and D-030; amends D-011)
 
 **Decision:** The phase-3 seed-ticker 5-minute backfill proceeds in global
 date bands from the most recent completed session backward toward 2016-12-12.
@@ -947,7 +1141,7 @@ record's 2011–2016 years.
 reframed to exclude the opening half-hour, or a validated consolidated Tiingo
 intraday feed replaces IEX for this dataset.
 
-## D-011: Backfill scope, priority, and API budget  (2026-08-26, status: accepted, amended by D-013, D-014, and D-020)
+## D-011: Backfill scope, priority, and API budget  (2026-08-26, status: accepted, amended by D-013, D-014, D-020, and D-030)
 
 **Decision:** The dataset is built in phases, bounded by the owner's Tiingo
 Power-tier budget:
@@ -1134,7 +1328,7 @@ Options/futures would each require a different vendor and storage design.
 **Reopen if:** A study genuinely requires another asset class; crypto would be
 the cheapest addition (Tiingo has endpoints), derivatives the most expensive.
 
-## D-007: No live or automated trade execution  (2026-08-26, status: accepted)
+## D-007: No live or automated trade execution  (2026-08-26, status: accepted, amended by D-031)
 
 **Decision:** This is a research/backtesting tool. Orders never leave it — no
 broker connectivity, no execution, including in any future realtime layer.
@@ -1227,7 +1421,7 @@ of design until a realtime layer forces them.
 **Reopen if:** A realtime/serving workload with concurrent writers arrives, or
 single-box scans stop being interactive at the dataset's actual size.
 
-## D-002: Python implementation; Tiingo as sole data source  (2026-08-26, status: accepted)
+## D-002: Python implementation; Tiingo as sole data source  (2026-08-26, status: accepted, amended by D-031)
 
 **Decision:** The tool is written in Python (polars, DuckDB, click, requests).
 Market data comes exclusively from Tiingo's API — daily endpoint for EOD

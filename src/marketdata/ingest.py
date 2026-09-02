@@ -938,6 +938,7 @@ def backfill_intraday(
     freq: str = DEFAULT_INTRADAY_FREQ,
     ranges: Mapping[str, tuple[date, date]] | None = None,
     force: bool = False,
+    completed_through: date | None = None,
 ) -> IngestResult:
     """Fetch intraday bars in chunks to cover [start, end], leading segments
     included. Note: Tiingo's IEX feed reaches back a bounded number of years,
@@ -946,6 +947,9 @@ def backfill_intraday(
     require_canonical_generation(bars, meta.storage_generation())
     _require_registered_targets(meta, targets)
     today = date.today()
+    if completed_through is not None and completed_through > today:
+        raise ValueError("completed intraday session cannot be in the future")
+    coverage_ceiling = max(today - timedelta(days=1), completed_through or date.min)
     end = end or today
     requested_ranges = _validated_target_ranges(targets, start, end, ranges)
     dataset = f"intraday_{freq}"
@@ -1006,7 +1010,7 @@ def backfill_intraday(
                         INTRADAY_PUBLICATION_LAG_DAYS,
                     )
                     if covered_to is not None:
-                        covered_to = min(covered_to, today - timedelta(days=1))
+                        covered_to = min(covered_to, coverage_ceiling)
                     if covered_to is not None and covered_to >= chunk.start:
                         coverage_ready[instrument_id] = (chunk.start, covered_to)
                     completed_calls.add(instrument_id)
@@ -1175,6 +1179,7 @@ def _execute_validated_segments(
     *,
     force: bool = False,
     update: bool = False,
+    completed_through: date | None = None,
 ) -> IngestResult:
     """Execute ready segments without ever bridging a blocked coverage gap."""
     result = IngestResult()
@@ -1280,6 +1285,7 @@ def _execute_validated_segments(
                             freq=freq,
                             ranges=ranges,
                             force=True if update else force,
+                            completed_through=completed_through,
                         )
                 except (BudgetExhausted, ResponseReservationExceeded) as exc:
                     sub_result = getattr(exc, "partial_ingest", None) or IngestResult()

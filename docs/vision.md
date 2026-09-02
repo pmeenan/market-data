@@ -34,9 +34,13 @@ opening half-hour and session-relative windows properly (D-012).
   silently current-only (D-010, D-011).
 - For any seeded year, the universe and its full EOD history can be queried in
   interactive time (seconds, not minutes) on the Linux server.
-- A nightly cron `market-data update` keeps EOD data current to the most recent
-  trading day without manual intervention, and failures are visible rather than
-  silent.
+- Scheduled collection keeps EOD current to the most recent completed trading
+  day for every active supported US stock/ETF and keeps direct hourly and
+  five-minute data current for a monthly refreshed top-5,000 cohort ranked from
+  recent composite EOD dollar volume (D-030). All three broad updates run
+  post-market in the overnight window rather than polling live during the day
+  (D-031), without manual intervention. Partial progress and failures are
+  visible rather than silent.
 - Backfills interrupted at any point converge to an identical dataset when
   rerun (coverage intervals + merge-upsert writes).
 - Intraday coverage is honest about its limits: Tiingo's IEX feed begins
@@ -46,8 +50,10 @@ opening half-hour and session-relative windows properly (D-012).
 
 ## Non-goals
 
-- **Live or automated trading.** No order execution, no broker connectivity —
-  removes a whole class of risk and regulatory surface (D-007).
+- **Live or automated trading.** No order execution, broker trading
+  connectivity, or account mutation. D-031 permits a separately approved
+  read-only broker market-data feed for a future tagged-ticker decision tool;
+  it does not permit trading integration (D-007).
 - **Asset classes beyond US stocks and ETFs.** No options, futures, or crypto;
   keeps one data source and one storage schema (D-008).
 - **Multi-user service.** No accounts, no SLA; a web UI, if built, is a

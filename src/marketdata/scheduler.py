@@ -18,7 +18,11 @@ from typing import Any, Protocol
 from uuid import uuid4
 
 from marketdata.budget import tiingo_billing_date, tiingo_billing_month_start
-from marketdata.calendar import plan_intraday_requests, weekend_only
+from marketdata.calendar import (
+    latest_completed_session,
+    plan_intraday_requests,
+    weekend_only,
+)
 from marketdata.errors import QUOTA_STOP_REASONS, BudgetExhausted
 from marketdata.identity import DATASET_KEYS, merge_closed_date_ranges
 from marketdata.ingest import (
@@ -64,6 +68,14 @@ class TiingoLike(Protocol):
     def intraday(
         self, ticker: str, start: date, end: date, freq: str = "1hour"
     ) -> list[dict[str, Any]]: ...
+
+
+@dataclass(frozen=True)
+class CurrentJobMember:
+    """One intended stable owner in a frozen current-collection cohort."""
+
+    ticker: str
+    instrument_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -588,6 +600,189 @@ def initialize_history_job(
     )
 
 
+@data_directory_locked("ingest:current-job-initialize")
+def initialize_current_job(
+    meta: MetaStore,
+    *,
+    job_id: str,
+    dataset_key: str,
+    members: Sequence[CurrentJobMember],
+    end: date,
+    default_start: date,
+    refresh_overlap_days: int,
+) -> None:
+    """Freeze one overnight dataset sweep at stable-instrument granularity.
+
+    Existing owners start at their durable trailing coverage edge, including
+    the correction overlap. This bridges every missed session since the
+    historical or prior current run. Owners without coverage start at the
+    caller's forward-only boundary (or their later alias start).
+    """
+    if dataset_key not in DATASET_KEYS:
+        raise ValueError(f"invalid current dataset {dataset_key!r}")
+    if default_start > end:
+        raise ValueError("current default start must not be after end")
+    if refresh_overlap_days < 0:
+        raise ValueError("current refresh overlap must not be negative")
+    normalized = sorted(
+        {
+            (member.ticker.strip().upper(), member.instrument_id)
+            for member in members
+            if member.ticker.strip()
+        },
+        key=lambda item: (item[0], item[1] or ""),
+    )
+    if not normalized:
+        raise ValueError("current job requires a non-empty cohort")
+    expected_ids = [instrument_id for _, instrument_id in normalized if instrument_id]
+    if len(expected_ids) != len(set(expected_ids)):
+        raise ValueError("current job stable instrument ids must be unique")
+
+    targets_by_instrument: dict[str, dict[str, Any]] = {}
+    blocked: list[dict[str, Any]] = []
+    for preferred_ticker, expected_instrument_id in normalized:
+        ticker = preferred_ticker
+        if expected_instrument_id is not None:
+            active_aliases = [
+                row
+                for row in meta.instrument_alias_records(expected_instrument_id)
+                if date.fromisoformat(str(row["start_date"]))
+                <= end
+                <= date.fromisoformat(str(row["end_date"]))
+            ]
+            active_tickers = sorted({str(row["ticker"]) for row in active_aliases})
+            if len(active_tickers) == 1:
+                ticker = active_tickers[0]
+        report = meta.resolve_alias_range(ticker, end, end)
+        segment = report.segments[0]
+        instrument_id = segment.instrument_id
+        if (
+            segment.status != "resolved"
+            or instrument_id is None
+            or (
+                expected_instrument_id is not None
+                and instrument_id != expected_instrument_id
+            )
+        ):
+            blocked.append(
+                {
+                    "ticker": ticker,
+                    "start": end,
+                    "end": end,
+                    "status": f"alias_{segment.status}",
+                    "detail": (
+                        "ticker is not a unique active alias for the frozen stable "
+                        "instrument"
+                    ),
+                }
+            )
+            continue
+        aliases = [
+            row
+            for row in meta.instrument_alias_records(instrument_id)
+            if str(row["ticker"]) == ticker
+            and date.fromisoformat(str(row["start_date"]))
+            <= end
+            <= date.fromisoformat(str(row["end_date"]))
+        ]
+        if not aliases:
+            raise RuntimeError("resolved current alias has no persisted envelope")
+        alias_start = min(date.fromisoformat(str(row["start_date"])) for row in aliases)
+        covered = meta.get_coverage(instrument_id, dataset_key)
+        if covered is not None and covered[0] <= end <= covered[1]:
+            # Retain the stable owner in the frozen job/ranking cohort while
+            # letting the planner retire this already-covered target without a
+            # request. This matters for intentional recovery of an older cycle.
+            request_start = end
+        elif covered is not None:
+            overlap_start = covered[1] - timedelta(days=refresh_overlap_days)
+            if dataset_key.startswith("intraday_") and covered[0] >= default_start:
+                # A member that began forward-only at cohort entry must not
+                # creep backward by one correction window on every later cycle.
+                overlap_start = max(default_start, overlap_start)
+            request_start = max(alias_start, overlap_start)
+        else:
+            request_start = max(alias_start, default_start)
+        if request_start > end:
+            blocked.append(
+                {
+                    "ticker": ticker,
+                    "start": end,
+                    "end": end,
+                    "status": "coverage_after_cycle",
+                    "detail": (
+                        "stored coverage begins after the requested cycle and does "
+                        "not contain its session"
+                    ),
+                }
+            )
+            continue
+        targets_by_instrument[instrument_id] = {
+            "instrument_id": instrument_id,
+            "ranges": [{"ticker": ticker, "start": request_start, "end": end}],
+        }
+
+    targets = [
+        targets_by_instrument[instrument_id]
+        for instrument_id in sorted(
+            targets_by_instrument,
+            key=lambda value: (instrument_bucket(value), value),
+        )
+    ]
+    blocked.sort(key=lambda row: (row["ticker"], row["start"], row["end"]))
+    starts = [item["start"] for target in targets for item in target["ranges"]] or [
+        default_start
+    ]
+    range_start = min(starts)
+    request_payload = {
+        "work_kind": "current",
+        "dataset_key": dataset_key,
+        "members": [
+            {"ticker": ticker, "instrument_id": instrument_id}
+            for ticker, instrument_id in normalized
+        ],
+        "default_start": default_start.isoformat(),
+        "end": end.isoformat(),
+        "refresh_overlap_days": refresh_overlap_days,
+    }
+    request_hash = hashlib.sha256(canonical_json(request_payload).encode()).hexdigest()
+    snapshot = {
+        "targets": [
+            {
+                "instrument_id": target["instrument_id"],
+                "ranges": [
+                    item
+                    | {
+                        "start": item["start"].isoformat(),
+                        "end": item["end"].isoformat(),
+                    }
+                    for item in target["ranges"]
+                ],
+            }
+            for target in targets
+        ],
+        "blocked": [
+            item | {"start": item["start"].isoformat(), "end": item["end"].isoformat()}
+            for item in blocked
+        ],
+    }
+    cohort_hash = hashlib.sha256(canonical_json(snapshot).encode()).hexdigest()
+    meta.create_history_job(
+        job_id=job_id,
+        phase=None,
+        dataset_key=dataset_key,
+        start=range_start,
+        end=end,
+        request_hash=request_hash,
+        cohort_hash=cohort_hash,
+        force=False,
+        targets=targets,
+        blocked_ranges=blocked,
+        work_kind="current",
+        refresh_overlap_days=refresh_overlap_days,
+    )
+
+
 def run_ingestion_cycle(
     client: TiingoLike,
     bars: BarStore,
@@ -701,10 +896,18 @@ def run_history_sweep(
             return report
     observer = PersistentAttemptObserver(
         meta,
-        work_kind="historical",
-        operation=f"history:{job_id}",
+        work_kind=str(job["work_kind"]),
+        operation=f"{job['work_kind']}:{job_id}",
         policy=policy,
         clock=clock,
+    )
+    completed_through = (
+        min(
+            date.fromisoformat(str(job["range_end"])),
+            latest_completed_session(clock()),
+        )
+        if str(job["work_kind"]) == "current"
+        else None
     )
     with observed_client(client, observer) as metered:
         while report.sweep_ended == started_sweep:
@@ -719,6 +922,7 @@ def run_history_sweep(
                     observer,
                     report,
                     max_units,
+                    completed_through,
                 )
             if not keep_running:
                 break
@@ -741,6 +945,7 @@ def _run_history_turn(
     observer: PersistentAttemptObserver,
     report: SchedulerRunResult,
     max_units: int | None,
+    completed_through: date | None,
 ) -> bool:
     """Plan, publish, and checkpoint one lock-bounded durable turn."""
     job = meta.history_job(job_id)
@@ -854,6 +1059,8 @@ def _run_history_turn(
                 meta,
                 [item[2] for item in batch],
                 force=bool(job["force"]),
+                update=str(job["work_kind"]) == "current",
+                completed_through=completed_through,
             )
         except BudgetExhausted as exc:
             attempted, advanced = _checkpoint_partial_batch(
@@ -894,7 +1101,6 @@ def _run_history_turn(
             )
             report.stop_reason = "response_reservation_exceeded"
             return False
-        _merge_ingest(report.ingest, unit_result)
         report.attempted_units += len(batch)
         for batch_target, batch_range, batch_segment, batch_direction in batch:
             successful = _checkpoint_after_ingest(
@@ -910,6 +1116,7 @@ def _run_history_turn(
             if successful:
                 report.successful_units += 1
                 report.advanced_units += 1
+        _merge_ingest(report.ingest, unit_result)
 
     return _history_turn_continues(meta, job_id, report, max_units)
 
@@ -944,7 +1151,21 @@ def _plan_target_unit(meta, job, target, range_row):
     direction = "leading"
     unit_start = range_start
     unit_end = min(range_end, frontier_end)
-    if covered is not None and not force:
+    if str(job["work_kind"]) == "current":
+        direction = "trailing"
+        overlap_days = int(job["refresh_overlap_days"])
+        if covered is not None:
+            if covered[0] <= range_start and covered[1] >= range_end:
+                return None
+            if covered[0] > range_end:
+                direction = "leading"
+                unit_end = min(range_end, covered[0] - timedelta(days=1))
+            else:
+                unit_start = max(range_start, covered[1] - timedelta(days=overlap_days))
+                unit_end = range_end
+        else:
+            unit_end = range_end
+    elif covered is not None and not force:
         first, last = covered
         if first <= range_start and last >= range_end:
             return None
@@ -1015,6 +1236,10 @@ def _checkpoint_after_ingest(
     *,
     force,
 ):
+    job = meta.history_job(job_id)
+    if job is None:
+        raise RuntimeError(f"history job {job_id!r} disappeared")
+    current_work = str(job["work_kind"]) == "current"
     instrument_id = str(target["instrument_id"])
     failed = instrument_id in result.failed or segment.key in result.failed
     blocked = segment.key in result.blocked
@@ -1067,6 +1292,27 @@ def _checkpoint_after_ingest(
             and coverage[1] >= segment.end
         )
     )
+    if current_work and not advanced:
+        detail = (
+            "completed current request did not establish coverage through the "
+            "cycle session; retry in the next cycle"
+        )
+        result.blocked[segment.key] = detail
+        result.segments.append({**segment.to_dict(outcome="blocked"), "detail": detail})
+        _checkpoint(
+            meta,
+            job_id,
+            target,
+            range_row,
+            attempt_status="current_session_unavailable",
+            detail=detail,
+            attempted=True,
+            successful=False,
+            frontier_end=frontier,
+            range_status=range_status,
+            terminal_blocked=True,
+        )
+        return False
     _checkpoint(
         meta,
         job_id,
@@ -1092,7 +1338,6 @@ def _checkpoint_partial_batch(
     """Checkpoint the prefix durably published before an interrupted batch."""
     if partial is None:
         return 0, 0
-    _merge_ingest(report, partial)
     outcomes = set(partial.fetched + partial.skipped + partial.refreshed)
     processed = 0
     advanced = 0
@@ -1120,6 +1365,7 @@ def _checkpoint_partial_batch(
         ):
             advanced += 1
         processed += 1
+    _merge_ingest(report, partial)
     return processed, advanced
 
 
