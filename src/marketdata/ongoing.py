@@ -85,6 +85,7 @@ class OngoingProgramStepResult:
         return bool(
             self.cycle_state == "complete_with_exclusions"
             or any(bool(job.get("has_exclusions")) for job in self.jobs.values())
+            or any(bool(job.get("retry_pending")) for job in self.jobs.values())
             or (self.identity is not None and self.identity.partial)
             or (self.sweep is not None and self.sweep.ingest.partial)
         )
@@ -209,6 +210,20 @@ def run_ongoing_program_step(
         return _result(meta, cycle, action="up_to_date")
 
     state = str(cycle["state"])
+    if state == "five_min":
+        retry_job = _deferred_retry_job(meta, cycle)
+        if retry_job is not None:
+            dataset_key, job_id = retry_job
+            return _run_deferred_retry_step(
+                client,
+                bars,
+                meta,
+                cycle,
+                dataset_key=dataset_key,
+                job_id=job_id,
+                max_units=max_units,
+                policy=policy,
+            )
     if state == "eod_identity":
         return _run_eod_identity_batch(
             client,
@@ -537,14 +552,18 @@ def _run_dataset_step(
         job = meta.history_job(job_id)
         assert job is not None
         if str(job["status"]) in {"complete", "blocked"}:
-            terminal_state = next_state
             if next_state == "complete":
-                terminal_state = (
-                    "complete_with_exclusions"
-                    if _cycle_has_exclusions(meta, cycle)
-                    else "complete"
-                )
-            _advance_cycle(meta, cycle, state=terminal_state, last_stop_reason=None)
+                if _all_cycle_jobs_terminal(meta, cycle):
+                    terminal_state = (
+                        "complete_with_exclusions"
+                        if _cycle_has_exclusions(meta, cycle)
+                        else "complete"
+                    )
+                    _advance_cycle(
+                        meta, cycle, state=terminal_state, last_stop_reason=None
+                    )
+            else:
+                _advance_cycle(meta, cycle, state=next_state, last_stop_reason=None)
         return _result(
             meta,
             _cycle(meta, cycle),
@@ -561,19 +580,27 @@ def _run_dataset_step(
         policy=policy,
         max_units=max_units,
     )
-    if sweep.job_status in {"complete", "blocked", "cancelled"}:
+    main_pass_complete = sweep.job_status in {"complete", "blocked", "cancelled"}
+    retry_deferred = (
+        sweep.job_status == "active"
+        and meta.history_has_only_retry_pending_work(job_id)
+    )
+    if main_pass_complete or retry_deferred:
         if next_state == "complete":
-            terminal_state = (
-                "complete_with_exclusions"
-                if _cycle_has_exclusions(meta, cycle)
-                else "complete"
-            )
-            _advance_cycle(
-                meta,
-                cycle,
-                state=terminal_state,
-                last_stop_reason=sweep.stop_reason,
-            )
+            if main_pass_complete and _all_cycle_jobs_terminal(meta, cycle):
+                terminal_state = (
+                    "complete_with_exclusions"
+                    if _cycle_has_exclusions(meta, cycle)
+                    else "complete"
+                )
+                _advance_cycle(
+                    meta,
+                    cycle,
+                    state=terminal_state,
+                    last_stop_reason=sweep.stop_reason,
+                )
+            else:
+                _advance_cycle(meta, cycle, last_stop_reason=sweep.stop_reason)
         else:
             _advance_cycle(
                 meta,
@@ -592,6 +619,80 @@ def _run_dataset_step(
         cohort_snapshot_id=cycle["cohort_snapshot_id"],
         sweep=sweep,
         stop_reason=sweep.stop_reason,
+    )
+
+
+def _deferred_retry_job(meta: MetaStore, cycle: Any) -> tuple[str, str] | None:
+    """Choose the least-swept job after the healthy five-minute pass is done."""
+    five_job = meta.history_job(str(cycle["five_min_job_id"]))
+    if five_job is None:
+        return None
+    five_status = str(five_job["status"])
+    if five_status == "active" and not meta.history_has_only_retry_pending_work(
+        str(five_job["job_id"])
+    ):
+        return None
+
+    pending: list[tuple[int, int, str, str]] = []
+    for dataset_order, (dataset_key, field_name) in enumerate(
+        (
+            ("eod", "eod_job_id"),
+            ("intraday_1hour", "hourly_job_id"),
+            ("intraday_5min", "five_min_job_id"),
+        )
+    ):
+        job = meta.history_job(str(cycle[field_name]))
+        if (
+            job is not None
+            and not bool(job["cancelled"])
+            and str(job["status"]) == "active"
+        ):
+            pending.append(
+                (int(job["sweep"]), dataset_order, dataset_key, str(job["job_id"]))
+            )
+    if not pending:
+        return None
+    _, _, dataset_key, job_id = min(pending)
+    return dataset_key, job_id
+
+
+def _run_deferred_retry_step(
+    client: OngoingProgramClient,
+    bars: BarStore,
+    meta: MetaStore,
+    cycle: Any,
+    *,
+    dataset_key: str,
+    job_id: str,
+    max_units: int,
+    policy: BudgetPolicy,
+) -> OngoingProgramStepResult:
+    sweep = run_history_sweep(
+        client,
+        bars,
+        meta,
+        job_id,
+        policy=policy,
+        max_units=max_units,
+    )
+    _advance_cycle(meta, cycle, last_stop_reason=sweep.stop_reason)
+    return _result(
+        meta,
+        _cycle(meta, cycle),
+        action="deferred_retry_sweep",
+        dataset_key=dataset_key,
+        target_count=meta.history_target_count(job_id),
+        cohort_snapshot_id=cycle["cohort_snapshot_id"],
+        sweep=sweep,
+        stop_reason=sweep.stop_reason,
+    )
+
+
+def _all_cycle_jobs_terminal(meta: MetaStore, cycle: Any) -> bool:
+    return all(
+        (job := meta.history_job(str(cycle[field_name]))) is not None
+        and (bool(job["cancelled"]) or str(job["status"]) in {"complete", "blocked"})
+        for field_name in ("eod_job_id", "hourly_job_id", "five_min_job_id")
     )
 
 
@@ -625,7 +726,7 @@ def _select_or_create_cohort(meta: MetaStore, bars: BarStore, program: Any, cycl
     ticker_by_instrument: dict[str, str] = {}
     for target in meta.history_targets(job_id):
         ranges = meta.history_ranges(job_id, int(target["target_ordinal"]))
-        if ranges:
+        if ranges and all(str(row["status"]) == "complete" for row in ranges):
             ticker_by_instrument[str(target["instrument_id"])] = str(
                 ranges[-1]["ticker"]
             )
@@ -720,6 +821,7 @@ def _result(
                     "cancelled" if bool(job["cancelled"]) else str(job["status"])
                 ),
                 "target_count": meta.history_target_count(str(job["job_id"])),
+                "retry_pending": meta.history_retry_pending_count(str(job["job_id"])),
                 "cursor": int(job["cursor"]),
                 "sweep": int(job["sweep"]),
                 "has_exclusions": bool(job["cancelled"])

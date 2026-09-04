@@ -16,6 +16,7 @@ from marketdata.scheduler import (
 )
 from marketdata.store import BarStore, MetaStore
 from marketdata.store.bars import eod_frame
+from marketdata.tiingo import TiingoError
 
 
 class FakeOngoingClient:
@@ -96,7 +97,7 @@ def _eod_row(day, volume):
 
 def _run_cycle(client, bars, meta, session):
     results = []
-    for _ in range(30):
+    for _ in range(100):
         result = run_ongoing_program_step(
             client,
             bars,
@@ -263,6 +264,19 @@ def test_terminal_static_blockers_are_reported_as_cycle_exclusions(tmp_path):
             hourly_job_id="test-hourly",
             five_min_job_id="test-5min",
         )
+        for job_id, dataset_key in (
+            ("test-eod", "eod"),
+            ("test-hourly", "intraday_1hour"),
+        ):
+            initialize_current_job(
+                meta,
+                job_id=job_id,
+                dataset_key=dataset_key,
+                members=[CurrentJobMember("MISSING", "missing-alias-id")],
+                end=session,
+                default_start=session,
+                refresh_overlap_days=7,
+            )
         meta.update_ongoing_cycle("test-ongoing", session, state="five_min")
         cycle = meta.ongoing_cycle("test-ongoing", session)
         assert cycle is not None
@@ -282,6 +296,88 @@ def test_terminal_static_blockers_are_reported_as_cycle_exclusions(tmp_path):
 
         assert result.cycle_state == "complete_with_exclusions"
         assert result.partial
+
+
+def test_retrying_eod_target_does_not_hold_healthy_intraday_work(tmp_path):
+    class OneFailingEod(FakeOngoingClient):
+        def eod(self, ticker, start, end):
+            if ticker == "B":
+                self.request_count += 1
+                self.eod_calls.append((ticker, start, end))
+                raise TiingoError("simulated delayed EOD identity")
+            return super().eod(ticker, start, end)
+
+    data_dir = tmp_path / "data"
+    bars = BarStore(data_dir)
+    client = OneFailingEod([_archive("A"), _archive("B")])
+    session = date(2024, 1, 31)
+    ranking_sessions = session_schedule(session - timedelta(days=45), session)[
+        "session_date"
+    ].to_list()[-20:]
+
+    with MetaStore(data_dir / "meta.db") as meta:
+        meta.activate_canonical_generation()
+        bootstrap_eod_identities(client, meta, ["A", "B"])
+        identities = {
+            str(row["ticker"]): str(row["instrument_id"])
+            for row in meta.identity_aliases(["A", "B"])
+        }
+        for ticker, instrument_id in identities.items():
+            for dataset_key in ("intraday_1hour", "intraday_5min"):
+                meta.add_vendor_identifier(
+                    instrument_id,
+                    dataset_key,
+                    "ticker",
+                    ticker,
+                    date(2020, 1, 1),
+                    date(2099, 12, 31),
+                    validation_state="validated",
+                )
+            initial_rows = [
+                _eod_row(day, 1_000 if ticker == "A" else 100)
+                for day in ranking_sessions[:-1]
+            ]
+            bars.publish_eod({instrument_id: eod_frame(ticker, initial_rows)})
+            meta.set_coverage(
+                instrument_id, "eod", ranking_sessions[0], ranking_sessions[-2]
+            )
+        initialize_ongoing_program(
+            meta,
+            program_id="test-ongoing",
+            initial_session=session,
+            cohort_size=1,
+            lookback_sessions=20,
+            min_observations=15,
+        )
+
+        results = _run_cycle(client, bars, meta, session)
+
+        cycle = meta.ongoing_cycle("test-ongoing", session)
+        assert cycle["state"] == "complete_with_exclusions"
+        members = meta.ongoing_cohort_members(str(cycle["cohort_snapshot_id"]))
+        assert [row["ticker"] for row in members] == ["A"]
+        actions = [result.action for result in results]
+        assert actions.index("deferred_retry_sweep") > next(
+            index
+            for index, result in enumerate(results)
+            if result.dataset_key == "intraday_5min"
+            and result.action == "dataset_sweep"
+        )
+        assert {(call[0], call[3]) for call in client.intraday_calls} == {
+            ("A", "1hour"),
+            ("A", "5min"),
+        }
+        assert len([call for call in client.eod_calls if call[0] == "B"]) == 40
+        terminal_eod = next(
+            result
+            for result in reversed(results)
+            if result.dataset_key == "eod"
+            and result.sweep is not None
+            and result.sweep.job_status == "blocked"
+        )
+        assert terminal_eod.sweep is not None
+        assert terminal_eod.sweep.ingest.blocked
+        assert not terminal_eod.sweep.ingest.failed
 
 
 def test_cancelled_dataset_is_a_terminal_cycle_exclusion_not_a_permanent_stall(

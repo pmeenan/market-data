@@ -84,6 +84,12 @@ of the seed record.
 
 ## Outcome
 
+Research timing clarification (D-036): the close of a start-labelled 10:00
+hourly bar becomes available at 11:00, not at 10:00. Its opening print and
+completed OHLC are different decision features. Same-session return comparisons
+use a consistent raw price basis; adjusted EOD prices cannot be divided into
+raw intraday prices. See [research-protocol.md](research-protocol.md).
+
 Keep Tiingo's direct hourly data as a cheap, separately named vendor dataset
 for checkpoints from 10:00 onward. The first coarse gap study may combine the
 EOD opening price with those later checkpoints, but any opening-window or

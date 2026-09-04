@@ -402,14 +402,16 @@ scope has exact-dataset identity classifications, and every declared lower
 component is terminal. `blocked` is terminal with exclusions, while a missing,
 active, or cancelled designated predecessor is not completion.
 
-Ongoing collection is a separate durable current program under D-030–D-033.
+Ongoing collection is a separate durable current program under D-030–D-035.
 The schema-v8 implementation admits automatic work no earlier than 23:30 UTC
 after the completed XNYS regular session, preserving the deployed publication
 buffer, and stops before 08:00 New York time on the next XNYS session. Each
 cycle refreshes Tiingo's supported metadata, content-addresses the active US
-stock/ETF listing snapshot, and completes its EOD sweep first. After the first
-complete EOD cycle following month end, the program calculates and persists a
-fixed intraday cohort: by default the top 5,000 active stable instruments by
+stock/ETF listing snapshot, and completes one breadth-first EOD main pass
+first. Once only bounded retries remain, the healthy pipeline advances. After
+the first such EOD pass following month end, the program calculates and
+persists a fixed intraday cohort from safely completed EOD targets: by default
+the top 5,000 active stable instruments by
 mean canonical EOD `close * volume` over the latest 20 completed XNYS sessions,
 requiring at least 15 valid observations. The snapshot records its as-of
 session, ranking window and method, metric, rank, and stable membership; it is
@@ -419,15 +421,24 @@ Direct hourly and five-minute sweeps independently consume that snapshot and
 retain their exact-frequency identity gates. EOD, hourly, and five-minute each
 use a frozen current-mode job with a durable cursor and bounded operator
 status. If coverage exists, the immutable target begins at its trailing edge
-minus the seven-day correction overlap and therefore fetches every missing
-interval through the cycle session. An intraday cohort entrant without prior
+minus the seven-day correction overlap and therefore fetches every safely
+resolvable missing interval through the cycle session. Completion requires
+coverage through that session; a partial turn is progress only if it moves the
+stored coverage edge, not merely because it reached one selected identity
+slice's end. A transient failure or no-progress current response gets at most 40
+unsuccessful breadth-first turns (roughly four hours at the production cadence);
+successful coverage progress does not consume that allowance. Every attempt
+yields to healthy peers, and exhaustion becomes an explicit cycle
+exclusion. Retry-only work does not gate the next dataset: after hourly and
+five-minute have also received healthy main passes, all still-active jobs take
+deferred turns ordered by durable sweep count. The cycle remains partial until
+those retries recover or become explicit exclusions. An intraday cohort entrant without prior
 coverage begins at the cohort's as-of session, never at the historical IEX
 floor, and subsequent correction overlaps are clamped to that forward-only
 floor. An already-covered older recovery session retires without a request but
-keeps its stable owner in the EOD ranking input. A completed current request
-that cannot establish coverage through the cycle session becomes a terminal
-exclusion for that immutable cycle; the next session gets a new job and retries
-normally rather than holding the whole program through the historical
+keeps its stable owner in the EOD ranking input. The next session gets a new
+job and retries cycle exclusions normally rather than holding the whole program
+through the historical
 publication-lag horizon. Cancellation has the same cycle-terminal semantics.
 Jobs publish/checkpoint a completed batch and yield the shared mutation lock
 before the next batch;
@@ -441,9 +452,10 @@ performs all three dataset sweeps in the overnight window and completes or
 checkpoints before the next morning decision window; it never becomes an
 in-session polling service.
 
-A future morning trigger surface is deliberately separate. It consumes a
-small owner-tagged watchlist and may obtain realtime or five-minute data from
-Tiingo or a broker API restricted to read-only market-data permissions. Broker
+D-036 scopes the pending M6 trigger surface separately. It consumes a bounded
+nightly candidate list, optionally supplemented by owner tags, during declared
+strategy monitoring hours. Tiingo is the initial source; a broker market-data
+API still requires a separate source approval. Broker
 rows remain source-labelled in a hot/decision store unless a later decision
 defines a canonical multi-source contract. This path has no order endpoint,
 order credential, account mutation, or implicit write into Tiingo-owned
@@ -480,6 +492,14 @@ are blocking and records their outcome with the run. IEX-only intraday volume
 must not be presented as composite market liquidity.
 
 ## Research execution and publication
+
+D-036's [research protocol](research-protocol.md) governs the M3–M6 price,
+causality, execution, validation, and scanner contracts. The existing runner
+implements publication and eligibility, not the pending as-of feature API,
+trade simulator, or scanner. Selection views contain future rows in declared
+datasets; callbacks must enforce causality and pass perturbation tests until
+that feature boundary lands. EOD adjusted and intraday raw prices must never
+be mixed in a return. Bar-close availability is at the interval end.
 
 A study is a focused function/script with typed parameters and a versioned
 output schema, not a subclass hierarchy. CLI commands, scripts, and notebooks
@@ -549,18 +569,19 @@ Operational commands return nonzero if any requested segment fails and can
 emit machine-readable summaries. The schema-v8 ongoing driver writes a bounded
 replace-in-place status record after every step, including program/cycle state,
 each dataset's job status/target/cursor/sweep/exclusion summary, request and
-observed-byte counts, and the overnight deadline. Its service paces at most
+observed-byte counts, pending target retries, and the overnight deadline. Its
+service paces at most
 1,000 turns per six minutes, reserves exit 3 for a terminal cycle with explicit
 per-symbol exclusions, and therefore retries ordinary exit-1 CLI/crash failures
 as well as exit-2 coordinator/configuration/lock/status failures. A one-second
 idle delay prevents zero-request state transitions from spinning. Quota stops
-and the 08:00 New York deadline checkpoint cleanly. The implementation and
-user-systemd templates are tested but the program and replacement timer are not
-yet initialized or enabled on the production warehouse; the interim
-latest-universe EOD timer stays authoritative until the human commit gate and
-explicit cutover. That enabled editable-install timer already migrated the live
-metadata database to schema v8 on 2026-09-02, so the supporting schema code is
-now a forward-only live dependency. On the owner's personal server, the
+and the 08:00 New York deadline checkpoint cleanly. The production program was
+initialized and the replacement timer enabled on 2026-09-02; the interim
+latest-universe EOD timer is disabled. Its first overnight cycle exposed
+D-034's bounded-retry defect and stopped at the morning checkpoint before
+cohort selection. The corrected scheduler will resume that immutable cycle,
+defer its two retrying targets, and continue healthy intraday work while they
+receive a fresh bounded retry window. On the owner's personal server, the
 systemd result plus inspectable status is the required visible failure signal;
 an external notification channel may be added later but is not an M2 gate.
 
@@ -595,8 +616,9 @@ Implementations and tests preserve these properties:
 ## Planning boundary and ordering constraints
 
 This document does not assign milestone scope. [plan.md](plan.md) is the sole
-source for milestone names, status, and exit criteria. Its M1–M4 ladder is the
-approved implementation sequence; the owner reviewed the ladder, closed M0,
+source for milestone names, status, and exit criteria. Its M1–M6 ladder is the
+approved implementation sequence (M5/M6 added by D-036); the owner reviewed
+the original ladder, closed M0,
 and closed M1 after its controlled canary passed on 2026-08-27. M2 is in
 progress.
 
@@ -610,7 +632,10 @@ The architecture imposes only these ordering constraints on that planning:
 - make exchange-calendar semantics and the minimum blocking quality checks
   available before publishing research results;
 - land the result catalog/publication path with the first persisted study; and
-- treat a web UI or realtime layer as optional until the owner promotes it.
+- keep a web UI and general streaming optional; validate strategies in M5
+  before relying on M6 alerts. M6 shares as-of features with research and keeps
+  timestamped observations separate from canonical bars, without long-lived
+  warehouse locks or broker account access.
 
 No architecture-blocking numbered question remains: OQ-1 is answered by
 D-015, OQ-8 by D-014, OQ-2/OQ-3 by D-012, OQ-5 by D-010, and OQ-6 by D-016.

@@ -1380,7 +1380,7 @@ def ongoing_status_cmd(config: Config, program_id: str) -> None:
                 raise click.ClickException(f"unknown ongoing program {program_id!r}")
             cycles = meta.ongoing_cycles(program_id)
             cohort = meta.latest_ongoing_cohort_snapshot(program_id)
-            job_summaries: dict[tuple[str, str], tuple[Any, int]] = {}
+            job_summaries: dict[tuple[str, str], tuple[Any, int, int]] = {}
             for cycle in cycles[-10:]:
                 for dataset_key, field_name in (
                     ("eod", "eod_job_id"),
@@ -1392,6 +1392,7 @@ def ongoing_status_cmd(config: Config, program_id: str) -> None:
                         job_summaries[(str(cycle["session_date"]), dataset_key)] = (
                             job,
                             meta.history_target_count(str(job["job_id"])),
+                            meta.history_retry_pending_count(str(job["job_id"])),
                         )
     except _DATA_OPERATION_ERRORS as exc:
         raise click.ClickException(str(exc)) from exc
@@ -1414,14 +1415,14 @@ def ongoing_status_cmd(config: Config, program_id: str) -> None:
         for dataset_key in ("eod", "intraday_1hour", "intraday_5min"):
             summary = job_summaries.get((str(cycle["session_date"]), dataset_key))
             if summary is not None:
-                job, target_count = summary
+                job, target_count, retry_pending = summary
                 job_status = (
                     "cancelled" if bool(job["cancelled"]) else str(job["status"])
                 )
                 click.echo(
                     f"    {dataset_key}: {job_status}; "
                     f"cursor={job['cursor']}/{target_count}; "
-                    f"sweep={job['sweep']}"
+                    f"sweep={job['sweep']}; retries={retry_pending}"
                 )
 
 

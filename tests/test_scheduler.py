@@ -808,7 +808,7 @@ def test_new_intraday_current_member_starts_forward_only(tmp_path):
         assert meta.get_coverage("instrument-a", "intraday_5min")[0] == cohort_entry
 
 
-def test_current_job_retires_unavailable_session_until_the_next_cycle(tmp_path):
+def test_current_job_retries_unavailable_session_then_excludes_it(tmp_path):
     data_dir = tmp_path / "data"
     alias_start = date(2024, 1, 1)
     cycle_end = date.today()
@@ -846,16 +846,224 @@ def test_current_job_retires_unavailable_session_until_the_next_cycle(tmp_path):
         client = EmptyCurrent()
 
         first = run_history_sweep(client, BarStore(data_dir), meta, "current-eod-empty")
-        second = run_history_sweep(
+        assert meta.history_retry_pending_count("current-eod-empty") == 1
+        for _ in range(1, scheduler_mod.CURRENT_RETRY_ATTEMPTS):
+            final = run_history_sweep(
+                client, BarStore(data_dir), meta, "current-eod-empty"
+            )
+        after_terminal = run_history_sweep(
             client, BarStore(data_dir), meta, "current-eod-empty"
         )
 
-        assert first.job_status == "blocked"
-        assert first.ingest.blocked
-        assert "retry in the next cycle" in next(iter(first.ingest.blocked.values()))
+        assert first.job_status == "active"
+        assert first.ingest.failed
+        assert "remains retryable" in next(iter(first.ingest.failed.values()))
+        assert final.job_status == "blocked"
+        assert final.ingest.blocked
+        assert "is excluded" in next(iter(final.ingest.blocked.values()))
         assert meta.history_ranges("current-eod-empty")[0]["terminal_blocked"] == 1
-        assert second.attempted_units == 0
-        assert len(client.eod_calls) == 1
+        assert (
+            meta.history_targets("current-eod-empty")[0]["last_attempt_status"]
+            == "current_retry_exhausted"
+        )
+        assert meta.history_retry_pending_count("current-eod-empty") == 0
+        assert after_terminal.attempted_units == 0
+        assert len(client.eod_calls) == scheduler_mod.CURRENT_RETRY_ATTEMPTS
+
+
+def test_current_job_recovers_after_a_transient_request_failure(tmp_path):
+    data_dir = tmp_path / "data"
+    alias_start = date(2024, 1, 1)
+    cycle_end = date.today()
+
+    class DelayedCurrent(FakeIntraday):
+        def __init__(self):
+            super().__init__()
+            self.failing = True
+
+        def eod(self, ticker, start, end):
+            if self.failing:
+                self.eod_calls.append((ticker, start, end))
+                raise TiingoError("simulated transient failure")
+            return super().eod(ticker, start, end)
+
+    with MetaStore(data_dir / "meta.db") as meta:
+        meta.activate_canonical_generation()
+        meta.upsert_instrument("instrument-a")
+        meta.add_instrument_alias("instrument-a", "A", alias_start, date.max)
+        meta.add_vendor_identifier(
+            "instrument-a",
+            "eod",
+            "ticker",
+            "A",
+            alias_start,
+            date.max,
+            validation_state="validated",
+        )
+        meta.set_coverage(
+            "instrument-a", "eod", alias_start, cycle_end - timedelta(days=1)
+        )
+        initialize_current_job(
+            meta,
+            job_id="current-eod-delayed",
+            dataset_key="eod",
+            members=[CurrentJobMember("A", "instrument-a")],
+            end=cycle_end,
+            default_start=cycle_end,
+            refresh_overlap_days=7,
+        )
+        client = DelayedCurrent()
+
+        first = run_history_sweep(
+            client, BarStore(data_dir), meta, "current-eod-delayed"
+        )
+        client.failing = False
+        recovered = run_history_sweep(
+            client, BarStore(data_dir), meta, "current-eod-delayed"
+        )
+
+        assert first.job_status == "active"
+        assert recovered.job_status == "complete"
+        assert meta.get_coverage("instrument-a", "eod")[1] == cycle_end
+        assert (
+            meta.history_targets("current-eod-delayed")[0]["last_attempt_status"]
+            == "advanced"
+        )
+
+
+def test_current_identity_split_retries_without_blocking_other_targets(tmp_path):
+    data_dir = tmp_path / "data"
+    alias_start = date(2024, 1, 1)
+    coverage_end = date(2024, 1, 31)
+    ambiguous_day = date(2024, 2, 1)
+    cycle_end = date(2024, 2, 2)
+    with MetaStore(data_dir / "meta.db") as meta:
+        meta.activate_canonical_generation()
+        for ticker in ("A", "B"):
+            instrument_id = f"instrument-{ticker.lower()}"
+            meta.upsert_instrument(instrument_id)
+            meta.add_instrument_alias(instrument_id, ticker, alias_start, cycle_end)
+            meta.add_vendor_identifier(
+                instrument_id,
+                "eod",
+                "ticker",
+                ticker,
+                alias_start,
+                cycle_end,
+                validation_state="validated",
+            )
+            meta.set_coverage(instrument_id, "eod", alias_start, coverage_end)
+        meta.upsert_instrument("instrument-conflict")
+        meta.add_instrument_alias(
+            "instrument-conflict", "A", ambiguous_day, ambiguous_day
+        )
+        initialize_current_job(
+            meta,
+            job_id="current-eod-identity-split",
+            dataset_key="eod",
+            members=[
+                CurrentJobMember("A", "instrument-a"),
+                CurrentJobMember("B", "instrument-b"),
+            ],
+            end=cycle_end,
+            default_start=cycle_end,
+            refresh_overlap_days=7,
+        )
+        client = FakeIntraday()
+
+        first = run_history_sweep(
+            client, BarStore(data_dir), meta, "current-eod-identity-split"
+        )
+
+        assert first.job_status == "active"
+        assert first.advanced_units == 1
+        assert meta.get_coverage("instrument-a", "eod")[1] == coverage_end
+        assert meta.get_coverage("instrument-b", "eod")[1] == cycle_end
+        targets = {
+            row["instrument_id"]: row
+            for row in meta.history_targets("current-eod-identity-split")
+        }
+        assert targets["instrument-a"]["last_attempt_status"] == (
+            "current_retry_pending"
+        )
+        assert targets["instrument-b"]["last_attempt_status"] == "advanced"
+        assert meta.history_retry_pending_count("current-eod-identity-split") == 1
+
+        for _ in range(1, scheduler_mod.CURRENT_RETRY_ATTEMPTS):
+            final = run_history_sweep(
+                client, BarStore(data_dir), meta, "current-eod-identity-split"
+            )
+
+        assert final.job_status == "blocked"
+        a_ordinal = int(targets["instrument-a"]["target_ordinal"])
+        assert (
+            meta.history_ranges("current-eod-identity-split", a_ordinal)[0][
+                "terminal_blocked"
+            ]
+            == 1
+        )
+        assert len([call for call in client.eod_calls if call[0] == "A"]) == (
+            scheduler_mod.CURRENT_RETRY_ATTEMPTS
+        )
+        assert len([call for call in client.eod_calls if call[0] == "B"]) == 1
+
+
+def test_current_multichunk_bridge_counts_real_partial_coverage_as_progress(tmp_path):
+    data_dir = tmp_path / "data"
+    alias_start = date(2020, 1, 1)
+    coverage_end = date(2023, 1, 3)
+    cycle_end = date(2024, 12, 31)
+    with MetaStore(data_dir / "meta.db") as meta:
+        meta.activate_canonical_generation()
+        meta.upsert_instrument("instrument-a")
+        meta.add_instrument_alias("instrument-a", "A", alias_start, cycle_end)
+        meta.add_vendor_identifier(
+            "instrument-a",
+            "intraday_5min",
+            "ticker",
+            "A",
+            alias_start,
+            cycle_end,
+            validation_state="validated",
+        )
+        meta.set_coverage("instrument-a", "intraday_5min", alias_start, coverage_end)
+        initialize_current_job(
+            meta,
+            job_id="current-5min-long-bridge",
+            dataset_key="intraday_5min",
+            members=[CurrentJobMember("A", "instrument-a")],
+            end=cycle_end,
+            default_start=cycle_end,
+            refresh_overlap_days=7,
+        )
+
+        first = run_history_sweep(
+            FakeIntraday(), BarStore(data_dir), meta, "current-5min-long-bridge"
+        )
+
+        class FailingIntraday(FakeIntraday):
+            def intraday(self, ticker, start, end, freq="1hour"):
+                raise TiingoError("simulated failure after real progress")
+
+        failed = run_history_sweep(
+            FailingIntraday(),
+            BarStore(data_dir),
+            meta,
+            "current-5min-long-bridge",
+        )
+
+        new_coverage = meta.get_coverage("instrument-a", "intraday_5min")
+        assert new_coverage is not None
+        assert coverage_end < new_coverage[1] < cycle_end
+        assert first.job_status == "active"
+        assert first.advanced_units == 1
+        assert failed.job_status == "active"
+        assert "attempt 1/40" in next(iter(failed.ingest.failed.values()))
+        assert meta.history_retry_pending_count("current-5min-long-bridge") == 1
+        assert (
+            meta.history_targets("current-5min-long-bridge")[0]["last_attempt_status"]
+            == "current_retry_pending"
+        )
 
 
 def test_older_recovery_cycle_keeps_already_covered_owner_without_request(tmp_path):
@@ -902,7 +1110,7 @@ def test_older_recovery_cycle_keeps_already_covered_owner_without_request(tmp_pa
 @pytest.mark.parametrize(
     ("utc_hour", "expected_status", "expected_coverage"),
     [
-        (18, "blocked", None),
+        (18, "active", None),
         (23, "complete", (date(2024, 2, 5), date(2024, 2, 5))),
     ],
 )

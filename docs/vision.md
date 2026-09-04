@@ -14,16 +14,28 @@ The first study is concrete: find stocks that opened significantly lower than
 the prior close and measure whether they tend to recover over the next few
 hours — i.e., is there a morning window where some stocks over-react and
 partially rebound? Daily bars can approximate this; direct hourly bars provide
-checkpoints from 10:00 onward, while 5-minute bars are required to measure the
+bars starting at 10:00 (their closes available from 11:00 onward), while 5-minute bars are required to measure the
 opening half-hour and session-relative windows properly (D-012).
+
+The intended account is the owner's fee-free 401(k). D-036 adds explicit
+execution-aware validation and ongoing read-only opportunity scanning for
+roughly 1% recovery moves over hours or days. Commissions and explicit trading
+fees default to zero; spread/slippage, entry timing, and capital constraints
+remain measurable assumptions. See [research-protocol.md](research-protocol.md).
 
 ## Who it's for
 
 - The project owner — the only user. A research tool, not a product.
-- (Secondary, aspirational) A future realtime variant of the same tool, still
-  for the owner's use.
+- The same owner using M6 read-only opportunity alerts after strategy validation.
 
 ## Success criteria
+
+- Frozen strategies can be evaluated on unseen periods with realistic entry,
+  exit, ambiguity, and capital assumptions, then replayed through the same
+  signal functions used by a timestamped read-only scanner. Shadow evidence
+  measures signal parity, freshness, and coverage before decision-support use.
+  Research can succeed by rejecting a hypothesis; profitable results are not
+  presumed.
 
 - The morning gap-recovery hypothesis can be tested end-to-end — data → signal
   → summary statistics — from a single reproducible script, selecting tickers

@@ -22,6 +22,42 @@ Newest first. RE-numbers are never reused.
 
 ---
 
+## RE-012: A ready identity prefix can masquerade as current progress  (2026-09-03, status: worked-around)
+
+**Environment:** Schema-v8 ongoing EOD scheduler, seven-day correction overlap,
+date-ranged reused-symbol aliases.
+
+**Repro/measurement:** The first production ongoing cycle froze 13,973 active
+tickers. DOV and SORA each had a ready identity slice at the overlap start
+followed by an ambiguous alias interval before the 2026-09-02 cycle session.
+The scheduler fetched the ready prefix and counted it as progress even though
+coverage remained at 2026-08-31 and 2025-05-26 respectively. Both accumulated
+87 successful-depth/attempt records. The 12.5-hour run made 14,495 attempts and
+observed 233,964,599 response bytes, then checkpointed still in EOD.
+
+**Observed:** Current trailing progress compared coverage with the selected
+identity segment's end. The next sweep replanned from the unchanged stored edge
+and selected that same segment indefinitely, preventing cohort, hourly, and
+five-minute work.
+
+**Expected:** Current completion means coverage through the cycle session, and
+partial progress means the stored coverage interval actually moved toward it.
+A single unavailable target gets bounded, paced retries while every healthy
+peer and later dataset continue, then becomes an explicit fail-closed
+exclusion.
+
+**Impact/workaround:** D-034 requires the full cycle range for completion and
+real coverage-edge movement for partial progress, then caps no-progress current
+targets at 40 unsuccessful durable turns (about four hours at the production cadence).
+D-035 advances the pipeline when a dataset has only retries left and
+sweep-balances deferred retries after the healthy five-minute pass. Regression
+tests reproduce the identity split, a legitimate multi-chunk bridge, delayed
+availability, and terminal exhaustion. The existing live targets' prior
+false-success turns do not consume the new failure allowance; they receive a
+fresh bounded retry window while later datasets continue.
+
+---
+
 ## RE-011: An enabled editable-install timer can deploy a schema migration  (2026-09-02, status: worked-around)
 
 **Environment:** User-systemd market-data timers, repository editable virtual

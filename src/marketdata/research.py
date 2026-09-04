@@ -348,6 +348,11 @@ def run_event_study(
     Outcome datasets are exposed only after the eligible selected event frame is
     materialized.  This is an event-study boundary, not a portfolio or order
     simulator.
+
+    Selection views contain the full declared datasets, not an as-of sandbox.
+    Callbacks must enforce feature availability at each decision timestamp;
+    the eligibility audit checks declared lookbacks, not feature provenance.
+    Studies must test that changing future rows cannot change earlier signals.
     """
     selection_keys = _normalize_event_dataset_keys(
         selection_dataset_keys, "selection_dataset_keys"

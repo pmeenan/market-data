@@ -19,13 +19,124 @@ history is the archive. D-numbers are never reused.
 Format:
 
 ```
+## D-036: Validated recovery strategies and read-only opportunity scanning (2026-09-04, status: accepted)
+
+**Decision:** Promote execution-aware strategy validation (M5) and a bounded
+read-only opportunity scanner (M6) into the committed ladder. The owner asked
+to apply the project review recommendations and identified a fee-free 401(k)
+as the intended account. Default commissions/explicit trading fees to zero;
+retain separately declared spread/slippage sensitivities and account-capital
+assumptions. The target is approximately 1% recovery moves over hours or days,
+not a promise of a 1% net return.
+
+**Context:** D-015's descriptive event engine is appropriate for discovery but
+cannot alone validate executable strategies. Dataset separation does not prove
+feature causality, historical IEX coverage remains selective, and the overnight
+collector cannot deliver daytime opportunities.
+
+**Consequences:** [research-protocol.md](research-protocol.md) defines acceptance
+contracts for consistent price bases, as-of features, fill ambiguity, execution,
+chronological validation, coverage sensitivity, and shared replay/scanner
+signals. M3/M4 remain descriptive research milestones and may conclude that the
+hypothesis fails. M5 adds the focused simulator previously deferred by D-015;
+M6 promotes the bounded decision tool proposed in D-031. A broker feed still
+requires separate source approval. Broad daytime ingestion, orders, account
+mutation, a general streaming platform, and a web UI are not promoted. No
+storage migration or live timer change is part of this decision.
+
+**Reopen if:** Measured fill ambiguity requires finer data, candidate coverage
+requires broader daytime discovery, or actual account restrictions change the
+execution model.
+
 ## D-NNN: Title  (YYYY-MM-DD, status: accepted | proposed | superseded by D-MMM)
 Decision / Context / Consequences / Reopen if
 ```
 
 ---
 
-## D-033: Current cycles bridge existing edges but never move a new-member floor backward  (2026-09-02, status: accepted, amends D-029, D-030, and D-031)
+## D-035: Retry-only current work does not gate healthy datasets  (2026-09-03, status: accepted, amends D-030 and D-034)
+
+**Decision:** Each ongoing dataset gets one complete breadth-first main pass.
+When every unfinished range in that dataset is waiting under D-034's bounded
+current-retry policy, the program advances instead of waiting for those retries
+to exhaust. A new monthly cohort admits only stable instruments whose EOD
+target completed safely; an incomplete EOD target cannot be ranked from a
+stale partial cycle. Hourly and five-minute then run independently for the
+eligible fixed cohort.
+
+After the healthy five-minute main pass, all still-active dataset jobs share a
+deferred retry queue ordered by their durable sweep number. This gives EOD,
+hourly, and five-minute failures round-robin opportunities through the
+overnight window. A retry that makes real coverage progress resumes its owning
+sweep normally. The cycle becomes terminal only when every dataset job is
+complete, explicitly excluded, or cancelled, so status never claims full
+freshness while retries remain.
+
+**Context:** D-034 prevented one identity failure from monopolizing its own
+breadth-first sweep, but D-030's strict dataset barrier still made hourly and
+five-minute wait up to four hours for a few EOD retries. The same issue could
+make five-minute wait behind a few hourly failures. That protects ordering but
+wastes the bounded overnight window and delays thousands of healthy targets
+that do not depend on the failing identity.
+
+**Consequences:** A few bad tickers no longer hold later datasets hostage.
+Failures remain fail-closed and get the same 40 retry turns; only their
+placement changes. Operator status remains partial while retries are pending, monthly
+ranking cannot silently treat an incomplete EOD target as current, and tests
+cover healthy intraday work occurring before deferred EOD retries exhaust.
+Existing monthly cohort snapshots remain immutable; exact-frequency identity
+and ingestion outcomes stay independent for their declared members.
+
+**Reopen if:** Cross-dataset request priority needs a measured weighted policy,
+monthly ranking should deliberately admit incomplete EOD targets, or current
+cycles gain a realtime freshness SLA rather than an overnight completion
+window.
+
+---
+
+## D-034: Current target retries are bounded and never monopolize a sweep  (2026-09-03, status: accepted, amended by D-035; amends D-030 and D-033)
+
+**Decision:** A current request that fails transiently, or completes without
+establishing coverage through the immutable cycle session, remains retryable
+for at most 40 unsuccessful durable target turns. Successful progress does not
+consume that allowance. Every attempt advances the breadth-first cursor, so
+healthy peers still run once per sweep. The production driver's
+six-minute API-bearing cadence gives an isolated target roughly four hours to
+become available. Attempt 40 turns the exact range into a terminal fail-closed
+cycle exclusion without claiming coverage; the ordered ongoing program can
+then continue to its next dataset. Pending retry counts and the current
+attempt/limit are visible in operator status.
+
+Deterministic identity-planner blockers, authenticated 404s, oversized
+responses, and cancellations remain immediate terminal exclusions because
+repeating the same request cannot change their evidence. A later cycle retries
+cycle-scoped exclusions against its newly refreshed identity snapshot.
+
+**Context:** The first production D-030 cycle exposed two identity-split EOD
+targets, DOV and SORA. The trailing planner repeatedly selected a valid slice
+ending at the existing coverage edge. The checkpoint treated reaching that
+slice's end as progress even though neither target reached the cycle session.
+Each was fetched 87 times, leaving the EOD job active until the morning
+boundary and preventing cohort and intraday work. Immediate exclusion would
+avoid the stall but would be unnecessarily brittle for ordinary publication
+lag and transient transport failures.
+
+**Consequences:** Current completion is measured against the whole immutable
+job range, and a partial turn counts as progress only when it actually moves
+the stored coverage edge. Merely reaching the end of a selected identity slice
+that was already covered is not progress. Tests cover delayed recovery, bounded
+exhaustion, a legitimate multi-chunk bridge, and an identity split whose
+failing target does not stop a healthy peer. EOD still precedes cohort and
+intraday work, so its small retry window consumes part of the overnight window
+by design; it can no longer hold the program indefinitely.
+
+**Reopen if:** Tiingo publishes per-symbol finalization state, the production
+cadence changes materially, or measured retry volume/window use warrants a
+time-based rather than attempt-based limit.
+
+---
+
+## D-033: Current cycles bridge existing edges but never move a new-member floor backward  (2026-09-02, status: accepted, amended by D-034; amends D-029, D-030, and D-031)
 
 **Decision:** A current target with coverage that predates its intraday cohort
 entry bridges from that stored trailing edge, including the correction overlap,
@@ -38,13 +149,14 @@ coverage retires without transport while retaining the instrument in the
 cycle's EOD ranking input.
 
 A completed current request that does not establish coverage through its cycle
-session is a terminal fail-closed exclusion for that immutable cycle, without
-claiming the missing bar. Cancellation is likewise terminal for that cycle.
-The next cycle creates a new job and retries the then-current edge; neither
-condition may pin every later session behind the historical five-day
-empty-response rule. Intraday coverage may include the UTC current date only
-when the scheduler's exchange calendar proves that XNYS session has completed;
-receiving a partial in-session row is not enough.
+session follows D-034's bounded retry policy, then becomes a terminal
+fail-closed exclusion for that immutable cycle without claiming the missing
+bar. Cancellation is immediately terminal for that cycle. The next cycle
+creates a new job and retries the then-current edge; neither condition may pin
+every later session behind the historical five-day empty-response rule.
+Intraday coverage may include the UTC current date only when the scheduler's
+exchange calendar proves that XNYS session has completed; receiving a partial
+in-session row is not enough.
 
 **Context:** The first current-mode implementation had three conflicting edge
 behaviors. A missing current bar remained active until the historical
@@ -153,7 +265,7 @@ execution as a separate major charter change.
 
 ---
 
-## D-030: Ongoing collection is all-active EOD plus a rolling top-liquidity intraday cohort  (2026-09-01, status: accepted, amended by D-031, D-032, and D-033; amends D-011 and D-013)
+## D-030: Ongoing collection is all-active EOD plus a rolling top-liquidity intraday cohort  (2026-09-01, status: accepted, amended by D-031, D-032, D-033, D-034, and D-035; amends D-011 and D-013)
 
 **Decision:** Every weekday current cycle targets EOD for every active
 Tiingo-supported US stock/ETF listing that can be resolved to a stable

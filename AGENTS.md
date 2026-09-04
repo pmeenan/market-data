@@ -83,6 +83,7 @@ build → commit loop, on-demand reviews, and the human commit gate.
 | [docs/plan.md](docs/plan.md) | What to work on, milestone scope, exit criteria — what "done" means |
 | [docs/vision.md](docs/vision.md) | Why the project exists, success criteria, non-goals |
 | [docs/features.md](docs/features.md) | The feature matrix: confirmed scope, proposed additions, open questions |
+| [docs/research-protocol.md](docs/research-protocol.md) | Strategy price/timing, fee-free 401(k), validation, and scanner contracts (D-036) |
 | [docs/architecture.md](docs/architecture.md) | System structure and technical constraints |
 | [docs/decisions.md](docs/decisions.md) | Settled choices (D-NNN). Scan headings; read only the entries your task touches |
 | [docs/intraday-spike.md](docs/intraday-spike.md) | Measured IEX depth, payload sizes, bar semantics, and bandwidth projections |
@@ -135,20 +136,24 @@ histories, repaired 62 reused symbols into 125 inferred episodes, and validated
 replaced both fixed phase-1 timers, frozen an immutable 23,078-instrument
 supported-US phase-2 cohort, completed its safe EOD work with accepted
 exclusions, and completed phase-3 five-minute history with accepted fail-closed
-exclusions. A bounded-status nightly current-EOD timer is installed; one
-further consecutive actual post-market run remains. D-030/D-031's schema-v8
-overnight all-active EOD and monthly top-5,000 hourly/five-minute collector,
-including D-032 current-identity continuation and D-033 gap/floor behavior, is
-implemented and tested.
-An enabled editable-install timer already migrated live `meta.db` to schema v8;
-the ongoing program and replacement timer are not initialized. Human commit,
-timer cutover, and measured live duty-cycle runs remain.
+exclusions. D-030/D-031's schema-v8 overnight all-active EOD and monthly
+top-5,000 hourly/five-minute collector is initialized and its replacement timer
+is enabled; the interim current-EOD timer is disabled. Its first 2026-09-02
+cycle completed 13,154 EOD targets and excluded 817, but two identity-split
+targets repeated until the morning boundary. D-034 now requires real
+coverage-edge movement for partial progress and full-cycle coverage for
+completion and gives retryable targets 40 unsuccessful breadth-first turns. D-035 advances
+healthy later datasets once only retries remain, then sweep-balances deferred
+attempts before terminal exclusion. The next scheduled run will give the two
+legacy targets a fresh bounded retry window while continuing into intraday;
+complete measured EOD/hourly/five-minute cycles remain.
 External failure notification is optional for this personal deployment.
 M1 closed on 2026-08-27. Production ingestion is permitted only for validated
 request segments; unresolved work remains fail-closed. M3's D-016 result
 catalog, immutable artifact publication, input fingerprints, compatible DuckDB
 loading, explicit interrupted-run reconciliation, and D-015/D-026 local-window
-event runner are implemented; the coarse gap-recovery study is next. See
+event runner are implemented; the coarse gap-recovery study is next. D-036
+adds pending M5 execution-aware validation and M6 read-only scanning for the owner's fee-free 401(k). See
 [docs/plan.md](docs/plan.md).
 Keep this paragraph short and current when plan.md milestone status changes
 (rule 4).

@@ -3390,6 +3390,36 @@ class MetaStore:
             ).fetchone()[0]
         )
 
+    def history_retry_pending_count(self, job_id: str) -> int:
+        """Return current targets waiting for another bounded retry sweep."""
+        return int(
+            self._con.execute(
+                """SELECT COUNT(*) FROM history_targets
+                   WHERE job_id = ? AND last_attempt_status =
+                       'current_retry_pending'""",
+                (job_id,),
+            ).fetchone()[0]
+        )
+
+    def history_has_only_retry_pending_work(self, job_id: str) -> bool:
+        """Whether every active range belongs to a deferred current retry."""
+        row = self._con.execute(
+            """SELECT COUNT(*) AS active_count,
+                      SUM(
+                          CASE WHEN targets.last_attempt_status =
+                                    'current_retry_pending'
+                               THEN 0 ELSE 1 END
+                      ) AS other_count
+               FROM history_ranges AS ranges
+               JOIN history_targets AS targets
+                 ON targets.job_id = ranges.job_id
+                 AND targets.target_ordinal = ranges.target_ordinal
+               WHERE ranges.job_id = ? AND ranges.status = 'active'
+                 AND ranges.terminal_blocked = 0""",
+            (job_id,),
+        ).fetchone()
+        return bool(row["active_count"]) and not bool(row["other_count"])
+
     def history_has_active_range(
         self,
         job_id: str,

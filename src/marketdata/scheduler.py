@@ -61,6 +61,12 @@ HISTORICAL_LIMIT_RAMP_DAYS = 7
 # protects the remaining uncertainty.
 RESPONSE_RESERVATION_BYTES = 64_000_000
 
+# Current responses can lag or fail transiently after the regular session.  The
+# production driver runs one sweep every six minutes, so forty unsuccessful
+# retry turns retain a target for roughly four hours without allowing one
+# unavailable instrument to pin the immutable cycle forever.
+CURRENT_RETRY_ATTEMPTS = 40
+
 
 class TiingoLike(Protocol):
     def eod(self, ticker: str, start: date, end: date) -> list[dict[str, Any]]: ...
@@ -1018,7 +1024,15 @@ def _run_history_turn(
         )
         report.attempted_units += 1
     else:
-        batch = [(target, active_range, segment, direction)]
+        batch = [
+            (
+                target,
+                active_range,
+                segment,
+                direction,
+                meta.get_coverage(str(target["instrument_id"]), segment.dataset_key),
+            )
+        ]
         remaining = (
             len(targets) if max_units is None else max_units - report.attempted_units
         )
@@ -1045,6 +1059,10 @@ def _run_history_turn(
                     candidate_range,
                     candidate_plan[0],
                     candidate_plan[1],
+                    meta.get_coverage(
+                        str(candidate_target["instrument_id"]),
+                        candidate_plan[0].dataset_key,
+                    ),
                 )
             )
         attempts_per_unit = int(getattr(client, "max_attempts", 1))
@@ -1082,7 +1100,7 @@ def _run_history_turn(
             report.successful_units += advanced
             report.advanced_units += advanced
             report.attempted_units += processed + 1
-            failed_target, failed_range, failed_segment, _ = batch[processed]
+            failed_target, failed_range, failed_segment, _, _ = batch[processed]
             detail = str(exc)
             report.ingest.failed[failed_segment.key] = detail
             report.ingest.segments.append(
@@ -1102,7 +1120,13 @@ def _run_history_turn(
             report.stop_reason = "response_reservation_exceeded"
             return False
         report.attempted_units += len(batch)
-        for batch_target, batch_range, batch_segment, batch_direction in batch:
+        for (
+            batch_target,
+            batch_range,
+            batch_segment,
+            batch_direction,
+            coverage_before,
+        ) in batch:
             successful = _checkpoint_after_ingest(
                 meta,
                 job_id,
@@ -1111,6 +1135,7 @@ def _run_history_turn(
                 batch_segment,
                 batch_direction,
                 unit_result,
+                coverage_before=coverage_before,
                 force=bool(job["force"]),
             )
             if successful:
@@ -1234,31 +1259,71 @@ def _checkpoint_after_ingest(
     direction,
     result,
     *,
+    coverage_before,
     force,
 ):
     job = meta.history_job(job_id)
     if job is None:
         raise RuntimeError(f"history job {job_id!r} disappeared")
     current_work = str(job["work_kind"]) == "current"
+    current_retry_attempt = (
+        int(target["attempted_turns"]) - int(target["successful_depth"]) + 1
+    )
     instrument_id = str(target["instrument_id"])
     failed = instrument_id in result.failed or segment.key in result.failed
     blocked = segment.key in result.blocked
     if failed or blocked:
         detail = result.failed.get(instrument_id) or result.failed.get(segment.key)
         detail = detail or result.blocked.get(segment.key, "ingestion did not advance")
+        retry_exhausted = (
+            current_work and failed and current_retry_attempt >= CURRENT_RETRY_ATTEMPTS
+        )
+        if current_work and failed:
+            if retry_exhausted:
+                detail = (
+                    f"{detail}; exhausted {CURRENT_RETRY_ATTEMPTS} current-cycle "
+                    "attempts and excluded this range"
+                )
+            else:
+                detail = (
+                    f"{detail}; current-cycle attempt {current_retry_attempt}/"
+                    f"{CURRENT_RETRY_ATTEMPTS} remains retryable"
+                )
+            result.failed.pop(instrument_id, None)
+            result.failed.pop(segment.key, None)
+            if retry_exhausted:
+                result.blocked[segment.key] = detail
+                for item in result.segments:
+                    if (
+                        item["ticker"] == segment.ticker
+                        and item["dataset_key"] == segment.dataset_key
+                        and item["start"] == segment.start.isoformat()
+                        and item["end"] == segment.end.isoformat()
+                    ):
+                        item["status"] = "blocked"
+                        item["detail"] = detail
+            else:
+                result.failed[segment.key] = detail
+        attempt_status = "failed" if failed else "terminal_blocked"
+        if current_work and failed:
+            attempt_status = (
+                "current_retry_exhausted"
+                if retry_exhausted
+                else "current_retry_pending"
+            )
         _checkpoint(
             meta,
             job_id,
             target,
             range_row,
-            attempt_status="failed" if failed else "terminal_blocked",
+            attempt_status=attempt_status,
             detail=detail,
             attempted=True,
             successful=False,
             # A lower-layer validated-ingest blocker is just as terminal for
             # this immutable job range as a blocker produced by the planner.
             # Leaving it active retries the same fail-closed segment forever.
-            terminal_blocked=blocked,
+            terminal_blocked=blocked or retry_exhausted,
         )
         return False
 
@@ -1283,34 +1348,54 @@ def _checkpoint_after_ingest(
         if frontier < range_start:
             range_status = "complete"
             frontier = range_start
-    advanced = (
-        range_status == "complete"
-        or frontier < old_frontier
-        or (
-            direction == "trailing"
-            and coverage is not None
-            and coverage[1] >= segment.end
+    if current_work:
+        coverage_advanced = coverage is not None and (
+            coverage_before is None
+            or coverage[0] < coverage_before[0]
+            or coverage[1] > coverage_before[1]
         )
-    )
+        advanced = range_status == "complete" or coverage_advanced
+    else:
+        advanced = (
+            range_status == "complete"
+            or frontier < old_frontier
+            or (
+                direction == "trailing"
+                and coverage is not None
+                and coverage[1] >= segment.end
+            )
+        )
     if current_work and not advanced:
+        retry_exhausted = current_retry_attempt >= CURRENT_RETRY_ATTEMPTS
         detail = (
             "completed current request did not establish coverage through the "
-            "cycle session; retry in the next cycle"
+            f"cycle session; attempt {current_retry_attempt}/"
+            f"{CURRENT_RETRY_ATTEMPTS} "
+            + (
+                "was exhausted and this range is excluded from the cycle"
+                if retry_exhausted
+                else "remains retryable"
+            )
         )
-        result.blocked[segment.key] = detail
-        result.segments.append({**segment.to_dict(outcome="blocked"), "detail": detail})
+        outcome = "blocked" if retry_exhausted else "failed"
+        getattr(result, outcome)[segment.key] = detail
+        result.segments.append({**segment.to_dict(outcome=outcome), "detail": detail})
         _checkpoint(
             meta,
             job_id,
             target,
             range_row,
-            attempt_status="current_session_unavailable",
+            attempt_status=(
+                "current_retry_exhausted"
+                if retry_exhausted
+                else "current_retry_pending"
+            ),
             detail=detail,
             attempted=True,
             successful=False,
             frontier_end=frontier,
             range_status=range_status,
-            terminal_blocked=True,
+            terminal_blocked=retry_exhausted,
         )
         return False
     _checkpoint(
@@ -1331,7 +1416,15 @@ def _checkpoint_after_ingest(
 def _checkpoint_partial_batch(
     meta: MetaStore,
     job_id: str,
-    batch: list[tuple[Any, Any, ValidatedRequestSegment, str]],
+    batch: list[
+        tuple[
+            Any,
+            Any,
+            ValidatedRequestSegment,
+            str,
+            tuple[date, date] | None,
+        ]
+    ],
     partial: IngestResult | None,
     report: IngestResult,
 ) -> tuple[int, int]:
@@ -1343,7 +1436,7 @@ def _checkpoint_partial_batch(
     advanced = 0
     job = meta.history_job(job_id)
     assert job is not None
-    for target, range_row, segment, direction in batch:
+    for target, range_row, segment, direction, coverage_before in batch:
         instrument_id = str(target["instrument_id"])
         represented = (
             instrument_id in outcomes
@@ -1361,6 +1454,7 @@ def _checkpoint_partial_batch(
             segment,
             direction,
             partial,
+            coverage_before=coverage_before,
             force=bool(job["force"]),
         ):
             advanced += 1

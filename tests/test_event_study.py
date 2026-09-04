@@ -120,7 +120,7 @@ def _build_candidates(context):
     with pytest.raises(duckdb.CatalogException):
         context.connection.execute("SELECT * FROM meta.universe").fetchall()
     frame = context.connection.execute(
-        """SELECT instrument_id, date AS event_date, adj_open,
+        """SELECT instrument_id, date AS event_date, open AS raw_open, adj_open,
                   lag(adj_close) OVER (
                       PARTITION BY instrument_id ORDER BY date
                   ) AS prior_close
@@ -157,11 +157,12 @@ def _observe_hourly(context, selected):
     context.connection.register("selected_events", selected)
     observations = context.connection.execute(
         """SELECT selected.instrument_id, selected.event_date,
-                  '10:00' AS observation_label,
+                  '11:00_close_of_10:00_bar' AS observation_label,
+                  hourly.ts + INTERVAL '1 hour' AS checkpoint_available_ts,
                   CASE WHEN hourly.close IS NULL THEN 'missing_outcome'
                        ELSE 'evaluable' END AS outcome_status,
                   hourly.close AS checkpoint_price,
-                  hourly.close / selected.adj_open - 1.0 AS measured_return
+                  hourly.close / selected.raw_open - 1.0 AS measured_return
              FROM selected_events AS selected
              LEFT JOIN intraday_1hour AS hourly
                ON hourly.instrument_id = selected.instrument_id
@@ -176,7 +177,7 @@ def _observe_hourly(context, selected):
             ResearchMetric(
                 "mean_checkpoint_return",
                 float(mean_return) if mean_return is not None else 0.0,
-                dimensions={"checkpoint": "10:00"},
+                dimensions={"checkpoint": "11:00_close_of_10:00_bar"},
                 unit="return",
             ),
         ),
@@ -264,6 +265,49 @@ def test_runner_freezes_locally_eligible_events_before_outcomes(tmp_path):
     assert later["instrument_id"].to_list() == observations["instrument_id"].to_list()
     assert later["outcome_status"].to_list() == ["evaluable", "evaluable"]
     assert _metric_values(config, second.run_id)["event_audit.selected"] == 2
+
+
+@pytest.mark.parametrize("adjustment", [0.5, 0.98])
+def test_same_session_return_ignores_common_historical_adjustment(tmp_path, adjustment):
+    """Split/dividend-like historical restatements cannot manufacture a rebound."""
+    config = _fixture(tmp_path)
+    frame = _eod_frame("LOCAL", [date(2023, 12, 20), _JAN_3, _JAN_4])
+    frame = frame.with_columns(
+        (pl.col(name) * adjustment).alias(name)
+        for name in ("adj_open", "adj_high", "adj_low", "adj_close")
+    )
+    BarStore(config.data_dir).publish_eod({"local-id": frame})
+
+    published = _run_fixture(config)
+    observation = pl.read_parquet(published.observation_path).filter(
+        pl.col("instrument_id") == "local-id"
+    )
+    assert observation["measured_return"].item() == pytest.approx(95.0 / 90.0 - 1.0)
+    assert observation["checkpoint_available_ts"].item() == datetime(
+        2024, 1, 4, 16, tzinfo=UTC
+    )
+    assert observation["observation_label"].item() == "11:00_close_of_10:00_bar"
+
+
+def test_example_signal_ignores_future_selection_rows(tmp_path):
+    """The example obeys causality even though the runner exposes full EOD views."""
+    config = _fixture(tmp_path)
+    before = pl.read_parquet(_run_fixture(config).observation_path)
+    future = _eod_frame("LOCAL", [_JAN_5]).with_columns(
+        pl.lit(1_000.0).alias("high"),
+        pl.lit(900.0).alias("close"),
+        pl.lit(1_000.0).alias("adj_high"),
+        pl.lit(900.0).alias("adj_close"),
+        pl.lit(999_999, dtype=pl.Int64).alias("volume"),
+    )
+    BarStore(config.data_dir).publish_eod({"local-id": future})
+    after = pl.read_parquet(_run_fixture(config).observation_path)
+    columns = ["instrument_id", "event_date", "outcome_status", "measured_return"]
+    assert (
+        before.select(columns)
+        .sort("instrument_id")
+        .equals(after.select(columns).sort("instrument_id"))
+    )
 
 
 def test_empty_candidate_scope_publishes_an_empty_success(tmp_path):

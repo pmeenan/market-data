@@ -112,8 +112,8 @@ of it.
       criteria (2026-08-27). The implementation sequence is M1 identity-safe
       storage, M2 trustworthy scheduled ingestion, M3 the first persisted
       study, and M4 completion of the historical program plus the full
-      opening-window and second studies. Optional product layers remain
-      outside the ladder until the owner promotes them.
+      opening-window and second studies. D-036 later adds M5 validation and M6 read-only scanning; a web UI
+      remains optional.
 - [x] Owner plan walk and approval (2026-08-27): M0 closed and the M1
       implementation gate opened.
 
@@ -349,8 +349,12 @@ Exit criteria:
   a 506-byte diagnostic status before a healthy rerun restored the standing
   4.9 KB status. The first actual timer-triggered post-market run completed on
   2026-09-01 with 1,623 fetched, 62 corporate-action refreshes, and 12 explicit
-  blockers; one further consecutive actual run remains, so this criterion stays
-  unchecked. The scheduler/status checkpoint passed
+  blockers. The replacement ongoing timer's first 2026-09-02 run did not become
+  terminal: two identity-split targets were incorrectly counted as progress
+  through 87 sweeps. D-034 fixes that loop with bounded retries and D-035 lets
+  healthy later datasets proceed before retry exhaustion; consecutive complete
+  replacement-timer runs remain, so this criterion stays unchecked.
+  The scheduler/status checkpoint passed
   `make check` with 188 tests before the phase-1 bootstrap work landed.
 - [x] Phase 1 ran through the persisted scheduler, its coverage and budget
   state survive restart, and `make check` passes.
@@ -404,6 +408,14 @@ Scope:
   outcome is classified mutually exclusively as evaluable or missing-outcome.
   Registered focused studies share the `research-run` CLI boundary, which
   labels its output as event evidence without portfolio/order semantics.
+- [ ] Apply [research-protocol.md](research-protocol.md) to the first study:
+  consistent price bases and checkpoint availability, a shared as-of feature
+  path, future-row/same-day-final-field perturbation tests, and split/dividend
+  boundary fixtures. Preserve the distinction between descriptive returns and
+  executable entry prices; the current callback interface is not an as-of sandbox.
+- [ ] Freeze chronological research/validation/test periods and trial tracking
+  before parameter search. Publish the cohort coverage/exclusion funnel and
+  missing-outcome sensitivity, with liquidity/year/stock-ETF/delisting slices.
 - [ ] Implement the coarse gap-recovery study using adjusted EOD prior close/open
   inputs and Tiingo's direct clock-hour checkpoints from 10:00 onward. Include
   stored SPY benchmark-relative evaluation and label the absent 09:30–09:59
@@ -430,6 +442,9 @@ Exit criteria:
   availability, remote history gaps do not exclude a locally complete event,
   missing outcomes remain auditable, and quality failures block publication as
   declared.
+- [ ] The study's protocol parameters, trial lineage, coverage funnel, and
+  causality/price-basis checks are persisted and exercised. An inconclusive or
+  negative result is a valid completed study; no profitability claim is required.
 - [ ] The CLI output and notebook state the direct-hourly and IEX-volume limits;
   benchmark conventions match the event observations; `make check` passes.
 
@@ -467,8 +482,8 @@ Scope:
   backward. D-032 extends unchanged authenticated current EOD listing anchors
   without a per-ticker metadata request; new/changed anchors remain fail-closed.
 - [x] Make each current dataset an independently resumable bounded sweep with
-  honest target/completed/excluded status. EOD runs first; hourly and
-  five-minute run in separate request-budget windows and every batch yields the
+  honest target/completed/excluded status. EOD gets the first healthy main
+  pass; hourly and five-minute run in separate request-budget windows and every batch yields the
   D-022 mutation lock. Completed 2026-09-01: current-mode scheduler jobs retain
   immutable targets, per-range progress, retryable failures, terminal
   exclusions, and shared current-work request/byte accounting. `ongoing run`
@@ -476,18 +491,26 @@ Scope:
   next XNYS session, checkpoints each bounded step, and writes
   target/cursor/sweep/exclusion status. The systemd template uses 1,000-turn
   API batches separated by six minutes and a one-second idle delay for
-  zero-request transitions. Missing current-session bars and cancellations are
-  terminal exclusions for that frozen cycle rather than permanent phase gates;
-  only the designated exit 3 is accepted by systemd as partial success.
-- [ ] The live metadata database was already migrated to schema v8 by an
-  enabled editable-install timer on 2026-09-02 and must not be downgraded.
-  After the human commit gate, initialize the production ongoing program,
-  replace the interim latest-universe-only EOD timer with the new overnight
-  timer, and measure complete end-to-end cycles. Confirm the 1,000-turn/six-
-  minute pacing leaves retry headroom under the 10,000/hour and 100,000/day
-  limits and finishes or checkpoints before the next morning decision window.
-  Adjust measured batch spacing if necessary; the broad collector must never
-  poll during the regular session.
+  zero-request transitions. D-034 gives transient failures and incomplete
+  current responses 40 unsuccessful cursor-yielding turns (roughly four hours at production
+  cadence) before terminally excluding their frozen-cycle ranges; deterministic
+  identity blockers and cancellations remain immediate exclusions. D-035
+  advances to the next dataset when only bounded retries remain, then
+  sweep-balances deferred retry turns after the healthy five-minute pass. New
+  monthly ranking snapshots omit incomplete EOD targets. Only the
+  designated exit 3 is accepted by systemd as partial success.
+- [ ] The production ongoing program was initialized and its replacement timer
+  enabled on 2026-09-02; the interim latest-universe-only EOD timer is disabled.
+  The first live cycle completed 13,154 EOD targets, retained 817 explicit
+  exclusions, and then stopped at the morning boundary because DOV and SORA
+  each repeated a ready identity prefix 87 times. D-034's correction is
+  implemented; those legacy successful-depth turns do not consume the new
+  failure allowance, and D-035 lets the intraday pipeline proceed during their
+  fresh bounded retry window. Measure complete recovery and subsequent
+  end-to-end cycles. Confirm the 1,000-turn/six-minute pacing leaves retry headroom under
+  the 10,000/hour and 100,000/day limits and finishes or checkpoints before the
+  next morning decision window. Adjust measured batch spacing if necessary;
+  the broad collector must never poll during the regular session.
 - [ ] Extend the gap study with exchange-calendar-filtered five-minute observations
   for the opening half-hour and other session-relative windows. Retain direct
   hourly results as their own vendor-frequency checkpoints; do not relabel them
@@ -495,6 +518,10 @@ Scope:
 - [ ] Run final coverage, identity-resolution, and blocking-quality reports for
   each phase. Targets that cannot be safely resolved remain explicit exclusions
   with evidence; milestone completion never authorizes guessed identity.
+- [ ] Measure stale/zero-volume bars and cross-frequency consistency on the
+  study cohort. Add volatility-normalized gaps, prior trend, and market-relative
+  controls using only decision-time inputs; report regime and stock/ETF slices.
+  Evaluate point-in-time earnings/action flags when available, retaining unknowns.
 - [ ] Compare the coarse and full study over their common instruments/sessions,
   publish the complete study as a new schema-versioned run, and update the
   example notebook with the full opening-window workflow.
@@ -524,19 +551,70 @@ Exit criteria:
 - [ ] The vision's end-to-end study and interactive-query success criteria are
   demonstrated on the target server, and `make check` passes.
 
+## M5 — Execution-aware validation  `pending`
+
+Goal: determine whether a discovered recovery pattern survives realistic fills,
+unseen periods, and the owner's fee-free 401(k) capital constraints. D-036 and
+[research-protocol.md](research-protocol.md) define the acceptance contract.
+
+Scope and exit criteria:
+
+- [ ] Add a focused simulator through the existing publication path, with
+  decision/entry delay, consistent price bases, target/stop/time exits, overnight
+  gaps, corporate actions, and explicit ambiguous/missing outcomes. Test all
+  boundaries with hand-calculated fixtures, including both barriers in one bar.
+- [ ] Default commissions and explicit trading fees to zero; publish a
+  frictionless reference and separately configurable spread/slippage scenarios
+  without double counting. Persist gross versus net target semantics.
+- [ ] Add long-only, unlevered portfolio accounting with explicit available
+  capital, position/concentration limits, simultaneous-signal priority, and
+  cash-reuse policy. Confirm actual account constraints before treating results
+  as account-feasible; label assumptions while those details remain unknown.
+- [ ] Publish expectancy, return tails, target-before-stop rates, time to target,
+  adverse/favorable excursions, exposure, utilization, turnover, and drawdown;
+  keep event statistics distinct from portfolio performance.
+- [ ] Run chronological walk-forward validation, purge overlapping training
+  outcomes, retain every parameter trial, and use time-block uncertainty and
+  parameter/regime stability checks. Evaluate frozen rules on untouched data.
+- [ ] Predeclare strategy promotion criteria, including robustness to costs,
+  coverage/missing outcomes, and concentration. Record pass/fail evidence;
+  no passing strategy is a valid research outcome, not grounds to tune the test.
+- [ ] Preserve promoted strategy code and decision features; snapshot required
+  inputs for exact reruns across warehouse revisions. `make check` passes.
+
+## M6 — Read-only opportunity scanning and shadow validation  `pending`
+
+Goal: apply frozen strategies using the same decision-time feature/signal code
+as historical replay, then measure actual signal arrival and coverage. This
+promotes the bounded tool, not a broker connection or automated execution.
+
+Scope and exit criteria:
+
+- [ ] Generate nightly ranked candidates and run bounded completed-five-minute
+  evaluation during strategy-defined monitoring hours. Measure missed unexpected
+  gaps; revisit scope explicitly if the candidate set is insufficient.
+- [ ] Before collection, specify source/identity, cadence/budget, freshness and
+  partial-bar rules, source/receipt timestamps, and a separate append-only
+  observation layout. Preserve canonical Tiingo bars and overnight scheduling.
+  A broker feed still requires its own approval and source decision.
+- [ ] Share features and signal definitions with replay. Persist versioned,
+  explainable alerts, input snapshots, expiry, deduplication and cooldown state.
+  Distinguish no opportunity, stale/unsupported data, and operational failure.
+- [ ] Offer CLI results first; external notification delivery and a web UI remain
+  separately scoped. Never place orders or read/mutate brokerage accounts.
+- [ ] Freeze a shadow-trial duration/event-count requirement and thresholds for
+  signal parity, latency, missed/duplicate alerts, and data coverage. Replay
+  first-seen inputs, record simulated outcomes, and publish the comparison.
+  Failed M5 strategies may exercise plumbing but cannot be labelled validated.
+- [ ] Offline replay/restart/freshness tests and `make check` pass. Publish measured
+  shadow evidence before calling the scanner ready for ongoing decision support.
+
 ## Work deliberately outside the committed ladder
 
-- After M3, the owner will revisit the proposed read-only web UI and realtime
-  research layer. If either is promoted, it gets a newly scoped milestone and
-  decision updates before implementation; neither is an implicit M4 task.
-- The likely first realtime shape is D-031's small owner-tagged morning
-  watchlist for triggering decisions. It may use Tiingo five-minute updates or
-  a broker's read-only market-data API, but it remains separate from the
-  overnight bulk collector and canonical Tiingo bars. Promotion requires its
-  own source, credential, freshness, and persistence decisions; broker order
-  or account mutation remains out of scope.
-- Corporate-action handling beyond Tiingo's adjusted columns is triggered by
-  a concrete study limitation. A stateful portfolio/order simulator is likewise
-  triggered only by a confirmed study that needs execution semantics.
-- Live or automated execution and non-US-stock/ETF assets remain non-goals,
-  not future milestones.
+- A web UI and a general realtime/streaming platform remain optional. M6 owns
+  only the bounded read-only scanner promoted by D-036.
+- A read-only broker market-data feed requires a separate source/credential
+  decision. No broker integration is authorized by promoting M6.
+- Automated order execution, account mutation, and non-US-stock/ETF assets
+  remain non-goals. Finer-than-five-minute storage requires measured need and
+  an explicit scope decision.
