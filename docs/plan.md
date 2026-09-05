@@ -573,9 +573,21 @@ Scope:
   them common with the coarse run), 574,580 observations. The descriptive
   opening-window result is weak and is not a strategy; figures stay in the
   gitignored catalog (rule 9).
-- [ ] Implement a second focused event study, selected with the owner at M4 start,
+- [x] Implement a second focused event study, selected with the owner at M4 start,
   through the same query, quality-gate, evaluation, and publication surfaces to
   prove the D-015 engine generalizes beyond gap recovery.
+  Selected 2026-09-05: the owner's question is which tickers or groups
+  overreact and recover more reliably than the pooled baseline over hours
+  or days. `gap_recovery_multiday` publishes adjusted-basis outcomes at the
+  event close and 1/2/3/5/10 sessions later for every stored EOD instrument
+  from 2007 (no intraday requirement), with a news-sized-gap proxy
+  (`min_abs_gap_vol_normalized`) standing in for the absent earnings source.
+  `market-data research-rank` is the two-pass backtest on any run: pass 1
+  freezes a candidate list on a selection window (shrunk hit rate above the
+  pooled baseline with enough events), pass 2 scores that list unchanged on a
+  later window, optionally rolling year by year; private `ticker,group` tags
+  aggregate both passes. Sector/industry and earnings dates need a source
+  decision (features.md).
 
 Exit criteria:
 
@@ -594,9 +606,9 @@ Exit criteria:
   early-close fixtures, and documents the measured effect of adding five-minute
   coverage relative to the coarse run (`tests/test_gap_recovery_opening.py`;
   the measured effect lives in the catalog comparison, not in this file).
-- [ ] The second study publishes through the same runner without a parallel
+- [x] The second study publishes through the same runner without a parallel
   framework or study-specific publication path, and its events and metrics
-  match a hand-calculated fixture.
+  match a hand-calculated fixture (`tests/test_gap_recovery_multiday.py`).
 - [ ] The vision's end-to-end study and interactive-query success criteria are
   demonstrated on the target server, and `make check` passes.
 

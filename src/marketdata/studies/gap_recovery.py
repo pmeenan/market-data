@@ -471,7 +471,9 @@ def _normalize_parameters(
         raise ValueError("min_adv_dollars must not be negative")
     if int(params["lookback_sessions"]) < 6:
         raise ValueError("lookback_sessions must be at least 6 for the trend feature")
-    if not 0.0 <= float(params["min_hourly_density"]) <= 1.0:
+    if "min_hourly_density" in params and not (
+        0.0 <= float(params["min_hourly_density"]) <= 1.0
+    ):
         raise ValueError("min_hourly_density must be between 0 and 1")
     if float(params["target_return"]) <= 0:
         raise ValueError("target_return must be positive")

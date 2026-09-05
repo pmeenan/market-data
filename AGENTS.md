@@ -147,9 +147,11 @@ catalog, D-015/D-026 event runner, the shared as-of feature path
 (`marketdata.features`), the coarse `gap_recovery` study, and the full
 five-minute `gap_recovery_opening` study (session-relative checkpoints from
 09:35, fidelity measurements, stock/ETF and regime slices, and a
-coarse-versus-full comparison) are implemented with frozen periods and
-causality tests; the M4 second study, M5 execution-aware validation, and M6
-read-only scanning are next. M1 closed 2026-08-27. See
+coarse-versus-full comparison), the multi-session `gap_recovery_multiday`
+study, and the two-pass `research-rank` propensity backtest (select on one
+window, score the frozen list on the next) are implemented with frozen
+periods and causality tests; M5 execution-aware validation and M6 read-only
+scanning are next. Sector and earnings sources are open proposals. M1 closed 2026-08-27. See
 [docs/plan.md](docs/plan.md).
 Keep this paragraph short and current when plan.md milestone status changes
 (rule 4).

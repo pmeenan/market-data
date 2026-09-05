@@ -91,6 +91,11 @@ from marketdata.store.bars import INTRADAY_FREQS
 from marketdata.studies import (
     load_private_studies,  # importing also registers the built-in studies
 )
+from marketdata.studies.propensity import (
+    format_two_pass,
+    two_pass_run,
+    write_two_pass,
+)
 from marketdata.tiingo import TiingoClient, TiingoError
 
 _DATA_OPERATION_ERRORS = (
@@ -1656,6 +1661,105 @@ def research_run_cmd(config: Config, study_name: str, parameters_json: str) -> N
     note = recorded.get("opening_interval_note")
     if note:
         click.echo(f"Limits: {note}; intraday volume is IEX-only, not composite")
+
+
+@main.command("research-rank")
+@click.argument("run_id")
+@click.option("--checkpoint", required=True, help="Observation label to score on")
+@click.option(
+    "--select-period",
+    default="development",
+    show_default=True,
+    help="Pass 1: frozen period whose events pick the candidate list",
+)
+@click.option(
+    "--evaluate-period",
+    default="validation",
+    show_default=True,
+    help="Pass 2: later period on which the fixed list is scored",
+)
+@click.option(
+    "--walk-forward-years",
+    type=click.IntRange(min=1),
+    default=None,
+    help=(
+        "Instead of two named periods, select on this many prior calendar "
+        "years and evaluate on each following year, over the run's non-test "
+        "history"
+    ),
+)
+@click.option("--min-events", type=click.IntRange(min=1), default=10, show_default=True)
+@click.option(
+    "--min-lift",
+    type=float,
+    default=0.05,
+    show_default=True,
+    help="Pass 1 keeps instruments whose shrunk hit rate beats the baseline by this",
+)
+@click.option(
+    "--prior-strength",
+    type=click.IntRange(min=0),
+    default=20,
+    show_default=True,
+    help="Pseudo-events pulling each instrument toward the window baseline",
+)
+@click.option(
+    "--tags",
+    type=click.Path(exists=True, dir_okay=False),
+    default=None,
+    help="Private ticker,group CSV for group aggregation",
+)
+@click.option("--top", type=click.IntRange(min=1), default=25, show_default=True)
+@click.option(
+    "--out",
+    type=click.Path(),
+    default=None,
+    help="Write the full candidate/evaluation tables (CSV or .parquet); keep under private/",
+)
+@click.pass_obj
+def research_rank_cmd(
+    config: Config,
+    run_id: str,
+    checkpoint: str,
+    select_period: str,
+    evaluate_period: str,
+    walk_forward_years: int | None,
+    min_events: int,
+    min_lift: float,
+    prior_strength: int,
+    tags: str | None,
+    top: int,
+    out: str | None,
+) -> None:
+    """Two-pass propensity backtest on a published run.
+
+    Pass 1 ranks instruments (and private groups) by shrunk recovery hit rate
+    on the selection window and freezes a candidate list. Pass 2 applies that
+    list, unchanged, to the later evaluation window and reports how it did
+    against the pooled baseline there. Descriptive only: no fills, no
+    portfolio.
+    """
+    _require_initialized_warehouse(config)
+    try:
+        result = two_pass_run(
+            config,
+            run_id,
+            checkpoint=checkpoint,
+            select_period=select_period,
+            evaluate_period=evaluate_period,
+            walk_forward_years=walk_forward_years,
+            min_events=min_events,
+            min_lift=min_lift,
+            prior_strength=prior_strength,
+            tags_path=tags,
+        )
+        if out:
+            write_two_pass(result, out)
+    except _DATA_OPERATION_ERRORS as exc:
+        raise click.ClickException(str(exc)) from exc
+    for line in format_two_pass(result, top=top):
+        click.echo(line)
+    click.echo("Descriptive propensity only; no execution, fill, or portfolio claim.")
 
 
 # ---- inspection ----------------------------------------------------------

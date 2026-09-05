@@ -491,6 +491,16 @@ the same artifacts:
 market-data research-run gap_recovery
 market-data research-run gap_recovery --parameters-json '{"gap_threshold": -0.05}'
 market-data research-run gap_recovery_opening   # five-minute opening-window study
+market-data research-run gap_recovery_multiday  # +0..+10 session outcomes, all EOD history
+```
+
+Which tickers or groups recover more reliably than the baseline is a two-pass
+question: select a candidate list on one window, then score that fixed list
+on a later window (or roll year by year). Group tags are a private CSV:
+
+```bash
+market-data research-rank RUN_ID --checkpoint close_plus_1_sessions --tags private/tags.csv
+market-data research-rank RUN_ID --checkpoint close_plus_1_sessions --walk-forward-years 3 --out private/rank.csv
 ```
 
 This repository is public. Run artifacts stay under gitignored `data/results/`,

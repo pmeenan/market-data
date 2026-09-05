@@ -15,6 +15,12 @@ from pathlib import Path
 
 from marketdata.research import register_event_study, registered_event_studies
 from marketdata.studies.gap_recovery import STUDY_NAME, run_gap_recovery_study
+from marketdata.studies.gap_recovery_multiday import (
+    STUDY_NAME as MULTIDAY_STUDY_NAME,
+)
+from marketdata.studies.gap_recovery_multiday import (
+    run_gap_recovery_multiday_study,
+)
 from marketdata.studies.gap_recovery_opening import (
     STUDY_NAME as OPENING_STUDY_NAME,
 )
@@ -27,6 +33,7 @@ PRIVATE_DIR_ENV = "MARKET_DATA_PRIVATE_DIR"
 
 register_event_study(STUDY_NAME, run_gap_recovery_study, replace=True)
 register_event_study(OPENING_STUDY_NAME, run_gap_recovery_opening_study, replace=True)
+register_event_study(MULTIDAY_STUDY_NAME, run_gap_recovery_multiday_study, replace=True)
 
 
 def private_studies_dir(root: str | os.PathLike[str] | None = None) -> Path:
@@ -72,6 +79,7 @@ def load_private_studies(
 __all__ = [
     "load_private_studies",
     "private_studies_dir",
+    "run_gap_recovery_multiday_study",
     "run_gap_recovery_opening_study",
     "run_gap_recovery_study",
 ]
