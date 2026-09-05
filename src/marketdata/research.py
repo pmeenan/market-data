@@ -27,11 +27,13 @@ from marketdata.quality import (
     MIN_ZERO_VOLUME_RUN_LENGTH,
     NONLOCAL_EVENT_GATE_CHECKS,
     QUALITY_CHECKS,
+    QUALITY_DUCKDB_MEMORY_LIMIT,
     QualityCheck,
     QualityGateResult,
     QualityReport,
     check_quality,
     evaluate_quality,
+    require_memory_limit,
 )
 from marketdata.research_layout import (
     ResearchRunLayout,
@@ -112,6 +114,7 @@ class EventQualityPolicy:
     start: date
     end: date
     zero_volume_run_length: int = DEFAULT_ZERO_VOLUME_RUN_LENGTH
+    memory_limit: str | None = None
 
 
 @dataclass(frozen=True)
@@ -394,6 +397,8 @@ def run_event_study(
             "start": normalized_quality.start.isoformat(),
             "end": normalized_quality.end.isoformat(),
             "zero_volume_run_length": normalized_quality.zero_volume_run_length,
+            "memory_limit": normalized_quality.memory_limit
+            or QUALITY_DUCKDB_MEMORY_LIMIT,
             "empty_row_checks": "vacuously_checked",
         },
         "semantics": "event_study_without_portfolio_or_order_simulation",
@@ -443,6 +448,7 @@ def run_event_study(
                 end=normalized_quality.end,
                 zero_volume_run_length=normalized_quality.zero_volume_run_length,
                 empty_row_checks_are_run=True,
+                memory_limit=normalized_quality.memory_limit,
             )
             quality_gate = evaluate_quality(
                 quality_report, normalized_quality.blocking_checks
@@ -725,6 +731,11 @@ def _normalize_event_quality_policy(
         start=policy.start,
         end=policy.end,
         zero_volume_run_length=policy.zero_volume_run_length,
+        memory_limit=(
+            require_memory_limit(policy.memory_limit)
+            if policy.memory_limit is not None
+            else None
+        ),
     )
 
 

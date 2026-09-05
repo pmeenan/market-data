@@ -1,6 +1,9 @@
 # Local data warehouse (Parquet bars, SQLite metadata) - never commit
 data/
 
+# Private strategies, notebooks, and analysis - never commit (public repo)
+private/
+
 # Secrets
 .env
 

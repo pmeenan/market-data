@@ -32,7 +32,7 @@ import polars as pl
 from marketdata.calendar import expected_intraday_labels, session_schedule
 
 DEFAULT_LOOKBACK_SESSIONS = 20
-_HOURLY_BARS_PER_SESSION = 6
+_FULL_SESSION_BARS = {"1hour": 6, "5min": 78}
 
 
 def register_eod_decision_features(
@@ -57,7 +57,8 @@ def register_eod_decision_features(
     - ``realized_vol`` — sample standard deviation of prior adjusted-close log
       returns over the window.
     - ``prior_5_return`` — adjusted close five sessions before the prior
-      close to the prior close.
+      close to the prior close; ``prior_window_return`` is the same over the
+      full ``lookback_sessions`` window.
     - ``gap_return`` — ``adj_open / prior_adj_close - 1``.
     - ``gap_vol_normalized`` — ``gap_return / realized_vol`` (null when the
       volatility is zero or unavailable).
@@ -76,6 +77,7 @@ def register_eod_decision_features(
                        lag(close) OVER w AS prior_close_raw,
                        lag(adj_close) OVER w AS prior_adj_close,
                        lag(adj_close, 6) OVER w AS adj_close_6_back,
+                       lag(adj_close, {n}) OVER w AS adj_close_window_back,
                        lag(date, {n}) OVER w AS lookback_start_date,
                        count(*) OVER (
                            PARTITION BY instrument_id ORDER BY date
@@ -106,6 +108,10 @@ def register_eod_decision_features(
                    CASE WHEN adj_close_6_back IS NOT NULL AND adj_close_6_back > 0
                         THEN prior_adj_close / adj_close_6_back - 1.0 END
                        AS prior_5_return,
+                   CASE WHEN adj_close_window_back IS NOT NULL
+                             AND adj_close_window_back > 0
+                        THEN prior_adj_close / adj_close_window_back - 1.0 END
+                       AS prior_window_return,
                    CASE WHEN prior_adj_close IS NOT NULL AND prior_adj_close > 0
                         THEN adj_open / prior_adj_close - 1.0 END AS gap_return,
                    CASE WHEN prior_adj_close IS NOT NULL AND prior_adj_close > 0
@@ -135,35 +141,41 @@ def register_session_opens(
     return view_name
 
 
-def register_hourly_density_features(
+def register_intraday_density_features(
     con: duckdb.DuckDBPyConnection,
     start: date,
     end: date,
     *,
-    view_name: str = "hourly_density_features",
-    hourly_view: str = "intraday_1hour",
+    freq: str,
+    view_name: str | None = None,
     eod_view: str = "eod",
     lookback_sessions: int = DEFAULT_LOOKBACK_SESSIONS,
 ) -> str:
-    """Create a per-(instrument, session) prior-window IEX hourly density view.
+    """Create a per-(instrument, session) prior-window IEX bar density view.
 
-    ``hourly_density`` is the share of the expected regular-session direct
-    hourly labels (six per full session from 10:00 New York time) over the
-    prior ``lookback_sessions`` EOD sessions that are stored with non-zero IEX
-    volume. Sessions with no hourly rows count as zero, so a thin or missing
-    IEX history lowers the density instead of hiding. The window ends at the
-    prior session; the decision session's bars are never read.
+    ``hourly_density`` (or ``five_min_density``) is the share of the expected regular-session labels for
+    that exact frequency (six direct hourly bins from 10:00 New York time, or
+    78 five-minute bins from 09:30, fewer on early closes) over the prior
+    ``lookback_sessions`` EOD sessions that are stored with non-zero IEX
+    volume. Sessions with no rows count as zero, so a thin or missing IEX
+    history lowers the density instead of hiding. The window ends at the prior
+    session; the decision session's bars are never read.
     """
+    if freq not in _FULL_SESSION_BARS:
+        raise ValueError(f"unsupported intraday frequency {freq!r}")
     if lookback_sessions < 1:
         raise ValueError("lookback_sessions must be at least 1")
     n = int(lookback_sessions)
+    view_name = view_name or f"density_features_{freq}"
+    density_column = "hourly_density" if freq == "1hour" else "five_min_density"
+    bars_view = f"intraday_{freq}"
     schedule = session_schedule(start, end)
     first_open = schedule["session_open"].min()
     last_close = schedule["session_close"].max()
     if first_open is None or last_close is None:
         labels = pl.DataFrame(schema={"ts": pl.Datetime("us", "UTC")})
     else:
-        labels = expected_intraday_labels(first_open, last_close, freq="1hour")
+        labels = expected_intraday_labels(first_open, last_close, freq=freq)
     labels = labels.with_columns(
         pl.col("ts")
         .dt.convert_time_zone("America/New_York")
@@ -180,14 +192,14 @@ def register_hourly_density_features(
             per_session AS (
                 SELECT bars.instrument_id, labels.session_date,
                        count(*) FILTER (WHERE bars.volume > 0) AS traded_bars
-                FROM {hourly_view} AS bars
+                FROM {bars_view} AS bars
                 JOIN _{view_name}_labels AS labels ON labels.ts = bars.ts
                 GROUP BY bars.instrument_id, labels.session_date
             ),
             joined AS (
                 SELECT eod.instrument_id, eod.date,
                        coalesce(per_session.traded_bars, 0) AS traded_bars,
-                       coalesce(expected.expected_bars, {_HOURLY_BARS_PER_SESSION})
+                       coalesce(expected.expected_bars, {_FULL_SESSION_BARS[freq]})
                            AS expected_bars
                 FROM {eod_view} AS eod
                 LEFT JOIN per_session
@@ -200,7 +212,7 @@ def register_hourly_density_features(
                    sum(expected_bars) OVER w AS prior_expected_bars,
                    CASE WHEN sum(expected_bars) OVER w > 0
                         THEN sum(traded_bars) OVER w * 1.0 / sum(expected_bars) OVER w
-                        END AS hourly_density
+                        END AS {density_column}
             FROM joined
             WINDOW w AS (
                 PARTITION BY instrument_id ORDER BY date
@@ -208,3 +220,27 @@ def register_hourly_density_features(
             )"""
     )
     return view_name
+
+
+def register_hourly_density_features(
+    con: duckdb.DuckDBPyConnection,
+    start: date,
+    end: date,
+    *,
+    view_name: str = "hourly_density_features",
+    hourly_view: str = "intraday_1hour",
+    eod_view: str = "eod",
+    lookback_sessions: int = DEFAULT_LOOKBACK_SESSIONS,
+) -> str:
+    """Direct-hourly convenience wrapper over :func:`register_intraday_density_features`."""
+    if hourly_view != "intraday_1hour":
+        raise ValueError("hourly density reads the canonical intraday_1hour view")
+    return register_intraday_density_features(
+        con,
+        start,
+        end,
+        freq="1hour",
+        view_name=view_name,
+        eod_view=eod_view,
+        lookback_sessions=lookback_sessions,
+    )

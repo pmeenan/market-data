@@ -121,6 +121,14 @@ build → commit loop, on-demand reviews, and the human commit gate.
 8. **Scratch files stay out of the tree.** Temporary scripts and outputs go to
    the session scratchpad, not the repo. Delete throw-away diagnostics before
    concluding.
+9. **This repository is public; strategies and results are not.** Run
+   artifacts live under gitignored `data/results/`. Refined or promising
+   strategies, their parameters, and analysis notebooks go in the gitignored
+   `private/` tree (`private/studies/*.py` modules self-register through
+   `register_event_study` and are loaded by `research-run`). Docs may state
+   that a study ran and whether it succeeded, plus coarse funnel counts, but
+   not checkpoint-level returns, thresholds that took search to find, or
+   anything that reveals a working edge. Committed notebooks carry no outputs.
 
 ## Current status
 
@@ -136,9 +144,11 @@ reused-then-singleton listings were excluded from EOD, and META's metadata
 route needed uppercase. `market-data doctor` surfaces those conditions; the
 first two post-fix cycles still need to be measured. Research: the D-016
 catalog, D-015/D-026 event runner, the shared as-of feature path
-(`marketdata.features`), and the coarse `gap_recovery` study with frozen
-periods, density screen, and causality tests are implemented; the M4
-five-minute opening-window extension, M5 execution-aware validation, and M6
+(`marketdata.features`), the coarse `gap_recovery` study, and the full
+five-minute `gap_recovery_opening` study (session-relative checkpoints from
+09:35, fidelity measurements, stock/ETF and regime slices, and a
+coarse-versus-full comparison) are implemented with frozen periods and
+causality tests; the M4 second study, M5 execution-aware validation, and M6
 read-only scanning are next. M1 closed 2026-08-27. See
 [docs/plan.md](docs/plan.md).
 Keep this paragraph short and current when plan.md milestone status changes

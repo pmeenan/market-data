@@ -451,14 +451,9 @@ Exit criteria:
   a `succeeded` catalog row, manifest, observations, parameters, and summary
   metrics that are queryable together through DuckDB. First real run
   2026-09-05 (`c76b25cf8d574f36aabef2866cbc02cc`, 41 s): 79,149 candidates,
-  72,812 eligible (6,337 lookback-incomplete), 67,739 selected after the
-  density screen, 688 with a missing checkpoint; 474,173 observations. The
-  descriptive result is weak: in the validation period (2023–2024, 9,701
-  events with gap ≤ −3% and ADV ≥ $50M) the median return from the raw open
-  is +0.15% at the 10:00 bar close and +0.21% at the session close, the
-  ≥1% hit rate is 36–41% at every checkpoint, the mean excess over SPY is
-  +0.1 to +0.2%, and the mean raw-basis recovered gap fraction is 0.03–0.06.
-  Test-period events (2025+) are observed but not summarized.
+  72,812 eligible, 67,739 selected, 474,173 observations. The descriptive
+  result is weak and not a strategy; checkpoint-level figures stay in the
+  gitignored catalog under `data/results/`, not in this public repository.
 - [ ] Tests inject failures before and after each publication boundary and prove
   that only complete compatible runs load, successful runs are immutable,
   retries receive new ids, and input-fingerprint checks detect changed source
@@ -542,20 +537,42 @@ Scope:
   the 10,000/hour and 100,000/day limits and finishes or checkpoints before the
   next morning decision window. Adjust measured batch spacing if necessary;
   the broad collector must never poll during the regular session.
-- [ ] Extend the gap study with exchange-calendar-filtered five-minute observations
+- [x] Extend the gap study with exchange-calendar-filtered five-minute observations
   for the opening half-hour and other session-relative windows. Retain direct
   hourly results as their own vendor-frequency checkpoints; do not relabel them
   as session-aligned aggregates.
+  Completed 2026-09-05: `gap_recovery_opening` publishes ten session-relative
+  checkpoints from the 09:30 bar close (available 09:35) through the 15:55 bar
+  close, each with returns from the opening print and from the first
+  completed bar, excursions, SPY excess, and explicit missing outcomes on
+  early closes or absent bars. Direct hourly closes are joined only to
+  measure agreement with the five-minute close at the same minute.
 - [ ] Run final coverage, identity-resolution, and blocking-quality reports for
   each phase. Targets that cannot be safely resolved remain explicit exclusions
   with evidence; milestone completion never authorizes guessed identity.
-- [ ] Measure stale/zero-volume bars and cross-frequency consistency on the
+- [x] Measure stale/zero-volume bars and cross-frequency consistency on the
   study cohort. Add volatility-normalized gaps, prior trend, and market-relative
   controls using only decision-time inputs; report regime and stock/ETF slices.
-  Evaluate point-in-time earnings/action flags when available, retaining unknowns.
-- [ ] Compare the coarse and full study over their common instruments/sessions,
+  Completed 2026-09-05 for everything except earnings flags (no point-in-time
+  source; unknown stays unknown, D-036): every observation carries the
+  zero-volume bar count through its checkpoint and the hourly/five-minute
+  close agreement, the runner publishes both as per-checkpoint metrics
+  (agreement was exact on every compared event of the first run), and
+  volatility-normalized gap, prior 5/20-session returns, SPY gap, SPY
+  realized-volatility regime, and SPY trend are decision-time features with
+  stock/ETF, regime, and trend metric slices.
+- [x] Compare the coarse and full study over their common instruments/sessions,
   publish the complete study as a new schema-versioned run, and update the
   example notebook with the full opening-window workflow.
+  Completed 2026-09-05: `compare_gap_studies` pairs common events at the six
+  shared availability times and summarizes the opening-window checkpoints
+  only the five-minute study can see; the notebook runs both studies and the
+  comparison. First full run `1f0a7c27880c4cfd88ee2ca97ab21a53` (10 min,
+  24 GB DuckDB cap for the quality scan): 79,149 candidates, 72,780
+  eligible, 57,458 selected after the five-minute density screen (all of
+  them common with the coarse run), 574,580 observations. The descriptive
+  opening-window result is weak and is not a strategy; figures stay in the
+  gitignored catalog (rule 9).
 - [ ] Implement a second focused event study, selected with the owner at M4 start,
   through the same query, quality-gate, evaluation, and publication surfaces to
   prove the D-015 engine generalizes beyond gap recovery.
@@ -572,10 +589,11 @@ Exit criteria:
   the accepted rolling top-5,000 snapshot. The snapshot provenance,
   new/removed membership, per-dataset sweep progress, budget stops, and
   fail-closed exclusions are queryable and present in bounded operator status.
-- [ ] The full study publishes validated opening-half-hour and later-window
+- [x] The full study publishes validated opening-half-hour and later-window
   observations through the M3 result path, passes hand-calculated session and
   early-close fixtures, and documents the measured effect of adding five-minute
-  coverage relative to the coarse run.
+  coverage relative to the coarse run (`tests/test_gap_recovery_opening.py`;
+  the measured effect lives in the catalog comparison, not in this file).
 - [ ] The second study publishes through the same runner without a parallel
   framework or study-specific publication path, and its events and metrics
   match a hand-calculated fixture.

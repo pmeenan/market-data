@@ -342,3 +342,24 @@ def test_parameters_are_validated_before_any_run(tmp_path):
         )
     with pytest.raises(ValueError, match="benchmark"):
         run_gap_recovery_study(config, {**_PARAMS, "benchmark_ticker": "NOPE"})
+
+
+def test_private_studies_load_from_a_gitignored_directory(tmp_path, monkeypatch):
+    from marketdata.studies import load_private_studies
+
+    assert load_private_studies(tmp_path / "absent") == ()
+    studies = tmp_path / "private" / "studies"
+    studies.mkdir(parents=True)
+    (studies / "_helpers.py").write_text("raise AssertionError('not loaded')\n")
+    (studies / "secret_edge.py").write_text(
+        "from marketdata.research import register_event_study\n"
+        "def run(config, parameters):\n"
+        "    raise NotImplementedError\n"
+        "register_event_study('secret_edge', run, replace=True)\n"
+    )
+
+    monkeypatch.setenv("MARKET_DATA_PRIVATE_DIR", str(tmp_path / "private"))
+    assert load_private_studies() == ("secret_edge",)
+    assert "secret_edge" in registered_event_studies()
+    # Reloading is idempotent because the module replaces its registration.
+    assert load_private_studies() == ()

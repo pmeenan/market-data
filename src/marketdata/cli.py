@@ -89,7 +89,7 @@ from marketdata.scheduler import (
 from marketdata.store import BarStore, MetaStore
 from marketdata.store.bars import INTRADAY_FREQS
 from marketdata.studies import (
-    run_gap_recovery_study,  # noqa: F401  (registers built-ins)
+    load_private_studies,  # importing also registers the built-in studies
 )
 from marketdata.tiingo import TiingoClient, TiingoError
 
@@ -1641,6 +1641,7 @@ def research_run_cmd(config: Config, study_name: str, parameters_json: str) -> N
     if not isinstance(parameters, dict):
         raise click.ClickException("--parameters-json must decode to a JSON object")
     try:
+        load_private_studies()
         published = run_registered_event_study(config, study_name, parameters)
     except _DATA_OPERATION_ERRORS as exc:
         raise click.ClickException(str(exc)) from exc

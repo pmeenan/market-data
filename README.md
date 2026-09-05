@@ -490,7 +490,14 @@ the same artifacts:
 ```bash
 market-data research-run gap_recovery
 market-data research-run gap_recovery --parameters-json '{"gap_threshold": -0.05}'
+market-data research-run gap_recovery_opening   # five-minute opening-window study
 ```
+
+This repository is public. Run artifacts stay under gitignored `data/results/`,
+and refined strategies belong in the gitignored `private/` tree:
+`private/studies/*.py` modules that call `register_event_study` are loaded by
+`research-run` automatically (`MARKET_DATA_PRIVATE_DIR` relocates the tree).
+Docs record that a study ran and its coarse funnel, not its returns.
 
 ## Start here
 

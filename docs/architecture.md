@@ -502,8 +502,9 @@ that feature boundary lands. EOD adjusted and intraday raw prices must never
 be mixed in a return. Bar-close availability is at the interval end.
 
 `marketdata.features` is the shared as-of feature boundary (D-036/D-037):
-it registers prior-window EOD features, XNYS session opens, and IEX hourly
-density views on any DuckDB connection exposing the canonical views, so the
+it registers prior-window EOD features, XNYS session opens, and IEX bar
+density views (direct hourly and five-minute) on any DuckDB connection
+exposing the canonical views, so the
 event runner's explicit-file inputs and a future scanner's nightly snapshot
 evaluate identical SQL. Every window ends at the prior completed session; the
 decision session contributes only its explicitly timestamped open.

@@ -1161,6 +1161,22 @@ class MetaStore:
             )
         return bool(alias_cursor.rowcount or vendor_cursor.rowcount)
 
+    def instrument_asset_types(self) -> dict[str, str]:
+        """Map every instrument to its dominant alias asset type (or 'unknown')."""
+        rows = self._con.execute(
+            """SELECT instrument_id, asset_type, count(*) AS n
+               FROM instrument_aliases
+               GROUP BY instrument_id, asset_type
+               ORDER BY instrument_id, n DESC, asset_type"""
+        ).fetchall()
+        result: dict[str, str] = {}
+        for row in rows:
+            instrument_id = str(row["instrument_id"])
+            if instrument_id in result:
+                continue
+            result[instrument_id] = str(row["asset_type"] or "").strip() or "unknown"
+        return result
+
     def instrument_has_coverage(self, instrument_id: str) -> bool:
         """Whether any dataset has stored canonical bars for this instrument."""
         return (

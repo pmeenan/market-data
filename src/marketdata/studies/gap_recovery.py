@@ -450,11 +450,16 @@ def _period_expression(periods: Mapping[str, tuple[date, date]]) -> pl.Expr:
     return expression.otherwise(pl.lit("unassigned"))
 
 
-def _normalize_parameters(parameters: Mapping[str, Any]) -> dict[str, Any]:
-    unknown = sorted(set(parameters) - set(DEFAULT_PARAMETERS))
+def _normalize_parameters(
+    parameters: Mapping[str, Any],
+    defaults: Mapping[str, Any] = DEFAULT_PARAMETERS,
+    *,
+    study_name: str = STUDY_NAME,
+) -> dict[str, Any]:
+    unknown = sorted(set(parameters) - set(defaults))
     if unknown:
-        raise ValueError(f"unknown gap_recovery parameters: {unknown}")
-    params: dict[str, Any] = {**DEFAULT_PARAMETERS, **dict(parameters)}
+        raise ValueError(f"unknown {study_name} parameters: {unknown}")
+    params: dict[str, Any] = {**defaults, **dict(parameters)}
     start = date.fromisoformat(str(params["start"]))
     end = date.fromisoformat(str(params["end"]))
     if start > end:

@@ -7,6 +7,7 @@ returned to Python.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -42,6 +43,7 @@ _CheckRequirement = Literal["rows", "coverage", "subjects"]
 DEFAULT_ZERO_VOLUME_RUN_LENGTH = 5
 MIN_ZERO_VOLUME_RUN_LENGTH = 2
 QUALITY_DUCKDB_MEMORY_LIMIT = "4GB"
+_MEMORY_LIMIT = re.compile(r"^[0-9]+(\.[0-9]+)?\s*(KB|MB|GB|TB|KiB|MiB|GiB|TiB)$", re.I)
 _SAMPLE_LIMIT = 10
 _RAW_OHLC_COLUMNS = ("open", "high", "low", "close")
 _ADJUSTED_OHLC_COLUMNS = ("adj_open", "adj_high", "adj_low", "adj_close")
@@ -166,6 +168,14 @@ class _CheckSpec:
     runner: Callable[[_DatasetContext], list[QualityFinding]]
 
 
+def require_memory_limit(value: str) -> str:
+    """Validate a DuckDB memory-limit literal such as ``'24GB'``."""
+    normalized = str(value).strip()
+    if not _MEMORY_LIMIT.match(normalized):
+        raise ValueError(f"invalid DuckDB memory limit {value!r}")
+    return normalized
+
+
 def check_quality(
     config: Config,
     *,
@@ -175,13 +185,17 @@ def check_quality(
     end: date | str | None = None,
     zero_volume_run_length: int = DEFAULT_ZERO_VOLUME_RUN_LENGTH,
     empty_row_checks_are_run: bool = False,
+    memory_limit: str | None = None,
 ) -> QualityReport:
     """Scan canonical bars and return structured, non-repairing findings.
 
     ``empty_row_checks_are_run`` is for consumers whose explicit empty scope
     makes row predicates vacuously complete. Coverage/subject checks retain
-    their ordinary fail-closed behavior.
+    their ordinary fail-closed behavior. ``memory_limit`` is the DuckDB cap
+    for this scan (default ``QUALITY_DUCKDB_MEMORY_LIMIT``); a study over the
+    full five-minute archive needs more than the CLI default.
     """
+    memory_limit = require_memory_limit(memory_limit or QUALITY_DUCKDB_MEMORY_LIMIT)
     normalized_datasets = _normalize_dataset_keys(dataset_keys)
     normalized_ids = _normalize_instrument_ids(instrument_ids)
     start_date = _as_date(start)
@@ -218,7 +232,10 @@ def check_quality(
     with TemporaryDirectory(prefix="quality-", dir=temp_root) as quality_temp:
         con = connect(config)
         con.execute(f"SET temp_directory = {_sql_string(quality_temp)}")
-        con.execute(f"SET memory_limit = {_sql_string(QUALITY_DUCKDB_MEMORY_LIMIT)}")
+        con.execute(f"SET memory_limit = {_sql_string(memory_limit)}")
+        # Findings are aggregated and sorted explicitly; row order never
+        # matters, and dropping it lets large scans spill instead of failing.
+        con.execute("SET preserve_insertion_order = false")
         try:
             for dataset_key in normalized_datasets:
                 _require_check_schema_coverage(dataset_key)
