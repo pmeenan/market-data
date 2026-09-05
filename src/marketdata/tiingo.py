@@ -372,7 +372,10 @@ class TiingoClient:
         )
 
     def ticker_metadata(self, ticker: str) -> dict[str, Any]:
-        return self._get_json(f"/tiingo/daily/{ticker.lower()}")
+        # Tiingo routes a lowercase ``/tiingo/daily/meta`` to a different
+        # handler and returns 404, while ``/tiingo/daily/META`` resolves the
+        # listing (RE-013). The price endpoints accept either case.
+        return self._get_json(f"/tiingo/daily/{ticker.strip().upper()}")
 
     def supported_tickers(
         self, tickers: Collection[str] | None = None

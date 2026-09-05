@@ -124,36 +124,22 @@ build → commit loop, on-demand reviews, and the human commit gate.
 
 ## Current status
 
-Milestones **M2 (trustworthy scheduled ingestion)**, **M3 (first persisted
-study)**, and **M4 (full opening-window study and historical program)** are in
-progress. Cap-safe
-next-session IEX planning and the XNYS session-label surface are implemented;
-structured quality findings, consumer-declared gates, durable request budgets,
-current-first breadth-first scheduling, and shared data-directory mutation
-locking are also implemented. The terminal phase-1 seed jobs fetched 282 EOD
-histories, repaired 62 reused symbols into 125 inferred episodes, and validated
-4,316 exact-frequency hourly IEX segments. D-027's enabled program timer has
-replaced both fixed phase-1 timers, frozen an immutable 23,078-instrument
-supported-US phase-2 cohort, completed its safe EOD work with accepted
-exclusions, and completed phase-3 five-minute history with accepted fail-closed
-exclusions. D-030/D-031's schema-v8 overnight all-active EOD and monthly
-top-5,000 hourly/five-minute collector is initialized and its replacement timer
-is enabled; the interim current-EOD timer is disabled. Its first 2026-09-02
-cycle completed 13,154 EOD targets and excluded 817, but two identity-split
-targets repeated until the morning boundary. D-034 now requires real
-coverage-edge movement for partial progress and full-cycle coverage for
-completion and gives retryable targets 40 unsuccessful breadth-first turns. D-035 advances
-healthy later datasets once only retries remain, then sweep-balances deferred
-attempts before terminal exclusion. The next scheduled run will give the two
-legacy targets a fresh bounded retry window while continuing into intraday;
-complete measured EOD/hourly/five-minute cycles remain.
-External failure notification is optional for this personal deployment.
-M1 closed on 2026-08-27. Production ingestion is permitted only for validated
-request segments; unresolved work remains fail-closed. M3's D-016 result
-catalog, immutable artifact publication, input fingerprints, compatible DuckDB
-loading, explicit interrupted-run reconciliation, and D-015/D-026 local-window
-event runner are implemented; the coarse gap-recovery study is next. D-036
-adds pending M5 execution-aware validation and M6 read-only scanning for the owner's fee-free 401(k). See
+**M3 (first persisted study)** is the active milestone; **M2** and **M4**
+remain in progress but, per D-037, the ingestion/identity/scheduling
+substrate is frozen to bug fixes until M3 publishes and the owner reviews it.
+The historical archive is complete with accepted exclusions (EOD from 2006
+for 22,947 instruments; seed hourly and five-minute from 2016-12-12). The
+D-030 overnight collector and its timer are live; its first 2026-09-02 cycle
+exposed three defects fixed on 2026-09-05 (D-037): adjacent identifier rows
+split current planner units so no legacy intraday member advanced,
+reused-then-singleton listings were excluded from EOD, and META's metadata
+route needed uppercase. `market-data doctor` surfaces those conditions; the
+first two post-fix cycles still need to be measured. Research: the D-016
+catalog, D-015/D-026 event runner, the shared as-of feature path
+(`marketdata.features`), and the coarse `gap_recovery` study with frozen
+periods, density screen, and causality tests are implemented; the M4
+five-minute opening-window extension, M5 execution-aware validation, and M6
+read-only scanning are next. M1 closed 2026-08-27. See
 [docs/plan.md](docs/plan.md).
 Keep this paragraph short and current when plan.md milestone status changes
 (rule 4).

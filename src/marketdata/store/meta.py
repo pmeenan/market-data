@@ -1161,6 +1161,16 @@ class MetaStore:
             )
         return bool(alias_cursor.rowcount or vendor_cursor.rowcount)
 
+    def instrument_has_coverage(self, instrument_id: str) -> bool:
+        """Whether any dataset has stored canonical bars for this instrument."""
+        return (
+            self._con.execute(
+                "SELECT 1 FROM coverage WHERE instrument_id = ? LIMIT 1",
+                (instrument_id,),
+            ).fetchone()
+            is not None
+        )
+
     def remove_uncovered_archive_episode(self, instrument_id: str) -> None:
         """Fail closed when a formerly archive-bound singleton needs validation."""
         episode = self._con.execute(
@@ -2774,6 +2784,13 @@ class MetaStore:
             )
         }
 
+    def request_rate_usage(self, *, now: datetime) -> dict[str, int]:
+        """Return rolling one-hour and one-day request counts for rate checks."""
+        usage = self._request_window_usage(
+            now=now, billing_month_start=tiingo_billing_month_start(now)
+        )
+        return {key: usage[key] for key in ("hourly_requests", "daily_requests")}
+
     def _request_window_usage(
         self, *, now: datetime, billing_month_start: datetime
     ) -> dict[str, int]:
@@ -2866,6 +2883,21 @@ class MetaStore:
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (normalized_id, *definition, now, now),
             )
+
+    def uniquely_resolving_tickers(self, session: date) -> set[str]:
+        """Tickers whose alias rows cover ``session`` for exactly one instrument."""
+        rows = self._con.execute(
+            """SELECT ticker FROM instrument_aliases
+               WHERE start_date <= ? AND end_date >= ?
+               GROUP BY ticker HAVING count(DISTINCT instrument_id) = 1""",
+            (session.isoformat(), session.isoformat()),
+        ).fetchall()
+        return {str(row["ticker"]) for row in rows}
+
+    def ongoing_programs(self) -> list[sqlite3.Row]:
+        return self._con.execute(
+            "SELECT * FROM ongoing_programs ORDER BY program_id"
+        ).fetchall()
 
     def ongoing_program(self, program_id: str) -> sqlite3.Row | None:
         return self._con.execute(

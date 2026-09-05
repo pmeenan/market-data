@@ -19,6 +19,73 @@ history is the archive. D-numbers are never reused.
 Format:
 
 ```
+## D-037: Research first; the ingestion substrate is frozen to bug fixes  (2026-09-05, status: accepted, amends D-014, D-024, D-030, and D-032)
+
+**Decision:** Until M3 publishes and the owner reviews a first study result,
+ingestion, identity, and scheduling code accept bug fixes only; no new
+collector features, phases, or scheduling policies. Research work uses the
+data already stored (EOD from 2006, seed hourly/five-minute from 2016-12-12)
+and the shared as-of feature path in `marketdata.features`, which is the one
+feature boundary both historical replay and the M6 scanner must call.
+
+Three live collector defects found in the 2026-09-05 review are fixed under
+this entry:
+
+1. *Adjacent validated identifier rows are one authorization.* Exact-frequency
+   probes (D-024) register a separate `vendor_identifiers` row per validated
+   bridge. The request planner now coalesces abutting `ready` segments that
+   share an identifier (an empty or weekend-only gap between them). Before,
+   the current-cycle unit was cut at the old row's end, refetched the already
+   covered overlap week, never advanced coverage, and retried 40 times per
+   member: 2,826 of 2,836 legacy hourly and five-minute cohort members were
+   stuck and the loop consumed 87k–96k of the 100k daily requests on
+   2026-09-04/05.
+2. *Covered archive-bound singletons upgrade in place.* When Tiingo's archive
+   drops a stale record so a reused ticker becomes a singleton, the bootstrap
+   used to delete the episode before metadata validation, which fails closed
+   for any instrument with coverage. 811 active listings (SNDK, DELL, SNOW,
+   CEG, MRNA, DOW, SIRI among them) were excluded from every EOD cycle. The
+   metadata check now tolerates an `endDate` that lags the archive by at most
+   seven days (`METADATA_END_DATE_LAG_DAYS`); ticker, exchange, and startDate
+   still must match exactly. This narrows D-014/D-032's "date envelope must
+   agree" to the immutable fields.
+3. *Ticker case on the metadata route.* `/tiingo/daily/meta` is a different
+   Tiingo route than `/tiingo/daily/META` (RE-013); the client now uppercases
+   metadata requests. META had never been registered.
+
+`market-data doctor` reports request rate against Tiingo's limits, current
+targets retrying without progress, frozen-target exclusions, cohort coverage
+freshness by rank, and active listings that resolve to no instrument. It
+exits 1 on an error-level finding so a timer or alias can gate on it.
+
+**Context:** After ten days the project held 17.7k lines of ingestion code
+and no strategy evidence, while the first live ongoing cycle was failing in
+ways visible only by reading SQLite by hand. Measured IEX five-minute bar
+fidelity in 2025 also bounds how far intraday research can go with this feed:
+zero-volume regular-session bars were 5.8% for the top 100 cohort ranks, 7.9%
+for ranks 101–500, 12.1% for 501–1,000, 19.1% for 1,001–2,000, and 38.1% for
+2,001–5,000. A zero-volume IEX bar is a carried-forward print, not a tradable
+price.
+
+**Consequences:** The coarse gap-recovery study is a registered built-in
+(`market-data research-run gap_recovery`) with frozen chronological periods,
+a decision-time IEX hourly density screen (`min_hourly_density`, default 0.9,
+measured over the prior window only), corporate-action flags, benchmark
+excess returns, missing-outcome sensitivity, and perturbation tests proving
+future rows and same-day final fields cannot change selection. The research
+intraday universe is therefore defined by measured bar density, not by the
+5,000-member collection cohort. Shrinking that cohort (roughly to the top
+1,000 by the measurements above) or adopting Tiingo's consolidated intraday
+endpoint is deferred until the owner has seen two clean post-fix cycles; it
+changes the live program definition and is the owner's call. The 2026-09-02
+cycle's exhausted targets are cycle-scoped; the next cycle re-plans them with
+the coalesced segments.
+
+**Reopen if:** M3 publishes and the owner reopens collector scope; a measured
+post-fix cycle still leaves legacy members behind; or the density screen
+excludes so much of the liquid universe that the consolidated endpoint
+becomes necessary.
+
 ## D-036: Validated recovery strategies and read-only opportunity scanning (2026-09-04, status: accepted)
 
 **Decision:** Promote execution-aware strategy validation (M5) and a bounded

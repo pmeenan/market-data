@@ -10,6 +10,7 @@ import pytest
 import marketdata.identity_bootstrap as identity_bootstrap_mod
 from marketdata.identity_bootstrap import (
     _instrument_id,
+    _validate_metadata,
     bootstrap_eod_identities,
     bootstrap_intraday_identities,
     supported_us_stock_etf_records,
@@ -678,3 +679,53 @@ def test_intraday_bootstrap_quota_stop_resumes_after_validated_prefix(tmp_path):
         assert len(stopped.validated) == 1
         assert stopped.probe_attempts == 1
         assert len(client.calls) == 1
+
+
+def test_bootstrap_upgrades_covered_archive_bound_singleton_in_place(tmp_path):
+    """A reused-then-singleton active listing keeps its bars and is extended."""
+    old_listing = _archive("REUSE", start="2010-01-01", end="2015-01-01")
+    listing = _archive("REUSE", start="2020-01-02", end="2026-09-01")
+    client = FakeIdentityClient([old_listing, listing], {})
+    with MetaStore(tmp_path / "meta.db") as meta:
+        first = bootstrap_eod_identities(client, meta, ["REUSE"])
+        assert first.registered_episodes == 2
+        instrument_id = _instrument_id(listing)
+        meta.set_coverage(instrument_id, "eod", date(2020, 1, 2), date(2026, 9, 1))
+
+        # Tiingo's next archive drops the stale record: the active listing is a
+        # singleton that now needs metadata validation.
+        extended = _archive("REUSE", start="2020-01-02", end="2026-09-02")
+        client.archive = [extended]
+        client.metadata = {"REUSE": _metadata(extended, endDate="2026-09-01")}
+        second = bootstrap_eod_identities(client, meta, ["REUSE"])
+
+        assert second.failed == {}
+        assert second.validated == ["REUSE"]
+        assert client.metadata_calls == ["REUSE"]
+        assert meta.get_coverage(instrument_id, "eod") == (
+            date(2020, 1, 2),
+            date(2026, 9, 1),
+        )
+        assert [
+            (row["start_date"], row["end_date"])
+            for row in meta.instrument_alias_records(instrument_id)
+        ] == [("2020-01-02", "2026-09-02")]
+        report = meta.resolve_alias_range("REUSE", date(2026, 9, 2), date(2026, 9, 2))
+        assert report.resolved and report.segments[0].instrument_id == instrument_id
+        episode = next(
+            row
+            for row in meta.identity_episodes()
+            if row["instrument_id"] == instrument_id
+        )
+        assert episode["confidence"] == "metadata_validated"
+
+
+def test_metadata_end_date_may_lag_but_never_lead_the_archive():
+    archive = _archive("SAFE", end="2026-09-02")
+    _validate_metadata("SAFE", archive, _metadata(archive, endDate="2026-09-01"))
+    _validate_metadata("SAFE", archive, _metadata(archive, endDate="2026-08-26"))
+    for bad in ("2026-09-03", "2026-08-25", None):
+        with pytest.raises(ValueError, match="endDate"):
+            _validate_metadata("SAFE", archive, _metadata(archive, endDate=bad))
+    with pytest.raises(ValueError, match="startDate"):
+        _validate_metadata("SAFE", archive, _metadata(archive, startDate="2019-01-01"))

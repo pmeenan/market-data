@@ -1659,3 +1659,58 @@ def test_empty_full_refresh_is_a_failure(tmp_path):
     assert "AAPL" in result.failed and not result.ok
     # coverage untouched: the refresh will be retried next run
     assert meta.get_coverage("AAPL", "eod")[1] == last
+
+
+def test_adjacent_validated_identifier_rows_plan_as_one_ready_segment(tmp_path):
+    """Exact-frequency probes add abutting identifier rows; they are one span."""
+    bars, meta = stores(tmp_path)
+    meta.upsert_instrument("stable-id")
+    meta.add_instrument_alias("stable-id", "SAFE", date(2016, 12, 12), date(2026, 9, 2))
+    for start, end in (
+        (date(2016, 12, 12), date(2026, 8, 28)),
+        # A Friday close followed by a Monday start is also one span.
+        (date(2026, 8, 31), date(2026, 9, 2)),
+    ):
+        meta.add_vendor_identifier(
+            "stable-id",
+            "intraday_1hour",
+            "ticker",
+            "SAFE",
+            start,
+            end,
+            validation_state="validated",
+        )
+
+    planned = plan_validated_segments(
+        meta, ["SAFE"], "intraday_1hour", date(2026, 8, 20), date(2026, 9, 2)
+    )
+
+    assert [(s.status, s.start, s.end) for s in planned] == [
+        ("ready", date(2026, 8, 20), date(2026, 9, 2))
+    ]
+    assert len(planned[0].vendor_identifier_ids) == 2
+
+    # A real evidence gap between the rows keeps them separate.
+    meta.upsert_instrument("gap-id")
+    meta.add_instrument_alias("gap-id", "GAPY", date(2016, 12, 12), date(2026, 9, 2))
+    for start, end in (
+        (date(2016, 12, 12), date(2026, 8, 25)),
+        (date(2026, 8, 28), date(2026, 9, 2)),
+    ):
+        meta.add_vendor_identifier(
+            "gap-id",
+            "intraday_1hour",
+            "ticker",
+            "GAPY",
+            start,
+            end,
+            validation_state="validated",
+        )
+    gapped = plan_validated_segments(
+        meta, ["GAPY"], "intraday_1hour", date(2026, 8, 20), date(2026, 9, 2)
+    )
+    assert [(s.status, s.start, s.end) for s in gapped] == [
+        ("ready", date(2026, 8, 20), date(2026, 8, 25)),
+        ("identifier_zero_matches", date(2026, 8, 26), date(2026, 8, 27)),
+        ("ready", date(2026, 8, 28), date(2026, 9, 2)),
+    ]

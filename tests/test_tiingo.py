@@ -125,14 +125,16 @@ def test_intraday_request_parses_csv_and_normalizes():
 
 @responses.activate
 def test_metadata_remains_json_and_is_metered():
-    url = f"{BASE_URL}/tiingo/daily/aapl"
-    body = b'{"ticker": "AAPL", "permaTicker": "US0000000001"}'
+    # The metadata route is case-sensitive on Tiingo's side: ``meta`` (the
+    # lowercase ticker META) returns 404 while ``META`` resolves (RE-013).
+    url = f"{BASE_URL}/tiingo/daily/META"
+    body = b'{"ticker": "META", "permaTicker": "US0000000001"}'
     responses.add(responses.GET, url, body=body, status=200)
 
     client = TiingoClient("test-token", min_request_interval=0.0)
-    metadata = client.ticker_metadata("AAPL")
+    metadata = client.ticker_metadata(" meta ")
 
-    assert metadata["ticker"] == "AAPL"
+    assert metadata["ticker"] == "META"
     assert client.request_count == 1
     assert client.response_bytes == len(body)
 

@@ -22,6 +22,30 @@ Newest first. RE-numbers are never reused.
 
 ---
 
+## RE-013: Tiingo's EOD metadata route is case-sensitive for the ticker META  (2026-09-05, status: worked-around)
+
+**Environment:** Tiingo REST API, authenticated, measured 2026-09-05.
+
+**Repro/measurement:** `GET /tiingo/daily/meta` returns HTTP 404 (empty body);
+`GET /tiingo/daily/META` returns 200 with the Meta Platforms listing. The bar
+routes accept both cases: `/tiingo/daily/meta/prices`, `/tiingo/daily/META/prices`,
+`/iex/meta/prices`, and `/iex/META/prices` all return 200.
+
+**Observed:** The lowercase path collides with another Tiingo route named
+`meta`, so the client's habit of lowercasing tickers made the identity
+bootstrap fail META with "Not found: /tiingo/daily/meta" on every run. META,
+one of the ten most liquid US listings, had no instrument, no bars, and was
+excluded from every ongoing EOD cycle as an unresolved alias.
+
+**Expected:** Ticker paths are case-insensitive, or the documentation states
+the reserved segment.
+
+**Impact:** `TiingoClient.ticker_metadata` uppercases the ticker (D-037).
+Other reserved words may exist; a 404 from the metadata route for an active
+listing should be checked in uppercase before it is treated as vendor absence.
+
+---
+
 ## RE-012: A ready identity prefix can masquerade as current progress  (2026-09-03, status: worked-around)
 
 **Environment:** Schema-v8 ongoing EOD scheduler, seven-day correction overlap,

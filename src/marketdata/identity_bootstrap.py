@@ -44,6 +44,10 @@ from marketdata.tiingo import TiingoClient, TiingoError, TiingoNotFoundError
 
 US_EXCHANGES = frozenset({"NYSE", "NASDAQ", "NYSE ARCA", "AMEX", "BATS"})
 US_ASSET_TYPES = frozenset({"Stock", "ETF"})
+# The authenticated metadata endpoint can publish an active listing's endDate a
+# little behind the supported-tickers archive; the immutable anchor fields must
+# still agree exactly (D-037).
+METADATA_END_DATE_LAG_DAYS = 7
 
 
 def supported_us_stock_etf_records(
@@ -343,7 +347,14 @@ def bootstrap_eod_identities(
                     if instrument_id in superseded:
                         result.skipped.append(ticker)
                         continue
-                    if requires_metadata_upgrade:
+                    if requires_metadata_upgrade and not meta.instrument_has_coverage(
+                        instrument_id
+                    ):
+                        # An uncovered archive-bound singleton is rebuilt from
+                        # scratch. A covered one keeps its bars and identity
+                        # rows and is upgraded in place below: removing it was
+                        # a hard error that excluded every reused-then-singleton
+                        # active listing from each ongoing cycle (D-037).
                         meta.remove_uncovered_archive_episode(instrument_id)
                         identity_changed = True
                     metadata = metered.ticker_metadata(ticker)
@@ -1049,19 +1060,34 @@ def _register_episode(
 def _validate_metadata(
     ticker: str, archive: Mapping[str, str], metadata: Mapping[str, Any]
 ) -> None:
+    """Require the immutable anchor to agree; tolerate a lagging end date.
+
+    ``ticker``, ``exchangeCode``, and ``startDate`` identify the listing and
+    must match exactly. ``endDate`` is the one mutable field: the supported
+    list and the metadata endpoint are published on different schedules, so an
+    active listing may report an end date up to ``METADATA_END_DATE_LAG_DAYS``
+    before the archive's. It may never be later than the archive (D-037).
+    """
     expected = {
         "ticker": ticker,
         "exchangeCode": archive.get("exchange"),
         "startDate": archive.get("startDate"),
-        "endDate": archive.get("endDate"),
     }
     actual = {
         "ticker": str(metadata.get("ticker") or "").upper(),
         "exchangeCode": metadata.get("exchangeCode"),
         "startDate": metadata.get("startDate"),
-        "endDate": metadata.get("endDate"),
     }
     mismatches = [key for key in expected if actual[key] != expected[key]]
+    archive_end = _required_date(archive, "endDate")
+    try:
+        metadata_end = _required_date(metadata, "endDate")
+    except ValueError:
+        mismatches.append("endDate")
+    else:
+        lag = (archive_end - metadata_end).days
+        if lag < 0 or lag > METADATA_END_DATE_LAG_DAYS:
+            mismatches.append("endDate")
     if mismatches:
         fields = ", ".join(mismatches)
         raise ValueError(f"Tiingo EOD metadata disagrees with archive fields: {fields}")

@@ -501,6 +501,13 @@ datasets; callbacks must enforce causality and pass perturbation tests until
 that feature boundary lands. EOD adjusted and intraday raw prices must never
 be mixed in a return. Bar-close availability is at the interval end.
 
+`marketdata.features` is the shared as-of feature boundary (D-036/D-037):
+it registers prior-window EOD features, XNYS session opens, and IEX hourly
+density views on any DuckDB connection exposing the canonical views, so the
+event runner's explicit-file inputs and a future scanner's nightly snapshot
+evaluate identical SQL. Every window ends at the prior completed session; the
+decision session contributes only its explicitly timestamped open.
+
 A study is a focused function/script with typed parameters and a versioned
 output schema, not a subclass hierarchy. CLI commands, scripts, and notebooks
 all enter through the same library-level runner; no supported entry point
@@ -584,6 +591,12 @@ defer its two retrying targets, and continue healthy intraday work while they
 receive a fresh bounded retry window. On the owner's personal server, the
 systemd result plus inspectable status is the required visible failure signal;
 an external notification channel may be added later but is not an M2 gate.
+`market-data doctor` (D-037) condenses that state into bounded findings:
+request rate against Tiingo's hourly/daily limits, current targets retrying
+without a successful depth, frozen-target exclusions, cohort coverage freshness
+by liquidity rank, and active supported listings that resolve to no
+instrument. It exits 1 on an error-level finding and writes an optional JSON
+report; it never mutates the warehouse.
 
 Backups treat `data/` as one unit. Parquet is canonical for bars and result
 observations, while `meta.db` is required for identity evidence, universe

@@ -467,12 +467,30 @@ M1 closed on
 permitted only for validated segments; unresolved work remains fail-closed and
 visible. M3's immutable result catalog, input manifests/fingerprints, strict
 compatible-result loading, explicit interrupted-run reconciliation, and
-local-window vectorized event runner/CLI boundary are implemented; the coarse
-gap-recovery study is next.
+local-window vectorized event runner/CLI boundary, the shared as-of feature
+path, and the coarse `gap_recovery` study are implemented (D-037 freezes the
+ingestion substrate to bug fixes until the owner reviews its first result).
 
 D-036 adds **M5 (execution-aware validation)** and **M6 (read-only opportunity
-scanning)** as pending milestones. Neither simulator nor scanner is implemented;
-the first study remains the next research deliverable.
+scanning)** as pending milestones. Neither simulator nor scanner is implemented.
+
+Health checks read durable state only and exit 1 on an error-level finding
+(request rate against Tiingo's limits, current targets retrying without
+progress, frozen-target exclusions, cohort coverage freshness by rank, and
+active listings that resolve to no instrument):
+
+```bash
+market-data doctor --summary-json data/operations/health.json
+```
+
+The first study is a registered built-in. It publishes an immutable cataloged
+run with frozen chronological periods; `notebooks/gap_recovery.ipynb` loads
+the same artifacts:
+
+```bash
+market-data research-run gap_recovery
+market-data research-run gap_recovery --parameters-json '{"gap_threshold": -0.05}'
+```
 
 ## Start here
 

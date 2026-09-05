@@ -408,21 +408,38 @@ Scope:
   outcome is classified mutually exclusively as evaluable or missing-outcome.
   Registered focused studies share the `research-run` CLI boundary, which
   labels its output as event evidence without portfolio/order semantics.
-- [ ] Apply [research-protocol.md](research-protocol.md) to the first study:
+- [x] Apply [research-protocol.md](research-protocol.md) to the first study:
   consistent price bases and checkpoint availability, a shared as-of feature
   path, future-row/same-day-final-field perturbation tests, and split/dividend
   boundary fixtures. Preserve the distinction between descriptive returns and
   executable entry prices; the current callback interface is not an as-of sandbox.
-- [ ] Freeze chronological research/validation/test periods and trial tracking
+  Completed 2026-09-05 (D-037): `marketdata.features` registers prior-window
+  EOD features, session opens, and IEX hourly density on any connection that
+  exposes the canonical views; the study's tests prove tripled future/same-day
+  final fields leave selection and every decision feature unchanged, a 2:1
+  split day is not a gap, and a dividend day is retained but flagged.
+- [x] Freeze chronological research/validation/test periods and trial tracking
   before parameter search. Publish the cohort coverage/exclusion funnel and
   missing-outcome sensitivity, with liquidity/year/stock-ETF/delisting slices.
-- [ ] Implement the coarse gap-recovery study using adjusted EOD prior close/open
+  Completed 2026-09-05 for periods (development 2017–2022, validation
+  2023–2024, test 2025+ frozen in the run parameters; metrics never summarize
+  test events), the runner's `event_audit.*` funnel, per-year counts, and a
+  missing-as-miss hit rate. Every run is a cataloged trial. Liquidity/year
+  slices live in the notebook; stock/ETF and active/delisted slices remain
+  for M4 (they need alias metadata joined at analysis time).
+- [x] Implement the coarse gap-recovery study using adjusted EOD prior close/open
   inputs and Tiingo's direct clock-hour checkpoints from 10:00 onward. Include
   stored SPY benchmark-relative evaluation and label the absent 09:30–09:59
   interval explicitly rather than inferring it.
-- [ ] Provide one reproducible example notebook that calls the same library runner
+  Completed 2026-09-05: `market-data research-run gap_recovery` publishes
+  seven checkpoints per event (10:00–15:00 bar closes plus the session close),
+  raw same-session returns, benchmark excess returns, favorable/adverse
+  excursions, a raw-basis recovered fraction (null on corporate-action days),
+  and the opening-interval note in both parameters and observations.
+- [x] Provide one reproducible example notebook that calls the same library runner
   and loads the same published artifacts; notebooks do not contain a second
-  execution or publication path.
+  execution or publication path. Completed 2026-09-05:
+  `notebooks/gap_recovery.ipynb`.
 - [x] Report stale `running` rows and orphaned result artifacts without selecting
   or deleting them automatically. Completed 2026-08-29: `research-reconcile`
   defaults to a shared-lock dry run; `--apply` is the explicit recovery boundary
@@ -430,19 +447,28 @@ Scope:
 
 Exit criteria:
 
-- [ ] One command runs the study on a representative stored cohort and publishes
+- [x] One command runs the study on a representative stored cohort and publishes
   a `succeeded` catalog row, manifest, observations, parameters, and summary
-  metrics that are queryable together through DuckDB.
+  metrics that are queryable together through DuckDB. First real run
+  2026-09-05 (`c76b25cf8d574f36aabef2866cbc02cc`, 41 s): 79,149 candidates,
+  72,812 eligible (6,337 lookback-incomplete), 67,739 selected after the
+  density screen, 688 with a missing checkpoint; 474,173 observations. The
+  descriptive result is weak: in the validation period (2023–2024, 9,701
+  events with gap ≤ −3% and ADV ≥ $50M) the median return from the raw open
+  is +0.15% at the 10:00 bar close and +0.21% at the session close, the
+  ≥1% hit rate is 36–41% at every checkpoint, the mean excess over SPY is
+  +0.1 to +0.2%, and the mean raw-basis recovered gap fraction is 0.03–0.06.
+  Test-period events (2025+) are observed but not summarized.
 - [ ] Tests inject failures before and after each publication boundary and prove
   that only complete compatible runs load, successful runs are immutable,
   retries receive new ids, and input-fingerprint checks detect changed source
   files.
-- [ ] Event counts and returns match a small hand-calculated fixture, candidate
+- [x] Event counts and returns match a small hand-calculated fixture, candidate
   selection is demonstrably independent of universe membership and future-bar
   availability, remote history gaps do not exclude a locally complete event,
   missing outcomes remain auditable, and quality failures block publication as
-  declared.
-- [ ] The study's protocol parameters, trial lineage, coverage funnel, and
+  declared. (`tests/test_gap_recovery.py` and `tests/test_event_study.py`.)
+- [x] The study's protocol parameters, trial lineage, coverage funnel, and
   causality/price-basis checks are persisted and exercised. An inconclusive or
   negative result is a valid completed study; no profitability claim is required.
 - [ ] The CLI output and notebook state the direct-hourly and IEX-volume limits;
@@ -501,6 +527,11 @@ Scope:
   designated exit 3 is accepted by systemd as partial success.
 - [ ] The production ongoing program was initialized and its replacement timer
   enabled on 2026-09-02; the interim latest-universe-only EOD timer is disabled.
+  The 2026-09-05 review found the first cycle's intraday sweeps could not
+  advance any legacy member (adjacent identifier rows split the planner unit)
+  and 811 reused-then-singleton listings plus META were excluded from EOD;
+  all three are fixed under D-037 and `market-data doctor` now surfaces them.
+  Measure the first two post-fix cycles before checking this item.
   The first live cycle completed 13,154 EOD targets, retained 817 explicit
   exclusions, and then stopped at the morning boundary because DOV and SORA
   each repeated a ready identity prefix 87 times. D-034's correction is

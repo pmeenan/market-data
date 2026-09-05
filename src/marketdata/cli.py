@@ -32,6 +32,7 @@ from marketdata.calendar import (
     overnight_collection_window,
 )
 from marketdata.config import Config, load_config
+from marketdata.doctor import check_health
 from marketdata.identity import DATASET_KEYS
 from marketdata.identity_bootstrap import (
     IdentityBootstrapResult,
@@ -87,6 +88,9 @@ from marketdata.scheduler import (
 )
 from marketdata.store import BarStore, MetaStore
 from marketdata.store.bars import INTRADAY_FREQS
+from marketdata.studies import (
+    run_gap_recovery_study,  # noqa: F401  (registers built-ins)
+)
 from marketdata.tiingo import TiingoClient, TiingoError
 
 _DATA_OPERATION_ERRORS = (
@@ -1646,6 +1650,11 @@ def research_run_cmd(config: Config, study_name: str, parameters_json: str) -> N
     )
     click.echo(f"Input fingerprint: {published.input_fingerprint}")
     click.echo("Semantics: event observations only; no portfolio or order simulation")
+    with MetaStore(config.meta_path) as meta:
+        recorded = meta.research_parameters(published.run_id)
+    note = recorded.get("opening_interval_note")
+    if note:
+        click.echo(f"Limits: {note}; intraday volume is IEX-only, not composite")
 
 
 # ---- inspection ----------------------------------------------------------
@@ -1858,6 +1867,55 @@ def status(config: Config) -> None:
             f"{historical_headroom:,} bytes available after the next "
             f"{DEFAULT_BUDGET_POLICY.response_reservation_bytes:,}-byte reservation"
         )
+
+
+@main.command("doctor")
+@click.option(
+    "--summary-json",
+    type=click.Path(),
+    default=None,
+    help="Write the structured health report to this file",
+)
+@click.pass_obj
+def doctor_cmd(config: Config, summary_json: str | None) -> None:
+    """Bounded health checks: request rate, collector progress, cohort freshness.
+
+    Exits 1 when any check reports an error so a timer or shell alias can gate
+    on it. Reads durable state only and never mutates the warehouse.
+    """
+    _require_initialized_warehouse(config)
+    try:
+        report = check_health(config)
+    except _DATA_OPERATION_ERRORS as exc:
+        raise click.ClickException(str(exc)) from exc
+    if summary_json:
+        try:
+            _write_json_atomic(report.to_dict(), Path(summary_json))
+        except (OSError, TypeError, ValueError) as exc:
+            raise click.ClickException(
+                f"could not write health report {summary_json}: {exc}"
+            ) from exc
+    target = report.target_session.isoformat() if report.target_session else "n/a"
+    click.echo(f"Warehouse health as of {report.generated_at:%Y-%m-%d %H:%M} UTC")
+    click.echo(f"Target session: {target}")
+    for finding in report.findings:
+        click.echo(f"[{finding.severity.upper():7}] {finding.check}: {finding.message}")
+        sample = finding.details.get("sample")
+        if sample and finding.severity != "ok":
+            rendered = ", ".join(
+                f"#{item['rank']} {item['ticker']}"
+                if isinstance(item, dict)
+                else str(item)
+                for item in sample
+            )
+            click.echo(f"          sample: {rendered}")
+    counts = report.counts()
+    click.echo(
+        f"Result: {counts['error']} error(s), {counts['warning']} warning(s), "
+        f"{counts['ok']} ok"
+    )
+    if not report.ok:
+        sys.exit(1)
 
 
 @main.command()

@@ -307,7 +307,74 @@ def _plan_identifier_segments(
                 detail=detail,
             )
         )
-    return planned
+    return _coalesce_ready_segments(planned)
+
+
+def _coalesce_ready_segments(
+    planned: Sequence[ValidatedRequestSegment],
+) -> list[ValidatedRequestSegment]:
+    """Merge abutting ``ready`` segments that share one validated identifier.
+
+    Exact-frequency probes register a new ``vendor_identifiers`` row for each
+    validated bridge, so one instrument accumulates several adjacent validated
+    envelopes for the same bare ticker. They are one continuous authorization:
+    splitting a request at those boundaries made the current-cycle planner
+    fetch only the first, already-covered slice and never advance (D-037).
+    Only an empty or weekend-only gap (a ``non_session_gap`` segment) is
+    bridged; any other status or gap keeps the segments separate.
+    """
+    merged: list[ValidatedRequestSegment] = []
+    pending_gap: ValidatedRequestSegment | None = None
+    for segment in planned:
+        previous = merged[-1] if merged else None
+        if (
+            previous is not None
+            and previous.status == "ready"
+            and segment.status == "non_session_gap"
+            and pending_gap is None
+            and previous.end + timedelta(days=1) == segment.start
+        ):
+            pending_gap = segment
+            continue
+        if (
+            previous is not None
+            and previous.status == "ready"
+            and segment.status == "ready"
+            and previous.instrument_id == segment.instrument_id
+            and previous.identifier_type == segment.identifier_type
+            and previous.identifier_value == segment.identifier_value
+            and (
+                previous.end + timedelta(days=1) == segment.start
+                or (
+                    pending_gap is not None
+                    and pending_gap.end + timedelta(days=1) == segment.start
+                )
+            )
+        ):
+            merged[-1] = replace(
+                previous,
+                end=segment.end,
+                alias_ids=tuple(
+                    dict.fromkeys((*previous.alias_ids, *segment.alias_ids))
+                ),
+                vendor_identifier_ids=tuple(
+                    dict.fromkeys(
+                        (
+                            *previous.vendor_identifier_ids,
+                            *segment.vendor_identifier_ids,
+                        )
+                    )
+                ),
+            )
+            pending_gap = None
+            continue
+        if pending_gap is not None:
+            merged.append(pending_gap)
+            pending_gap = None
+        merged.append(segment)
+    if pending_gap is not None:
+        merged.append(pending_gap)
+    return merged
 
 
 class _ValidatedSegmentsClient:
