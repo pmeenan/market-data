@@ -1,5 +1,8 @@
 # market-data
 
+**Inactive as of 2026-09-07.** The owner ended the project and canceled Tiingo.
+Scheduled collection is disabled; code and existing data are retained.
+
 A local market data warehouse and strategy-testing toolkit — a personal
 research tool for testing trading hypotheses against a dataset you own and
 control. Almost all code is written by AI agents working from the project

@@ -1,5 +1,10 @@
 # Plan
 
+**Project shut down — 2026-09-07.** The owner chose buy-and-hold ETFs and
+canceled Tiingo. All five market-data user systemd timers are disabled and
+inactive; their services are stopped. Unfinished work is parked. The milestone
+notes below preserve the implementation history, not an active work queue.
+
 **This is a living document.** Milestones will be re-scoped, re-ordered, split,
 or added as planning conversations and findings come in. That churn is
 expected; what is *not* allowed is silent change. Scope changes get a
@@ -204,7 +209,7 @@ Exit criteria:
 - [x] `make check` passes and the migration/operator report documents what
       moved, what remains quarantined, and how to retry safely.
 
-## M2 — Trustworthy scheduled ingestion  `in progress`
+## M2 — Trustworthy scheduled ingestion  `parked`
 
 Goal: make current collection and the long-running historical program safe to
 operate unattended within Tiingo's limits, and make data fitness visible before
@@ -369,7 +374,7 @@ Exit criteria:
   exclusions and have been adopted by D-027; the replacement program's offline
   restart/scope/ordering fixtures pass in the 229-test full `make check`.
 
-## M3 — First persisted study, end to end  `in progress`
+## M3 — First persisted study, end to end  `parked`
 
 Goal: deliver the shortest honest research path while the metered backfill
 continues: the gap-recovery study from stored EOD/direct-hourly data through
@@ -469,7 +474,7 @@ Exit criteria:
 - [ ] The CLI output and notebook state the direct-hourly and IEX-volume limits;
   benchmark conventions match the event observations; `make check` passes.
 
-## M4 — Full opening-window study and historical program  `in progress`
+## M4 — Full opening-window study and historical program  `parked`
 
 Goal: turn the completed historical archive into the intended durable ongoing
 collection, extend the coarse result into the complete five-minute,
@@ -612,7 +617,7 @@ Exit criteria:
 - [ ] The vision's end-to-end study and interactive-query success criteria are
   demonstrated on the target server, and `make check` passes.
 
-## M5 — Execution-aware validation  `pending`
+## M5 — Execution-aware validation  `parked`
 
 Goal: determine whether a discovered recovery pattern survives realistic fills,
 unseen periods, and the owner's fee-free 401(k) capital constraints. D-036 and
@@ -643,7 +648,7 @@ Scope and exit criteria:
 - [ ] Preserve promoted strategy code and decision features; snapshot required
   inputs for exact reruns across warehouse revisions. `make check` passes.
 
-## M6 — Read-only opportunity scanning and shadow validation  `pending`
+## M6 — Read-only opportunity scanning and shadow validation  `parked`
 
 Goal: apply frozen strategies using the same decision-time feature/signal code
 as historical replay, then measure actual signal arrival and coverage. This

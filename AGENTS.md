@@ -132,26 +132,10 @@ build → commit loop, on-demand reviews, and the human commit gate.
 
 ## Current status
 
-**M3 (first persisted study)** is the active milestone; **M2** and **M4**
-remain in progress but, per D-037, the ingestion/identity/scheduling
-substrate is frozen to bug fixes until M3 publishes and the owner reviews it.
-The historical archive is complete with accepted exclusions (EOD from 2006
-for 22,947 instruments; seed hourly and five-minute from 2016-12-12). The
-D-030 overnight collector and its timer are live; its first 2026-09-02 cycle
-exposed three defects fixed on 2026-09-05 (D-037): adjacent identifier rows
-split current planner units so no legacy intraday member advanced,
-reused-then-singleton listings were excluded from EOD, and META's metadata
-route needed uppercase. `market-data doctor` surfaces those conditions; the
-first two post-fix cycles still need to be measured. Research: the D-016
-catalog, D-015/D-026 event runner, the shared as-of feature path
-(`marketdata.features`), the coarse `gap_recovery` study, and the full
-five-minute `gap_recovery_opening` study (session-relative checkpoints from
-09:35, fidelity measurements, stock/ETF and regime slices, and a
-coarse-versus-full comparison), the multi-session `gap_recovery_multiday`
-study, and the two-pass `research-rank` propensity backtest (select on one
-window, score the frozen list on the next) are implemented with frozen
-periods and causality tests; M5 execution-aware validation and M6 read-only
-scanning are next. Sector and earnings sources are open proposals. M1 closed 2026-08-27. See
-[docs/plan.md](docs/plan.md).
-Keep this paragraph short and current when plan.md milestone status changes
-(rule 4).
+**Project shut down on 2026-09-07** at the owner's request in favor of
+buy-and-hold ETFs. The owner canceled the Tiingo subscription. All five
+market-data user systemd timers are disabled and inactive, and their services
+are stopped. Existing code, warehouse data, and private research are retained.
+Unfinished milestones are parked; see [docs/plan.md](docs/plan.md) for the
+historical implementation record. Do not resume collection without an explicit
+owner request.

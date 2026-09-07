@@ -22,6 +22,44 @@ Newest first. RE-numbers are never reused.
 
 ---
 
+## RE-015: A long zero prefix can silently truncate later fractional values  (2026-09-07, status: worked-around)
+
+**Environment/repro:** The installed Polars version, constructing a frame from
+Python dictionaries. `pl.DataFrame([{"amount": 0}] * 101 + [{"amount": 1.25}])`
+infers `Int64` from its initial rows and stores the final amount as `1`.
+
+**Impact/workaround:** Financial fields that start at zero can lose cents in
+persisted output even when the underlying calculation used floating point.
+Declare `Float64` schema overrides for money and ratio columns instead of
+relying on initial-value inference. Exercise a fractional value after the
+inference window and reconcile the persisted ledger. Private research outputs
+were republished with explicit schemas; portfolio value paths were unchanged.
+
+## RE-014: EOD bars do not establish merger settlement or last tradable dates  (2026-09-07, status: open)
+
+**Environment/measurement:** Local Tiingo EOD snapshot through 2026-09-02,
+queried by stable instrument id during private portfolio research.
+
+**Observed:** Acquired instruments retain histories but lack the cash or
+successor-share entitlements needed to finish a holdings ledger. Some histories
+also contain bars after the actual trading suspension: MAXR ends 2023-05-08
+although the acquisition closed before the 2023-05-03 open; NUAN includes
+2022-03-04 although its final trading session was 2022-03-03. CHNG's stored
+cash-dividend date is 2022-09-28, while its completion filing assigns the
+special dividend to holders immediately before the 2022-10-03 merger.
+
+**Impact/workaround:** A finite opening price alone does not prove a tradable
+session. Leaving acquired shares permanently marked at their last close can
+trap capital and distort every later portfolio result; inventing last-close
+liquidation is also invalid. Private research records a separate source decision
+and verified entitlement overlay, with explicit payment/transfer assumptions.
+Other unresolved holdings remain unscorable. Canonical bars and identities are
+unchanged; a general corporate-action accounting source is still needed.
+
+**Primary evidence:** [MAXR completion and consideration](https://infomemo.theocc.com/infomemos?number=52356),
+[NUAN halt and consideration](https://nasdaqtrader.com/TraderNews.aspx?id=ECA2022-42),
+[CHNG completion and special dividend](https://www.sec.gov/Archives/edgar/data/1756497/000119312522256246/d403452d8k.htm).
+
 ## RE-013: Tiingo's EOD metadata route is case-sensitive for the ticker META  (2026-09-05, status: worked-around)
 
 **Environment:** Tiingo REST API, authenticated, measured 2026-09-05.

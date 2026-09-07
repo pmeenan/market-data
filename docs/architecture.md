@@ -584,10 +584,13 @@ per-symbol exclusions, and therefore retries ordinary exit-1 CLI/crash failures
 as well as exit-2 coordinator/configuration/lock/status failures. A one-second
 idle delay prevents zero-request state transitions from spinning. Quota stops
 and the 08:00 New York deadline checkpoint cleanly. The production program was
-initialized and the replacement timer enabled on 2026-09-02; the interim
+initialized and the replacement timer enabled on 2026-09-02. On 2026-09-07,
+the owner shut down the project after canceling Tiingo: all five market-data
+user timers were disabled and stopped, along with their services. The following
+cycle notes describe the pre-shutdown state; the interim
 latest-universe EOD timer is disabled. Its first overnight cycle exposed
 D-034's bounded-retry defect and stopped at the morning checkpoint before
-cohort selection. The corrected scheduler will resume that immutable cycle,
+cohort selection. Before shutdown, the corrected scheduler was intended to resume that immutable cycle,
 defer its two retrying targets, and continue healthy intraday work while they
 receive a fresh bounded retry window. On the owner's personal server, the
 systemd result plus inspectable status is the required visible failure signal;
